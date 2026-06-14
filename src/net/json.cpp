@@ -43,4 +43,103 @@ core::String json_bool_field(const core::String& key, const bool value)
 	return "\"" + key + "\":" + (value ? "true" : "false");
 }
 
+core::String extract_json_string_field(
+	const core::String& json,
+	const core::String& field_name,
+	const size_t search_from)
+{
+	const core::String needle = "\"" + field_name + "\":";
+	const size_t field_index = json.find(needle, search_from);
+	if (field_index == core::String::npos)
+	{
+		return {};
+	}
+
+	size_t cursor = field_index + needle.size();
+	while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'))
+	{
+		++cursor;
+	}
+
+	if (cursor >= json.size() || json[cursor] != '"')
+	{
+		return {};
+	}
+
+	++cursor;
+	core::String value;
+	while (cursor < json.size())
+	{
+		const char character = json[cursor++];
+		if (character == '\\' && cursor < json.size())
+		{
+			const char escaped = json[cursor++];
+			switch (escaped)
+			{
+			case '"':
+				value += '"';
+				break;
+			case '\\':
+				value += '\\';
+				break;
+			case 'n':
+				value += '\n';
+				break;
+			case 'r':
+				value += '\r';
+				break;
+			case 't':
+				value += '\t';
+				break;
+			default:
+				value += escaped;
+				break;
+			}
+			continue;
+		}
+
+		if (character == '"')
+		{
+			break;
+		}
+
+		value += character;
+	}
+
+	return value;
+}
+
+bool extract_json_bool_field(
+	const core::String& json,
+	const core::String& field_name,
+	bool& out_value,
+	const size_t search_from)
+{
+	const core::String needle = "\"" + field_name + "\":";
+	const size_t field_index = json.find(needle, search_from);
+	if (field_index == core::String::npos)
+	{
+		return false;
+	}
+
+	size_t cursor = field_index + needle.size();
+	while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'))
+	{
+		++cursor;
+	}
+
+	if (json.compare(cursor, 4, "true") == 0)
+	{
+		out_value = true;
+		return true;
+	}
+	if (json.compare(cursor, 5, "false") == 0)
+	{
+		out_value = false;
+		return true;
+	}
+
+	return false;
+}
+
 } // namespace metaagent::net

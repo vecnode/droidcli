@@ -1,5 +1,7 @@
 #include "tools/mini_http_server.hpp"
 
+#include "tools/sync_http_client.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -114,6 +116,31 @@ bool parse_request_line(const core::String& line, net::HttpRequest& out_request)
 
 } // namespace
 
+void MiniHttpServer::configure_language_ai(const MiniHttpServerOptions& options)
+{
+	language_ai_transport_.post_json = [](
+		const core::String& url,
+		const core::String& body,
+		int32_t& status_code_out,
+		core::String& response_body_out)
+	{
+		return sync_http_post_json(url, body, status_code_out, response_body_out);
+	};
+
+	if (!options.enable_language_ai)
+	{
+		language_ai_.set_runtime_enabled(false);
+		return;
+	}
+
+	language_ai_.set_runtime_enabled(true);
+	language_ai_.set_ollama_config(options.ollama_config);
+	if (!options.system_prompt.empty())
+	{
+		language_ai_.set_system_prompt(options.system_prompt);
+	}
+}
+
 bool MiniHttpServer::read_request(const int client_socket, net::HttpRequest& out_request) const
 {
 	core::String buffer;
@@ -216,6 +243,7 @@ bool MiniHttpServer::start(const MiniHttpServerOptions& options)
 	}
 
 	options_ = options;
+	configure_language_ai(options);
 	socket_handle_ = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
 	if (socket_handle_ == static_cast<int>(kInvalidSocket))
 	{
@@ -297,6 +325,11 @@ bool MiniHttpServer::poll_once(const int32_t timeout_ms)
 	{
 		net::HandlerContext context;
 		context.session = options_.session;
+		if (options_.enable_language_ai)
+		{
+			context.language_ai = &language_ai_;
+			context.language_ai_transport = &language_ai_transport_;
+		}
 		const net::RouteDispatchResult dispatch = routes_.dispatch(request, context);
 		net::HttpResponse response;
 		if (dispatch.handled)

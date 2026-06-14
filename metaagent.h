@@ -45,6 +45,9 @@
 #include "particle/state_effects.hpp"
 
 #include "runtime/host_interfaces.hpp"
+#include "ai/language_runtime.hpp"
+#include "ai/ollama_client.hpp"
+#include "ai/types.hpp"
 #include "app/gui_actions.hpp"
 #include "app/gui_catalog.hpp"
 #include "input/policy.hpp"

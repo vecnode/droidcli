@@ -91,7 +91,16 @@ add_executable(metaagent_visual_continuity_test tests/visual_continuity_test.cpp
 target_link_libraries(metaagent_visual_continuity_test PRIVATE metaagent)
 add_test(NAME visual_continuity_test COMMAND metaagent_visual_continuity_test)
 
-add_executable(metaagent_server tools/metaagent_server.cpp tools/mini_http_server.cpp)
+add_executable(metaagent_ollama_client_test tests/ollama_client_test.cpp)
+target_link_libraries(metaagent_ollama_client_test PRIVATE metaagent)
+add_test(NAME ollama_client_test COMMAND metaagent_ollama_client_test)
+
+add_executable(metaagent_language_runtime_test tests/language_runtime_test.cpp)
+target_link_libraries(metaagent_language_runtime_test PRIVATE metaagent)
+add_test(NAME language_runtime_test COMMAND metaagent_language_runtime_test)
+
+add_executable(metaagent_server tools/metaagent_server.cpp tools/mini_http_server.cpp tools/sync_http_client.cpp)
+target_include_directories(metaagent_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 target_link_libraries(metaagent_server PRIVATE metaagent)
 if(WIN32)
     target_link_libraries(metaagent_server PRIVATE ws2_32)

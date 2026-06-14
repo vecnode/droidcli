@@ -45,6 +45,15 @@ RouteDispatchResult RouteTable::dispatch(
 		return result;
 	}
 
+	if (request.method == HttpMethod::Post && path == "/ai/chat")
+	{
+		RouteDispatchResult result;
+		result.handled = true;
+		const AiChatHandleResult ai_chat = handle_ai_chat(request, context);
+		result.response = ai_chat.response;
+		return result;
+	}
+
 	return {};
 }
 

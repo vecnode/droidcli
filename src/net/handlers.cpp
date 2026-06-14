@@ -1,5 +1,6 @@
 #include "net/handlers.hpp"
 
+#include "ai/language_runtime.hpp"
 #include "net/json.hpp"
 #include "notify/parse.hpp"
 
@@ -46,6 +47,19 @@ core::String query_param(const core::String& query_string, const core::String& k
 	return {};
 }
 
+core::String extract_prompt_field(const core::String& body)
+{
+	for (const core::String& field_name : {"prompt", "text", "message"})
+	{
+		const core::String value = extract_json_string_field(body, field_name);
+		if (!value.empty())
+		{
+			return value;
+		}
+	}
+	return {};
+}
+
 } // namespace
 
 HttpResponse handle_health(const HandlerContext& context)
@@ -79,6 +93,77 @@ NotifyHandleResult handle_notify(const HttpRequest& request)
 	result.response.body = "{" + json_bool_field("ok", parsed.success) + "}";
 	result.has_notify_message = parsed.success;
 	result.notify_message = parsed.message;
+	return result;
+}
+
+AiChatHandleResult handle_ai_chat(const HttpRequest& request, const HandlerContext& context)
+{
+	AiChatHandleResult result;
+	result.response.content_type = "application/json";
+
+	if (!context.language_ai || !context.language_ai_transport)
+	{
+		result.response.status = HttpStatus::InternalError;
+		result.response.body = "{"
+			+ json_bool_field("ok", false) + ","
+			+ json_string_field("error", "Language AI runtime is not available on this host.")
+			+ "}";
+		return result;
+	}
+
+	const core::String prompt = extract_prompt_field(request.body);
+	if (prompt.empty())
+	{
+		result.response.status = HttpStatus::BadRequest;
+		result.response.body = "{"
+			+ json_bool_field("ok", false) + ","
+			+ json_string_field("error", "Missing prompt. Send JSON: {\"prompt\":\"...\"}")
+			+ "}";
+		return result;
+	}
+
+	bool clear_transcript = false;
+	extract_json_bool_field(request.body, "clear", clear_transcript);
+	if (clear_transcript)
+	{
+		context.language_ai->clear_transcript();
+	}
+
+	const core::String system_prompt = extract_json_string_field(request.body, "system");
+	if (!system_prompt.empty())
+	{
+		context.language_ai->set_system_prompt(system_prompt);
+	}
+
+	if (!context.language_ai->submit_user_message(prompt))
+	{
+		result.response.status = HttpStatus::BadRequest;
+		result.response.body = "{"
+			+ json_bool_field("ok", false) + ","
+			+ json_string_field("error", context.language_ai->snapshot().status_text)
+			+ "}";
+		return result;
+	}
+
+	if (!context.language_ai->complete_turn(*context.language_ai_transport))
+	{
+		result.response.status = HttpStatus::InternalError;
+		result.response.body = "{"
+			+ json_bool_field("ok", false) + ","
+			+ json_string_field("error", context.language_ai->snapshot().status_text)
+			+ "}";
+		return result;
+	}
+
+	const ai::LanguageAiSnapshot snapshot = context.language_ai->snapshot();
+	result.completed_turn = true;
+	result.response.body = "{"
+		+ json_bool_field("ok", true) + ","
+		+ json_string_field("assistant", snapshot.last_assistant_message) + ","
+		+ json_string_field("representation", snapshot.representation_text) + ","
+		+ json_string_field("model", snapshot.model) + ","
+		+ json_string_field("status", snapshot.status_text)
+		+ "}";
 	return result;
 }
 

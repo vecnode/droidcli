@@ -4,10 +4,89 @@ Portable C++17 core for MetaAgent: **particle pattern mechanics**, **camera rig 
 
 Full design notes: `[ARCHITECTURE.md](./ARCHITECTURE.md)`.
 
+## Build Standalone
+
 ```sh
-cmake -S . -B build
+cd metaagent
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build
+```
+
+## Headless HTTP Server
+
+```sh
+./build/metaagent_server.exe --port 8080
+```
+
+## API
+
+Start the headless server, then call these routes with `curl` or any HTTP client. No Unreal Engine required.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/health` | Liveness + session snapshot (`status`, `map`, `build`) |
+| `GET` / `POST` | `/echo` | Echo back `msg` query param or raw POST body |
+| `POST` | `/notify` | Ingest a JSON/text event; prints `[notify]` on the server console |
+| `POST` | `/ai/chat` | Send a prompt to Ollama via `LanguageAiRuntime`; returns assistant text |
+
+### Examples
+
+```sh
+# Health
+curl http://127.0.0.1:8080/health
+
+# Echo
+curl "http://127.0.0.1:8080/echo?msg=hello"
+
+# Notify (logs to server stdout)
+curl -X POST http://127.0.0.1:8080/notify \
+  -H "Content-Type: application/json" \
+  -d '{"message":"start pattern"}'
+
+# AI chat (requires Ollama running locally)
+curl -X POST http://127.0.0.1:8080/ai/chat \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Hello"}'
+```
+
+**`/ai/chat` request body**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `prompt` | yes* | User message (`text` or `message` also accepted) |
+| `system` | no | Override system prompt for this server session |
+| `clear` | no | If `true`, clears transcript before sending |
+
+
+### Server flags
+
+```sh
+./build/metaagent_server.exe --port 8080 \
+  --ollama-url http://127.0.0.1:11434 \
+  --ollama-model llama3.2 \
+  --system-prompt "You are a concise assistant."
+```
+
+Use `--no-ai` to disable `/ai/chat` (Ollama outbound calls).
+
+```mermaid
+flowchart LR
+    subgraph standalone["Headless (no UE)"]
+        CLI[curl / scripts]
+        SRV[metaagent_server.exe]
+        OLL[Ollama]
+        LIB[metaagent library]
+        CLI --> SRV --> LIB
+        SRV --> OLL
+    end
+
+    subgraph ue["Unreal plugin"]
+        GAME[Game / Editor]
+        BRIDGE[Host bridges]
+        LIB2[metaagent library]
+        GAME --> BRIDGE --> LIB2
+    end
 ```
 
 
@@ -79,6 +158,7 @@ Embed elsewhere: add `metaagent/src`, compile `metaagent.cpp` once (the UE plugi
 | `metaagent::app`      | Command parse/validate, GUI panel catalog, GUI action validation                                                            |
 | `metaagent::runtime`  | Host service callbacks (recording, AI) + **ParticleHostCallbacks**                                                          |
 | `metaagent::input`    | GUI-open vs observation-mode input policy                                                                                   |
+| `metaagent::ai`       | Ollama chat client, `LanguageAiRuntime`, transcript + representation text                                                   |
 
 
 ## Host integration contract (particles)
