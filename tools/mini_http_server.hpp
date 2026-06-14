@@ -1,8 +1,8 @@
 #pragma once
 
-#include "metaagent/net/router.hpp"
-#include "metaagent/net/types.hpp"
-#include "metaagent/session/types.hpp"
+#include "net/router.hpp"
+#include "net/types.hpp"
+#include "session/types.hpp"
 
 #include <cstdint>
 #include <functional>

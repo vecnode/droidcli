@@ -64,7 +64,7 @@ flowchart TB
 metaagent/
 ├── metaagent.h                    Umbrella public API
 ├── metaagent.cpp                  Single TU — #includes all module .cpp files
-├── include/metaagent/
+├── src/
 │   ├── initialize.hpp             initialize_defaults()
 │   ├── core/                      Vec3, math, log_sink
 │   ├── media/                     PNG/JPEG decode, MediaStore, mask pipeline
@@ -307,7 +307,7 @@ Tests: `transition_graph_test`, `forming_types_test`, `shape_builder_polyline_te
 
 ### Unreal
 
-`MetaAgentCoreAggregate.cpp` includes portable sources; `MetaAgentPlugin.Build.cs` adds `metaagent/include`.
+`MetaAgentCoreAggregate.cpp` includes portable sources; `MetaAgentPlugin.Build.cs` adds `metaagent/src`.
 
 ---
 

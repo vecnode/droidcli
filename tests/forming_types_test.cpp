@@ -1,4 +1,4 @@
-#include "metaagent/particle/forming_types.hpp"
+#include "particle/forming_types.hpp"
 
 #include <cassert>
 #include <iostream>

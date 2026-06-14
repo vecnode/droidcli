@@ -11,7 +11,7 @@ add_library(metaagent STATIC
 
 target_include_directories(metaagent
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
 )
@@ -105,7 +105,7 @@ install(TARGETS metaagent
 )
 
 install(FILES metaagent.h DESTINATION include)
-install(DIRECTORY include/metaagent DESTINATION include)
+install(DIRECTORY src/ DESTINATION include)
 
 install(EXPORT metaagentTargets
     FILE metaagentTargets.cmake

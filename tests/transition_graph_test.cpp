@@ -1,4 +1,4 @@
-#include "metaagent/particle/transition_graph.hpp"
+#include "particle/transition_graph.hpp"
 
 #include <cassert>
 #include <iostream>

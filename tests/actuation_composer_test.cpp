@@ -1,6 +1,6 @@
-#include "metaagent/particle/actuation_math.hpp"
-#include "metaagent/particle/pattern_types.hpp"
-#include "metaagent/particle/representation_actuation.hpp"
+#include "particle/actuation_math.hpp"
+#include "particle/pattern_types.hpp"
+#include "particle/representation_actuation.hpp"
 
 #include <cmath>
 #include <iostream>

@@ -57,14 +57,14 @@ flowchart TB
 metaagent/
   metaagent.h                 Public umbrella API (single include)
   metaagent.cpp               Amalgamated implementation
-  include/metaagent/          Headers + module .cpp implementations
+  src/                        Headers + module .cpp implementations
   tests/                      Standalone unit tests (CMake)
   tools/                      metaagent_server CLI
   CMakeLists.txt
   ARCHITECTURE.md
 ```
 
-Embed elsewhere: add `metaagent/include`, compile `metaagent.cpp` once (the UE plugin uses `MetaAgentCoreAggregate.cpp`).
+Embed elsewhere: add `metaagent/src`, compile `metaagent.cpp` once (the UE plugin uses `MetaAgentCoreAggregate.cpp`).
 
 ## Portable modules
 
@@ -97,7 +97,7 @@ The scheduler is **callback-driven**. The host implements `SchedulerCallbacks` a
 | `particle_host.authoritative_particle_count` | Live particle count for baseline/mask validation                   |
 
 
-**Visual continuity:** on each FSM transition, the scheduler reads the **displayed** pose via `particle_host`, then `apply_visual_continuity_for_transition()` / `freeze_displayed_pose()` updates baseline and targets. See `[particle/visual_continuity.hpp](./include/metaagent/particle/visual_continuity.hpp)` and `[ARCHITECTURE.md](./ARCHITECTURE.md#visual-continuity)`.
+**Visual continuity:** on each FSM transition, the scheduler reads the **displayed** pose via `particle_host`, then `apply_visual_continuity_for_transition()` / `freeze_displayed_pose()` updates baseline and targets. See `[particle/visual_continuity.hpp](./src/particle/visual_continuity.hpp)` and `[ARCHITECTURE.md](./ARCHITECTURE.md#visual-continuity)`.
 
 ## HTTP
 

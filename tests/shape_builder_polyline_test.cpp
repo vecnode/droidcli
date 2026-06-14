@@ -1,4 +1,4 @@
-#include "metaagent/particle/shape_builder.hpp"
+#include "particle/shape_builder.hpp"
 
 #include <cassert>
 #include <cmath>
