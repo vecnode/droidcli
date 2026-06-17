@@ -6,121 +6,55 @@ The **primary standalone host** is the desktop app in [`app/`](./app/) (WebView 
 
 Full design notes: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-## Build library + tests
+## Build
 
-From the repository root (`metaagent/`):
+All commands from the repository root (`metaagent/`). Requires CMake 3.20+ and Git. Internet on first configure when building the app (FetchContent deps).
+
+### Library only (no app)
+
+Builds `metaagent` (static lib), all unit tests, and `metaagent_server` (headless CLI). **Default — app is off.**
+
+**Windows / Linux** (same commands):
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-This builds the static library, unit tests, and `metaagent_server` (headless CLI). It does **not** build the desktop app unless you pass `-DMETAAGENT_BUILD_APP=ON`.
+### Library + app (usual workflow)
+
+Also builds **`metaagent-app`** (WebView desktop host). Pass `-DMETAAGENT_BUILD_APP=ON`. Library, tests, and server are still built in the same tree.
+
+**Windows** — VS 2022 **MSVC** x64, [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+
+```powershell
+cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_BUILD_APP=ON
+cmake --build build-msvc --config Debug -j
+.\build-msvc\app\Debug\metaagent-app.exe
+```
+
+Shortcut: `.\app\build_and_run.bat`
+
+Release: use `--config Release` → `build-msvc\app\Release\metaagent-app.exe`
+
+**Linux** — C++20, GTK 3, WebKit2GTK dev packages
+
+```sh
+cmake -B build -DMETAAGENT_BUILD_APP=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/metaagent-app
+```
+
+Shortcut: `./app/build_and_run.sh`
+
+App deps cache (Windows): `%LOCALAPPDATA%\metaagent-app-deps`
 
 ---
 
 ## MetaAgent desktop app (`app/`)
 
-WebView shell with an embedded local HTTP server, control-panel UI, mock particle runtime, and the same portable HTTP handlers as the headless server. Based on the [webview-boost-app](https://github.com/vecnode/webview-boost-app) template.
-
-### Prerequisites
-
-| Platform | Required |
-|----------|----------|
-| All | CMake 3.20+, Git, internet on **first** configure |
-| Windows | **Visual Studio 2022** (MSVC x64) — MinGW/MSYS2 will not work |
-| Windows | [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) installed |
-| Linux | GCC/Clang with C++20, GTK 3 + WebKit2GTK dev packages |
-
-On first configure, CMake downloads dependencies via FetchContent (httplib, webview, Boost.Asio, cpp-embedlib). On Windows they are cached under `%LOCALAPPDATA%\metaagent-app-deps` to avoid long-path issues inside Unreal plugin folders.
-
-### Compile the app
-
-Enable the app with `-DMETAAGENT_BUILD_APP=ON`. CMake target: **`metaagent-app`**.
-
-#### Windows (recommended)
-
-Open **x64 Native Tools Command Prompt for VS 2022** (or any shell where `cl.exe` is MSVC, not MinGW), then:
-
-```powershell
-cd metaagent
-
-# 1) Configure (once, or after CMakeLists changes)
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_BUILD_APP=ON
-
-# 2) Compile Debug
-cmake --build build-msvc --target metaagent-app --config Debug -j
-
-# 3) Run
-.\build-msvc\app\Debug\metaagent-app.exe
-```
-
-**Release build:**
-
-```powershell
-cmake --build build-msvc --target metaagent-app --config Release -j
-.\build-msvc\app\Release\metaagent-app.exe
-```
-
-**Compile + run in one step** (finds VS, configures `build-msvc`, builds Debug, launches):
-
-```powershell
-.\app\build_and_run.bat
-```
-
-Clean reconfigure:
-
-```powershell
-.\app\build_and_run.bat --clean
-```
-
-**Output locations (Windows)**
-
-| Config | Executable |
-|--------|------------|
-| Debug | `build-msvc\app\Debug\metaagent-app.exe` |
-| Release | `build-msvc\app\Release\metaagent-app.exe` |
-
-Post-build copies `WebView2Loader.dll` next to the `.exe` when the WebView2 SDK is present.
-
-#### Linux
-
-```sh
-cd metaagent
-
-cmake -B build -DMETAAGENT_BUILD_APP=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target metaagent-app -j
-./build/metaagent-app
-```
-
-Or compile and run:
-
-```sh
-./app/build_and_run.sh
-```
-
-**Output:** `build/metaagent-app`
-
-#### Compile app + library together
-
-You can use one build tree for tests, server, and app:
-
-```powershell
-# Windows (MSVC)
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_BUILD_APP=ON
-cmake --build build-msvc --config Debug -j          # builds everything
-cmake --build build-msvc --target metaagent-app --config Debug -j   # app only
-```
-
-```sh
-# Linux
-cmake -B build -DMETAAGENT_BUILD_APP=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-ctest --test-dir build
-```
-
-The app binds `127.0.0.1` on an ephemeral port, serves embedded UI from `app/public/`, and mounts the metaagent route table on the same server.
+WebView + local HTTP server + control-panel UI. Serves embedded assets from `app/public/` and mounts the metaagent route table on the same port.
 
 ### Desktop app HTTP routes
 

@@ -4,60 +4,73 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MetaAgent</title>
+  <link rel="icon" href="/icons/icon_topbar_small.png" type="image/png">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <main class="layout">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">MetaAgent Desktop</p>
-        <h1>Control Panel</h1>
-        <p class="subtitle">Portable host with embedded HTTP server and mock particle runtime.</p>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <img class="brand-icon" src="/icons/icon_topbar_small.png" width="18" height="18" alt="">
+        <span class="brand-name">MetaAgent</span>
       </div>
-      <div class="status-card" id="status-card">
-        <div class="status-line"><span>Host</span><strong id="status-host">…</strong></div>
-        <div class="status-line"><span>Pattern</span><strong id="status-pattern">…</strong></div>
-        <div class="status-line"><span>Particles</span><strong id="status-particles">…</strong></div>
-      </div>
+      <nav class="tabs" role="tablist">
+        <button type="button" class="tab active" data-tab="dashboard" role="tab" aria-selected="true">Dashboard</button>
+        <button type="button" class="tab" data-tab="comms" role="tab" aria-selected="false">Comms</button>
+        <button type="button" class="tab" data-tab="settings" role="tab" aria-selected="false">Settings</button>
+      </nav>
     </header>
 
-    <section class="panel">
-      <h2>Pattern Controls</h2>
-      <div class="button-row">
-        <button type="button" data-command="pattern_step_backward">Step Back</button>
-        <button type="button" data-command="pattern_step_forward" class="primary">Step Forward</button>
-      </div>
-      <p id="command-output" class="output"></p>
-    </section>
+    <main class="content">
+      <section id="panel-dashboard" class="panel active" role="tabpanel">
+        <div class="stat-grid">
+          <div class="stat">
+            <span class="label">Host</span>
+            <span class="value" id="status-host">…</span>
+          </div>
+          <div class="stat">
+            <span class="label">Session</span>
+            <span class="value" id="status-session">…</span>
+          </div>
+        </div>
+        <div class="chip-row">
+          <button type="button" class="chip" data-command="toggle_recording">Recording</button>
+          <button type="button" class="chip" data-command="toggle_autopilot">Autopilot</button>
+          <button type="button" class="chip" data-command="toggle_networking_runtime">Network</button>
+        </div>
+        <p id="command-output" class="hint"></p>
+      </section>
 
-    <section class="panel">
-      <h2>Runtime Toggles</h2>
-      <div class="button-row">
-        <button type="button" data-command="toggle_recording">Recording</button>
-        <button type="button" data-command="toggle_autopilot">Autopilot</button>
-        <button type="button" data-command="toggle_cinematic_camera">Cinematic</button>
-        <button type="button" data-command="toggle_networking_runtime">Networking</button>
-      </div>
-    </section>
+      <section id="panel-comms" class="panel" role="tabpanel" hidden>
+        <form id="notify-form" class="stack">
+          <label class="field-label" for="notify-input">Notify</label>
+          <div class="inline-field">
+            <input id="notify-input" type="text" placeholder="Message or JSON">
+            <button type="submit" class="btn">Send</button>
+          </div>
+        </form>
+        <ul id="notify-log" class="log"></ul>
 
-    <section class="panel">
-      <h2>Notify</h2>
-      <form id="notify-form">
-        <input id="notify-input" type="text" placeholder="Send notify event JSON or text">
-        <button type="submit" class="primary">Send</button>
-      </form>
-      <ul id="notify-log" class="log-list"></ul>
-    </section>
+        <form id="chat-form" class="stack">
+          <label class="field-label" for="chat-input">AI</label>
+          <textarea id="chat-input" rows="2" placeholder="Ask Ollama…"></textarea>
+          <button type="submit" class="btn btn-dark">Ask</button>
+          <pre id="chat-output" class="reply"></pre>
+        </form>
+      </section>
 
-    <section class="panel">
-      <h2>AI Chat</h2>
-      <form id="chat-form">
-        <textarea id="chat-input" rows="3" placeholder="Ask Ollama (requires local Ollama)"></textarea>
-        <button type="submit" class="primary">Send</button>
-      </form>
-      <pre id="chat-output" class="chat-output"></pre>
-    </section>
-  </main>
+      <section id="panel-settings" class="panel" role="tabpanel" hidden>
+        <dl class="settings-list" id="settings-list">
+          <div class="setting-row"><dt>AI</dt><dd id="cfg-ai">…</dd></div>
+          <div class="setting-row"><dt>Ollama URL</dt><dd id="cfg-ollama-url">…</dd></div>
+          <div class="setting-row"><dt>Model</dt><dd id="cfg-ollama-model">…</dd></div>
+          <div class="setting-row"><dt>Platform URL</dt><dd id="cfg-platform-url">…</dd></div>
+          <div class="setting-row"><dt>Platform endpoint</dt><dd id="cfg-platform-endpoint">…</dd></div>
+        </dl>
+        <p class="hint">Set env vars before launch (see README). Restart to apply.</p>
+      </section>
+    </main>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

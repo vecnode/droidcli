@@ -55,7 +55,7 @@ desktop.ini
 app/build/
 app/out/
 app/_deps/
-app/**/WebAssets.h
+app/public/icons/
 app/**/MetaAgentWebAssets.h
 build-msvc/
 **/WebView2Loader.dll

@@ -84,6 +84,15 @@ FetchContent_Declare(cpp-embedlib
 )
 FetchContent_MakeAvailable(cpp-embedlib)
 
+set(_metaagent_assets_dir ${CMAKE_SOURCE_DIR}/assets)
+set(_metaagent_public_icons ${CMAKE_CURRENT_SOURCE_DIR}/public/icons)
+file(MAKE_DIRECTORY ${_metaagent_public_icons})
+file(COPY
+    ${_metaagent_assets_dir}/icon_topbar_small.png
+    ${_metaagent_assets_dir}/icon_window_bar.png
+    DESTINATION ${_metaagent_public_icons}
+)
+
 cpp_embedlib_add(MetaAgentWebAssets
     FOLDER ${CMAKE_CURRENT_SOURCE_DIR}/public
     NAMESPACE MetaAgentWeb
@@ -168,23 +177,75 @@ if(WIN32)
         message(WARNING "WebView2Loader.dll not found at ${_webview2_loader_dll}")
     endif()
 
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/icons/app_icon.ico")
-        add_custom_command(TARGET metaagent-app POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:metaagent-app>/icons
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/icons/app_icon_small.ico
-                $<TARGET_FILE_DIR:metaagent-app>/icons/app_icon_small.ico
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/icons/app_icon.ico
-                $<TARGET_FILE_DIR:metaagent-app>/icons/app_icon.ico
-            COMMENT "Copying application icons"
-        )
-    endif()
+    set(_icon_gen_dir ${CMAKE_CURRENT_BINARY_DIR}/generated_icons)
+    set(_icon_window_bar_ico ${_icon_gen_dir}/icon_window_bar.ico)
+    set(_icon_topbar_small_ico ${_icon_gen_dir}/icon_topbar_small.ico)
+    set(_png_to_ico_script ${CMAKE_CURRENT_SOURCE_DIR}/scripts/png_to_ico.ps1)
+
+    add_custom_command(
+        OUTPUT ${_icon_window_bar_ico} ${_icon_topbar_small_ico}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${_icon_gen_dir}
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${_png_to_ico_script}"
+            -InputPng "${_metaagent_assets_dir}/icon_window_bar.png"
+            -OutputIco "${_icon_window_bar_ico}"
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File "${_png_to_ico_script}"
+            -InputPng "${_metaagent_assets_dir}/icon_topbar_small.png"
+            -OutputIco "${_icon_topbar_small_ico}"
+        DEPENDS
+            ${_png_to_ico_script}
+            ${_metaagent_assets_dir}/icon_window_bar.png
+            ${_metaagent_assets_dir}/icon_topbar_small.png
+        COMMENT "Generating application icons from assets/"
+    )
+
+    set(_app_icon_rc ${CMAKE_CURRENT_BINARY_DIR}/app_icon.rc)
+    file(TO_CMAKE_PATH "${_icon_window_bar_ico}" APP_ICON_ICO)
+    string(REPLACE "\\" "/" APP_ICON_ICO "${APP_ICON_ICO}")
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/windows/app_icon.rc.in
+        ${_app_icon_rc}
+        @ONLY
+    )
+
+    target_sources(metaagent-app PRIVATE ${_app_icon_rc})
+    set_source_files_properties(${_app_icon_rc} PROPERTIES
+        OBJECT_DEPENDS "${_icon_window_bar_ico};${_icon_topbar_small_ico}"
+    )
+
+    add_custom_command(TARGET metaagent-app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:metaagent-app>/assets
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_metaagent_assets_dir}/icon_window_bar.png
+            $<TARGET_FILE_DIR:metaagent-app>/assets/icon_window_bar.png
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_metaagent_assets_dir}/icon_topbar_small.png
+            $<TARGET_FILE_DIR:metaagent-app>/assets/icon_topbar_small.png
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_icon_window_bar_ico}
+            $<TARGET_FILE_DIR:metaagent-app>/assets/icon_window_bar.ico
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_icon_topbar_small_ico}
+            $<TARGET_FILE_DIR:metaagent-app>/assets/icon_topbar_small.ico
+        COMMENT "Copying application assets next to executable"
+    )
 endif()
 
 if(APPLE)
     target_link_libraries(metaagent-app PRIVATE
         "-framework CoreFoundation"
         "-framework Security"
+    )
+endif()
+
+if(UNIX AND NOT APPLE)
+    add_custom_command(TARGET metaagent-app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:metaagent-app>/assets
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_metaagent_assets_dir}/icon_window_bar.png
+            $<TARGET_FILE_DIR:metaagent-app>/assets/icon_window_bar.png
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_metaagent_assets_dir}/icon_topbar_small.png
+            $<TARGET_FILE_DIR:metaagent-app>/assets/icon_topbar_small.png
+        COMMENT "Copying application assets next to executable"
     )
 endif()

@@ -31,6 +31,11 @@
 #include <windows.h>
 #endif
 
+#ifdef __linux__
+#include <gtk/gtk.h>
+#include <unistd.h>
+#endif
+
 #ifndef METAAGENT_APP_INCLUDE_TERMINAL_ON_RELEASE
 #define METAAGENT_APP_INCLUDE_TERMINAL_ON_RELEASE 0
 #endif
@@ -39,6 +44,8 @@ namespace {
 
 constexpr std::size_t kMaxRequestBodyBytes = 64 * 1024;
 constexpr const char* kAppVersion = "0.1.0";
+constexpr int kWindowWidth = 1920;
+constexpr int kWindowHeight = 1080;
 
 std::string env_or_default(const char* name, const char* default_value)
 {
@@ -131,9 +138,9 @@ void apply_windows_icons(webview::webview& window)
 		return;
 	}
 
-	const auto icon_dir = executable_dir() / "icons";
-	const auto small_icon_path = (icon_dir / "app_icon_small.ico").wstring();
-	const auto large_icon_path = (icon_dir / "app_icon.ico").wstring();
+	const auto assets_dir = executable_dir() / "assets";
+	const auto small_icon_path = (assets_dir / "icon_topbar_small.ico").wstring();
+	const auto large_icon_path = (assets_dir / "icon_window_bar.ico").wstring();
 
 	const auto small_icon = static_cast<HICON>(LoadImageW(
 		nullptr,
@@ -158,6 +165,82 @@ void apply_windows_icons(webview::webview& window)
 	if (large_icon)
 	{
 		SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon));
+	}
+
+	if (IsIconic(hwnd))
+	{
+		ShowWindow(hwnd, SW_RESTORE);
+	}
+
+	const DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
+	SetWindowLongW(
+		hwnd,
+		GWL_STYLE,
+		style & ~(WS_MAXIMIZEBOX | WS_THICKFRAME | WS_SIZEBOX));
+	SetWindowPos(
+		hwnd,
+		nullptr,
+		0,
+		0,
+		kWindowWidth,
+		kWindowHeight,
+		SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+}
+#endif
+
+#ifdef __linux__
+std::filesystem::path executable_dir()
+{
+	char path[4096] {};
+	const ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
+	if (length <= 0)
+	{
+		return std::filesystem::current_path();
+	}
+	path[length] = '\0';
+	return std::filesystem::path(path).parent_path();
+}
+
+void apply_linux_icon(webview::webview& window)
+{
+	const auto window_result = window.window();
+	if (!window_result.ok())
+	{
+		return;
+	}
+
+	auto* const gtk_window = GTK_WINDOW(window_result.value());
+	if (!gtk_window)
+	{
+		return;
+	}
+
+	const std::filesystem::path candidates[] = {
+		executable_dir() / "assets" / "icon_window_bar.png",
+		executable_dir() / "assets" / "icon_topbar_small.png",
+	};
+
+	for (const auto& icon_path : candidates)
+	{
+		if (!std::filesystem::exists(icon_path))
+		{
+			continue;
+		}
+
+		GError* error = nullptr;
+		if (gtk_window_set_icon_from_file(gtk_window, icon_path.string().c_str(), &error))
+		{
+			if (error)
+			{
+				g_error_free(error);
+			}
+			return;
+		}
+
+		if (error)
+		{
+			g_error_free(error);
+		}
 	}
 }
 #endif
@@ -202,9 +285,12 @@ int main()
 
 	webview::webview window(false, nullptr);
 	window.set_title("MetaAgent");
-	window.set_size(1024, 720, WEBVIEW_HINT_NONE);
+	window.set_size(kWindowWidth, kWindowHeight, WEBVIEW_HINT_FIXED);
 #ifdef _WIN32
 	apply_windows_icons(window);
+#endif
+#ifdef __linux__
+	apply_linux_icon(window);
 #endif
 	window.navigate("http://127.0.0.1:" + std::to_string(port));
 	window.run();
