@@ -69,16 +69,6 @@ core::String extract_command_name(const core::String& body)
 	return command;
 }
 
-core::String extract_action_name(const core::String& body)
-{
-	core::String action = net::extract_json_string_field(body, "action");
-	if (action.empty())
-	{
-		action = body;
-	}
-	return action;
-}
-
 } // namespace
 
 void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)

@@ -164,10 +164,6 @@ code {
   align-content: start;
 }
 
-.layout-comms {
-  grid-template-columns: 1fr 1fr;
-}
-
 .layout-single {
   grid-template-columns: 1fr;
   max-width: 640px;
@@ -179,11 +175,6 @@ code {
   border-radius: 10px;
   padding: 12px;
   min-width: 0;
-}
-
-.layout-comms .panel-logs,
-.layout-comms .panel-ai {
-  grid-column: 1 / -1;
 }
 
 .panel-head h2 {
@@ -245,7 +236,6 @@ code {
 }
 
 .runtime-rows,
-.target-list,
 .log {
   list-style: none;
   margin: 0;
@@ -271,61 +261,9 @@ code {
   font-weight: 600;
 }
 
-.target-item {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: var(--surface-muted);
-  margin-bottom: 6px;
-}
-
-.target-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.target-url {
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--muted);
-  word-break: break-all;
-}
-
-.target-state {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 2px 6px;
-  border-radius: 999px;
-}
-
-.target-state.enabled {
-  color: var(--success);
-  background: rgba(6, 118, 71, 0.1);
-}
-
-.target-state.disabled {
-  color: var(--muted);
-  background: rgba(109, 106, 100, 0.12);
-}
-
-.inline-form,
-.signal-form,
 .ollama-form {
   display: grid;
   gap: 8px;
-}
-
-.inline-form {
-  grid-template-columns: 1fr 2fr auto;
-}
-
-.target-form {
-  margin-top: 8px;
 }
 
 .ollama-model-row {
@@ -363,11 +301,6 @@ code {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-muted);
-}
-
-.field-row {
-  display: grid;
-  gap: 4px;
 }
 
 .field-label {
@@ -420,32 +353,6 @@ select:focus {
   border-color: var(--accent);
   color: var(--accent);
   background: var(--accent-soft);
-}
-
-.network-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-.chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.chip {
-  border: 1px solid var(--border);
-  background: var(--surface-muted);
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 6px 10px;
-  border-radius: 999px;
-  cursor: pointer;
 }
 
 .log {
@@ -519,15 +426,6 @@ select:focus {
 }
 
 @media (max-width: 900px) {
-  .layout-comms {
-    grid-template-columns: 1fr;
-  }
-
-  .inline-form,
-  .target-form {
-    grid-template-columns: 1fr;
-  }
-
   .ollama-model-row {
     flex-direction: column;
     align-items: stretch;

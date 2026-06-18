@@ -53,6 +53,7 @@ add_test(NAME actuation_composer_test COMMAND metaagent_actuation_composer_test)
 
 add_executable(metaagent_media_decode_test tests/media_decode_test.cpp)
 target_link_libraries(metaagent_media_decode_test PRIVATE metaagent)
+metaagent_stage_ffmpeg_runtime(metaagent_media_decode_test)
 add_test(NAME media_decode_test COMMAND metaagent_media_decode_test)
 
 add_executable(metaagent_camera_rig_test tests/camera_rig_test.cpp)
@@ -116,17 +117,13 @@ target_include_directories(metaagent_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(metaagent_server PRIVATE metaagent)
 if(WIN32)
     target_link_libraries(metaagent_server PRIVATE ws2_32)
+    target_compile_definitions(metaagent_server PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
 option(METAAGENT_BUILD_APP "Build the MetaAgent desktop webview application (app/)" OFF)
 if(METAAGENT_BUILD_APP)
     add_subdirectory(app)
 endif()
-
-get_property(_metaagent_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-foreach(_metaagent_target ${_metaagent_targets})
-    metaagent_stage_ffmpeg_runtime(${_metaagent_target})
-endforeach()
 
 install(TARGETS metaagent
     EXPORT metaagentTargets

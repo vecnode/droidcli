@@ -257,11 +257,4 @@ int main() {
 }
 ```
 
-## Recommended next steps
-
-1. Extend `/api/status` with richer session snapshot in core `/health`.
-2. Headless FSM sweep tests with mock `ParticleHostCallbacks`.
-3. Optional app icons under `app/icons/` (copied post-build on Windows).
-4. Package script for portable Windows release (WebView2 + single exe).
-
 Details: `[ARCHITECTURE.md](./ARCHITECTURE.md#roadmap)`.

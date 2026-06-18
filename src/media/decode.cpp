@@ -8,11 +8,18 @@
 #include <vector>
 
 extern "C" {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4244)
+#endif
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
 #include <libswscale/swscale.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 }
 
 namespace metaagent::media {

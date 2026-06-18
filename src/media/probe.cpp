@@ -1,8 +1,15 @@
 #include "media/probe.hpp"
 
 extern "C" {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4244)
+#endif
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 }
 
 namespace metaagent::media {
