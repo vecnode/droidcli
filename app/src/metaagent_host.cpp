@@ -102,7 +102,6 @@ void MetaAgentHost::initialize()
 
 	seed_mock_particles();
 	wire_callbacks();
-	seed_default_targets();
 
 	language_ai_transport_.post_json = [](
 		const core::String& url,
@@ -319,46 +318,6 @@ void MetaAgentHost::on_notify(const core::String& message)
 		notify_log_.erase(notify_log_.begin());
 	}
 	std::cout << "[notify] " << message << std::endl;
-
-	net::SignalLogEntry inbound;
-	inbound.direction = "inbound";
-	inbound.type = "notify";
-	inbound.summary = message;
-	inbound.delivered = true;
-	signal_router_.append_log(inbound);
-
-	if (!session_.features.networking)
-	{
-		return;
-	}
-
-	if (!config_.platform_base_url.empty())
-	{
-		net::PlatformEndpointConfig platform_config;
-		platform_config.base_url = config_.platform_base_url;
-		platform_config.event_endpoint = config_.platform_event_endpoint;
-		platform_config.enabled = true;
-
-		net::PlatformEvent event;
-		event.source = "metaagent_app";
-		event.event_name = "notify";
-		event.message = message;
-		event.metadata.map_name = session_.map_name;
-		event.metadata.build_label = session_.build_label;
-
-		const net::PlatformOutboundRequest outbound =
-			net::build_platform_outbound_request(platform_config, event);
-		if (outbound.valid)
-		{
-			int32_t status_code = 0;
-			core::String response_body;
-			tools::sync_http_post_json(
-				outbound.url,
-				outbound.body,
-				status_code,
-				response_body);
-		}
-	}
 }
 
 core::String MetaAgentHost::build_notify_log_json() const
@@ -452,9 +411,7 @@ core::String MetaAgentHost::build_config_json() const
 	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
 	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
 	stream << net::json_string_field("ollama_model", config_.ollama_model) << ',';
-	stream << net::json_string_field("platform_base_url", config_.platform_base_url) << ',';
-	stream << net::json_string_field("platform_event_endpoint", config_.platform_event_endpoint) << ',';
-	stream << net::json_string_field("default_target_id", config_.default_target_id);
+	stream << net::json_string_field("media_player_base_url", config_.media_player_base_url);
 	stream << '}';
 	return stream.str();
 }
@@ -487,26 +444,6 @@ void MetaAgentHost::apply_command_side_effects(const app::CommandId command)
 		session_.features.networking = !session_.features.networking;
 		session_.http_enabled = session_.features.networking;
 		break;
-	case app::CommandId::StartPlatformAudio:
-	{
-		net::SignalEnvelope envelope;
-		envelope.type = "trigger";
-		envelope.target = config_.default_target_id;
-		envelope.id = "cmd-start-audio";
-		envelope.payload_json = "{" + net::json_string_field("name", "start_audio") + "}";
-		send_signal(envelope);
-		break;
-	}
-	case app::CommandId::StartPlatformImage:
-	{
-		net::SignalEnvelope envelope;
-		envelope.type = "trigger";
-		envelope.target = config_.default_target_id;
-		envelope.id = "cmd-start-image";
-		envelope.payload_json = "{" + net::json_string_field("name", "start_image") + "}";
-		send_signal(envelope);
-		break;
-	}
 	default:
 		break;
 	}
@@ -537,119 +474,154 @@ core::String MetaAgentHost::dispatch_command(const core::String& command_name)
 	return stream.str();
 }
 
-void MetaAgentHost::seed_default_targets()
+core::String MetaAgentHost::build_media_player_url(const core::String& path) const
 {
-	if (!config_.platform_base_url.empty())
+	core::String base = config_.media_player_base_url;
+	while (!base.empty() && base.back() == '/')
 	{
-		net::PlatformEndpointConfig platform_config;
-		platform_config.base_url = config_.platform_base_url;
-		platform_config.event_endpoint = config_.platform_event_endpoint;
-
-		net::SignalTarget platform_target;
-		platform_target.id = config_.default_target_id;
-		platform_target.control_url = net::build_platform_url(platform_config);
-		platform_target.capabilities = {"platform_event", "command", "trigger"};
-		platform_target.enabled = true;
-		signal_router_.register_target(platform_target);
+		base.pop_back();
 	}
 
-	if (config_.extra_targets.empty())
+	if (path.empty())
 	{
-		return;
+		return base;
 	}
 
-	size_t cursor = 0;
-	while (cursor < config_.extra_targets.size())
+	if (path.front() == '/')
 	{
-		const size_t separator = config_.extra_targets.find(';', cursor);
-		const core::String entry = config_.extra_targets.substr(
-			cursor,
-			separator == core::String::npos ? core::String::npos : separator - cursor);
-
-		const size_t pipe = entry.find('|');
-		if (pipe != core::String::npos)
-		{
-			net::SignalTarget target;
-			target.id = entry.substr(0, pipe);
-			target.control_url = entry.substr(pipe + 1);
-			target.enabled = true;
-			signal_router_.register_target(target);
-		}
-
-		if (separator == core::String::npos)
-		{
-			break;
-		}
-		cursor = separator + 1;
+		return base + path;
 	}
+
+	return base + "/" + path;
 }
 
-net::SignalTransportFn MetaAgentHost::make_signal_transport() const
+void MetaAgentHost::append_media_control_log(
+	const core::String& action,
+	const core::String& summary,
+	const bool success)
 {
-	return [](
-		const core::String& url,
-		const core::String& body,
-		int32_t& status_code_out,
-		core::String& response_body_out)
-	{
-		return tools::sync_http_post_json(url, body, status_code_out, response_body_out);
-	};
-}
-
-void MetaAgentHost::log_signal_delivery(
-	const core::String& direction,
-	const net::SignalEnvelope& envelope,
-	const net::SignalDispatchResult& result,
-	const core::String& summary)
-{
-	net::SignalLogEntry entry;
-	entry.direction = direction;
-	entry.signal_id = envelope.id.empty() ? result.signal_id : envelope.id;
-	entry.type = envelope.type;
-	entry.target = envelope.target.empty() ? result.target_id : envelope.target;
+	MediaControlLogEntry entry;
+	entry.action = action;
 	entry.summary = summary;
-	entry.delivered = result.success;
-	entry.status_code = result.status_code;
-	signal_router_.append_log(entry);
+	entry.success = success;
+	media_control_log_.push_back(entry);
+	if (media_control_log_.size() > 64)
+	{
+		media_control_log_.erase(media_control_log_.begin());
+	}
 }
 
-net::SignalDispatchResult MetaAgentHost::send_signal(const net::SignalEnvelope& envelope)
+core::String MetaAgentHost::proxy_media_player_get(const core::String& path) const
 {
-	if (!session_.features.networking)
+	if (config_.media_player_base_url.empty())
 	{
-		net::SignalDispatchResult blocked;
-		blocked.error_message = "Networking runtime is disabled.";
-		return blocked;
+		return "{"
+			+ net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "media player URL not configured")
+			+ "}";
 	}
 
-	net::SignalEnvelope outbound = envelope;
-	if (outbound.id.empty())
+	const core::String url = build_media_player_url(path);
+	int32_t status_code = 0;
+	core::String response_body;
+	const bool transport_ok = tools::sync_http_get(url, status_code, response_body);
+	if (!transport_ok)
 	{
-		outbound.id = "sig-" + std::to_string(signal_router_.log_entries().size() + 1);
+		return "{"
+			+ net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "media player unreachable") + ","
+			+ net::json_string_field("media_player_url", config_.media_player_base_url)
+			+ "}";
 	}
 
-	const net::SignalDispatchResult result =
-		signal_router_.dispatch(outbound, make_signal_transport());
+	if (response_body.empty())
+	{
+		response_body = "{}";
+	}
 
-	const core::String summary = result.success
-		? net::signal_type_display_name(outbound.type) + " → " + outbound.target
-		: result.error_message;
+	return response_body;
+}
 
-	log_signal_delivery("outbound", outbound, result, summary);
-	return result;
+core::String MetaAgentHost::proxy_media_player_post(const core::String& path, const core::String& body)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	if (config_.media_player_base_url.empty())
+	{
+		const core::String response = "{"
+			+ net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "media player URL not configured")
+			+ "}";
+		append_media_control_log(path, "media player URL not configured", false);
+		return response;
+	}
+
+	const core::String url = build_media_player_url(path);
+	int32_t status_code = 0;
+	core::String response_body;
+	const bool transport_ok = tools::sync_http_post_json(url, body, status_code, response_body);
+	if (!transport_ok)
+	{
+		const core::String response = "{"
+			+ net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "media player unreachable") + ","
+			+ net::json_string_field("media_player_url", config_.media_player_base_url)
+			+ "}";
+		append_media_control_log(path, "media player unreachable", false);
+		return response;
+	}
+
+	if (response_body.empty())
+	{
+		response_body = "{}";
+	}
+
+	const bool success = status_code >= 200 && status_code < 300;
+	append_media_control_log(path, response_body, success);
+	return response_body;
+}
+
+core::String MetaAgentHost::build_media_control_log_json() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	std::ostringstream stream;
+	stream << "{\"entries\":[";
+	for (size_t index = 0; index < media_control_log_.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const MediaControlLogEntry& entry = media_control_log_[index];
+		stream << '{';
+		stream << net::json_string_field("action", entry.action) << ',';
+		stream << net::json_string_field("summary", entry.summary) << ',';
+		stream << net::json_bool_field("success", entry.success);
+		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
 }
 
 core::String MetaAgentHost::build_network_status_json() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
+
+	bool media_player_online = false;
+	if (!config_.media_player_base_url.empty())
+	{
+		const core::String url = build_media_player_url("/api/health");
+		int32_t status_code = 0;
+		core::String response_body;
+		const bool transport_ok = tools::sync_http_get(url, status_code, response_body);
+		media_player_online = transport_ok && status_code >= 200 && status_code < 300;
+	}
+
 	std::ostringstream stream;
 	stream << '{';
 	stream << net::json_bool_field("networking_enabled", session_.features.networking) << ',';
-	stream << net::json_bool_field("http_enabled", session_.http_enabled) << ',';
-	stream << net::json_bool_field("http_router_bound", session_.http_router_bound) << ',';
-	stream << "\"target_count\":" << signal_router_.list_targets().size() << ',';
-	stream << "\"signal_log_count\":" << signal_router_.log_entries().size() << ',';
-	stream << net::json_string_field("default_target_id", config_.default_target_id);
+	stream << net::json_bool_field("media_player_online", media_player_online) << ',';
+	stream << net::json_string_field("media_player_url", config_.media_player_base_url);
 	stream << '}';
 	return stream.str();
 }
@@ -658,74 +630,6 @@ core::String MetaAgentHost::build_runtime_catalog_json() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	return app::build_runtime_catalog_json(session_, ue5_runtimes_enabled_);
-}
-
-core::String MetaAgentHost::build_targets_json() const
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	return net::build_targets_json(signal_router_.list_targets());
-}
-
-core::String MetaAgentHost::register_target(const core::String& body)
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	net::SignalTarget target;
-	core::String error;
-	if (!net::parse_target_from_json(body, target, error))
-	{
-		return "{"
-			+ net::json_bool_field("success", false) + ","
-			+ net::json_string_field("message", error)
-			+ "}";
-	}
-
-	signal_router_.register_target(target);
-	return "{"
-		+ net::json_bool_field("success", true) + ","
-		+ net::json_string_field("id", target.id)
-		+ "}";
-}
-
-core::String MetaAgentHost::unregister_target(const core::String& target_id)
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	const bool removed = signal_router_.unregister_target(target_id);
-	return "{"
-		+ net::json_bool_field("success", removed) + ","
-		+ net::json_string_field("id", target_id)
-		+ "}";
-}
-
-core::String MetaAgentHost::dispatch_signal(const core::String& body)
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	net::SignalEnvelope envelope;
-	core::String error;
-	if (!net::parse_signal_envelope(body, envelope, error))
-	{
-		return "{"
-			+ net::json_bool_field("success", false) + ","
-			+ net::json_string_field("message", error)
-			+ "}";
-	}
-
-	const net::SignalDispatchResult result = send_signal(envelope);
-	std::ostringstream stream;
-	stream << '{';
-	stream << net::json_bool_field("success", result.success) << ',';
-	stream << net::json_string_field("signal_id", envelope.id) << ',';
-	stream << net::json_string_field("target", envelope.target) << ',';
-	stream << "\"status_code\":" << result.status_code << ',';
-	stream << net::json_string_field("message",
-		result.success ? "Signal delivered." : result.error_message);
-	stream << '}';
-	return stream.str();
-}
-
-core::String MetaAgentHost::build_signal_log_json() const
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	return net::build_signal_log_json(signal_router_.log_entries());
 }
 
 core::String MetaAgentHost::build_ollama_status_json()

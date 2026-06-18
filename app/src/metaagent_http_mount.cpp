@@ -47,6 +47,14 @@ void apply_metaagent_response(const net::HttpResponse& response, httplib::Respon
 	out_response.set_header("X-Content-Type-Options", "nosniff");
 }
 
+void apply_json_body(const core::String& body, httplib::Response& response)
+{
+	response.status = 200;
+	response.set_content(body, "application/json");
+	response.set_header("Cache-Control", "no-store");
+	response.set_header("X-Content-Type-Options", "nosniff");
+}
+
 void handle_metaagent_route(MetaAgentHost& host, const httplib::Request& request, httplib::Response& response)
 {
 	const net::RouteDispatchResult dispatch = host.dispatch_route(to_metaagent_request(request));
@@ -143,40 +151,52 @@ void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)
 			response);
 	});
 
-	server.Get("/api/targets", [&host](const httplib::Request&, httplib::Response& response)
+	server.Get("/api/media/status", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.proxy_media_player_get("/api/status"), response);
+	});
+
+	server.Get("/api/media/clips", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.proxy_media_player_get("/api/clips"), response);
+	});
+
+	server.Get("/api/media/log", [&host](const httplib::Request&, httplib::Response& response)
 	{
 		apply_metaagent_response(
-			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.build_targets_json()},
+			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.build_media_control_log_json()},
 			response);
 	});
 
-	server.Post("/api/targets/register", [&host](const httplib::Request& request, httplib::Response& response)
+	server.Post("/api/media/play", [&host](const httplib::Request& request, httplib::Response& response)
 	{
-		apply_metaagent_response(
-			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.register_target(request.body)},
-			response);
+		apply_json_body(host.proxy_media_player_post("/api/play", request.body), response);
 	});
 
-	server.Post("/api/targets/unregister", [&host](const httplib::Request& request, httplib::Response& response)
+	server.Post("/api/media/stop", [&host](const httplib::Request& request, httplib::Response& response)
 	{
-		const core::String target_id = net::extract_json_string_field(request.body, "id");
-		apply_metaagent_response(
-			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.unregister_target(target_id)},
-			response);
+		apply_json_body(host.proxy_media_player_post("/api/stop", request.body), response);
 	});
 
-	server.Get("/api/signals/log", [&host](const httplib::Request&, httplib::Response& response)
+	server.Post("/api/media/next", [&host](const httplib::Request& request, httplib::Response& response)
 	{
-		apply_metaagent_response(
-			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.build_signal_log_json()},
-			response);
+		apply_json_body(host.proxy_media_player_post("/api/next", request.body), response);
 	});
 
-	server.Post("/api/signal", [&host](const httplib::Request& request, httplib::Response& response)
+	server.Post("/api/media/previous", [&host](const httplib::Request& request, httplib::Response& response)
 	{
-		apply_metaagent_response(
-			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.dispatch_signal(request.body)},
-			response);
+		apply_json_body(host.proxy_media_player_post("/api/previous", request.body), response);
+	});
+
+	server.Post("/api/media/subtitles", [&host](const httplib::Request& request, httplib::Response& response)
+	{
+		apply_json_body(host.proxy_media_player_post("/api/subtitles", request.body), response);
+	});
+
+	server.Post(R"(/api/media/clips/(\d+))", [&host](const httplib::Request& request, httplib::Response& response)
+	{
+		const core::String path = "/api/clips/" + request.matches[1].str();
+		apply_json_body(host.proxy_media_player_post(path, request.body), response);
 	});
 
 	server.Get("/api/ollama/status", [&host](const httplib::Request&, httplib::Response& response)

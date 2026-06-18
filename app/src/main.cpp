@@ -88,12 +88,9 @@ metaagent::app_host::HostConfig load_host_config()
 	config.system_prompt = env_or_default(
 		"METAAGENT_SYSTEM_PROMPT",
 		"You are a concise assistant embedded in the MetaAgent desktop application.");
-	config.platform_base_url = env_or_default("METAAGENT_PLATFORM_URL", "");
-	config.platform_event_endpoint = env_or_default(
-		"METAAGENT_PLATFORM_EVENT_ENDPOINT",
-		"/api/unreal/event");
-	config.default_target_id = env_or_default("METAAGENT_DEFAULT_TARGET_ID", "platform-default");
-	config.extra_targets = env_or_default("METAAGENT_TARGETS", "");
+	config.media_player_base_url = env_or_default(
+		"METAAGENT_MEDIA_PLAYER_URL",
+		"http://127.0.0.1:8080");
 	return config;
 }
 

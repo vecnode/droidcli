@@ -12,10 +12,7 @@ struct HostConfig {
 	core::String ollama_model = "llama3.2";
 	core::String system_prompt =
 		"You are a concise assistant embedded in the MetaAgent desktop application.";
-	core::String platform_base_url;
-	core::String platform_event_endpoint = "/api/unreal/event";
-	core::String default_target_id = "platform-default";
-	core::String extra_targets;
+	core::String media_player_base_url = "http://127.0.0.1:8080";
 };
 
 class MetaAgentHost {
@@ -41,11 +38,9 @@ public:
 	void on_notify(const core::String& message);
 	core::String build_notify_log_json() const;
 
-	core::String build_targets_json() const;
-	core::String register_target(const core::String& body);
-	core::String unregister_target(const core::String& target_id);
-	core::String dispatch_signal(const core::String& body);
-	core::String build_signal_log_json() const;
+	core::String proxy_media_player_get(const core::String& path) const;
+	core::String proxy_media_player_post(const core::String& path, const core::String& body);
+	core::String build_media_control_log_json() const;
 
 	core::String build_ollama_status_json();
 	core::String update_ollama_config(const core::String& body);
@@ -54,20 +49,14 @@ public:
 private:
 	void wire_callbacks();
 	void seed_mock_particles();
-	void seed_default_targets();
 	bool build_pattern_targets();
 	bool read_displayed_positions(particle::DisplayedPose& out_pose);
 	void apply_world_positions(const core::Array<core::Vec3>& positions);
 	int32_t authoritative_particle_count() const;
 	void apply_command_side_effects(app::CommandId command);
 
-	net::SignalDispatchResult send_signal(const net::SignalEnvelope& envelope);
-	void log_signal_delivery(
-		const core::String& direction,
-		const net::SignalEnvelope& envelope,
-		const net::SignalDispatchResult& result,
-		const core::String& summary);
-	net::SignalTransportFn make_signal_transport() const;
+	core::String build_media_player_url(const core::String& path) const;
+	void append_media_control_log(const core::String& action, const core::String& summary, bool success);
 
 	HostConfig config_;
 	session::RuntimeSession session_;
@@ -77,10 +66,17 @@ private:
 	ai::LanguageAiRuntime language_ai_;
 	ai::LanguageAiTransportCallbacks language_ai_transport_;
 	net::RouteTable routes_;
-	net::SignalRouter signal_router_;
 
 	core::Array<core::Vec3> mock_world_positions_;
 	core::Array<core::String> notify_log_;
+
+	struct MediaControlLogEntry {
+		core::String action;
+		core::String summary;
+		bool success = false;
+	};
+
+	core::Array<MediaControlLogEntry> media_control_log_;
 	bool recording_active_ = false;
 	bool autopilot_enabled_ = false;
 	bool cinematic_enabled_ = false;

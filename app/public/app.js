@@ -70,12 +70,72 @@ function appendRuntimeGroup(container, title, runtimes) {
   container.appendChild(section);
 }
 
+function formatMediaStatus(status) {
+  if (!status || !status.loaded) {
+    return "no clip loaded";
+  }
+
+  const transport = status.playing ? "playing" : "stopped";
+  return `${(status.clipIndex ?? 0) + 1}/${status.clipCount ?? 0}  ${status.clipName || "—"}  (${transport})`;
+}
+
 async function refreshNetwork() {
   const network = await fetchJson("/api/network/status");
-  const enabled = !!network.networking_enabled;
-  document.getElementById("network-dot").classList.toggle("online", enabled);
-  document.getElementById("network-dot").classList.toggle("offline", !enabled);
-  document.getElementById("network-label").textContent = enabled ? "Networking ON" : "Networking OFF";
+  const online = !!network.media_player_online;
+  document.getElementById("network-dot").classList.toggle("online", online);
+  document.getElementById("network-dot").classList.toggle("offline", !online);
+
+  const url = network.media_player_url || "media player";
+  document.getElementById("network-label").textContent = online
+    ? `Media Player online`
+    : `Media Player offline`;
+  document.getElementById("network-badge").title = url;
+}
+
+async function refreshMediaStatus() {
+  const result = await fetchJson("/api/media/status");
+  const label = document.getElementById("media-status-label");
+  const subtitles = document.getElementById("media-subtitles");
+
+  if (result.ok === false || result.error) {
+    if (label) {
+      label.textContent = result.error || "Media player unreachable";
+      label.classList.add("error");
+    }
+    return;
+  }
+
+  const status = result.status || result;
+  if (label) {
+    label.textContent = formatMediaStatus(status);
+    label.classList.remove("error");
+  }
+
+  if (subtitles && typeof status.subtitlesEnabled === "boolean") {
+    subtitles.checked = status.subtitlesEnabled;
+  }
+}
+
+async function mediaCommand(path, body = null) {
+  const options = { method: "POST" };
+  if (body !== null) {
+    options.body = JSON.stringify(body);
+  }
+
+  const result = await fetchJson(path, options);
+  if (result.ok === false || result.error) {
+    const label = document.getElementById("media-status-label");
+    if (label) {
+      label.textContent = result.error || "Media player command failed";
+      label.classList.add("error");
+    }
+    await refreshCommsLog();
+    return result;
+  }
+
+  await refreshMediaStatus();
+  await refreshCommsLog();
+  return result;
 }
 
 async function refreshRuntimes() {
@@ -170,29 +230,16 @@ async function refreshOllama() {
 }
 
 async function refreshCommsLog() {
-  const [signals, notify] = await Promise.all([
-    fetchJson("/api/signals/log"),
-    fetchJson("/api/notify/log"),
-  ]);
-
-  const entries = [];
-  for (const entry of signals.entries || []) {
-    entries.push({
-      text: `[${entry.direction}] ${entry.type} → ${entry.target || "—"} · ${entry.summary}`,
-      delivered: entry.delivered,
-    });
-  }
-  for (const entry of notify.entries || []) {
-    entries.push({
-      text: `[notify] ${entry.message || JSON.stringify(entry)}`,
-      delivered: true,
-    });
-  }
+  const mediaLog = await fetchJson("/api/media/log");
+  const entries = (mediaLog.entries || []).map((entry) => ({
+    text: `[${entry.action}] ${entry.summary}`,
+    delivered: !!entry.success,
+  }));
 
   const list = document.getElementById("comms-log");
   list.innerHTML = "";
   if (!entries.length) {
-    list.innerHTML = "<li class='log-item muted'>No comms activity yet.</li>";
+    list.innerHTML = "<li class='log-item muted'>No media commands yet.</li>";
     return;
   }
 
@@ -203,6 +250,13 @@ async function refreshCommsLog() {
     list.appendChild(item);
   }
 }
+
+document.getElementById("media-play").addEventListener("click", () => mediaCommand("/api/media/play"));
+document.getElementById("media-next").addEventListener("click", () => mediaCommand("/api/media/next"));
+document.getElementById("media-stop").addEventListener("click", () => mediaCommand("/api/media/stop"));
+document.getElementById("media-subtitles").addEventListener("change", (event) => {
+  mediaCommand("/api/media/subtitles", { enabled: event.target.checked });
+});
 
 document.getElementById("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -259,6 +313,7 @@ document.getElementById("ollama-form").addEventListener("submit", async (event) 
 async function refreshAll() {
   await Promise.all([
     refreshNetwork(),
+    refreshMediaStatus(),
     refreshRuntimes(),
     refreshOllama(),
     refreshCommsLog(),
@@ -267,6 +322,7 @@ async function refreshAll() {
 
 refreshAll();
 setInterval(refreshNetwork, 3000);
+setInterval(refreshMediaStatus, 2500);
 setInterval(refreshCommsLog, 2500);
 setInterval(refreshRuntimes, 5000);
 setInterval(refreshOllama, 15000);

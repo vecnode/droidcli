@@ -33,10 +33,27 @@
     <main class="content">
       <section id="panel-dashboard" class="panel-view active" role="tabpanel">
         <div class="layout layout-single">
+          <section class="panel panel-media">
+            <div class="panel-head">
+              <h2>Media Player</h2>
+              <p class="panel-desc">Controls the openFrameworks media player over HTTP.</p>
+            </div>
+            <div class="media-controls">
+              <button type="button" class="btn" id="media-play">Play</button>
+              <button type="button" class="btn" id="media-next">Next Video</button>
+              <button type="button" class="btn" id="media-stop">Stop</button>
+              <label class="media-toggle">
+                <input type="checkbox" id="media-subtitles">
+                <span>Subtitles</span>
+              </label>
+            </div>
+            <p id="media-status-label" class="media-status">no clip loaded</p>
+          </section>
+
           <section class="panel panel-logs">
             <div class="panel-head">
-              <h2>Comms Log</h2>
-              <p class="panel-desc">Inbound notify and outbound signal deliveries.</p>
+              <h2>Media Log</h2>
+              <p class="panel-desc">Recent media player commands sent from MetaAgent.</p>
             </div>
             <ul id="comms-log" class="log"></ul>
           </section>
