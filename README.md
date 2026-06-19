@@ -14,18 +14,6 @@ Full design notes: `[ARCHITECTURE.md](./ARCHITECTURE.md)`.
 
 All commands from the repository root (`metaagent/`). Requires CMake 3.20+ and Git. Internet on first configure when building the app (FetchContent deps).
 
-### Library only (no app)
-
-Builds `metaagent` (static lib), all unit tests, and `metaagent_server` (headless CLI). **Default — app is off.**
-
-**Windows / Linux** (same commands):
-
-```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
-
 ### Library + app (usual workflow)
 
 Also builds `**metaagent-app**` (WebView desktop host). Pass `-DMETAAGENT_BUILD_APP=ON`. Library, tests, and server are still built in the same tree.
@@ -53,6 +41,21 @@ cmake --build build -j
 Shortcut: `./app/build_and_run.sh`
 
 App deps cache (Windows): `%LOCALAPPDATA%\metaagent-app-deps`
+
+
+### Library only (no app)
+
+Builds `metaagent` (static lib), all unit tests, and `metaagent_server` (headless CLI). **Default — app is off.**
+
+**Windows / Linux** (same commands):
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+
 
 ---
 

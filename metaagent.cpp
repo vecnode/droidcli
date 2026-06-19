@@ -10,6 +10,7 @@
 #include "media/decode.cpp"
 #include "media/probe.cpp"
 #include "media/store.cpp"
+#include "media/corpus.cpp"
 #include "media/pipeline.cpp"
 #include "media/mask_cache.cpp"
 

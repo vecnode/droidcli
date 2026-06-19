@@ -56,6 +56,10 @@ target_link_libraries(metaagent_media_decode_test PRIVATE metaagent)
 metaagent_stage_ffmpeg_runtime(metaagent_media_decode_test)
 add_test(NAME media_decode_test COMMAND metaagent_media_decode_test)
 
+add_executable(metaagent_corpus_test tests/corpus_test.cpp)
+target_link_libraries(metaagent_corpus_test PRIVATE metaagent)
+add_test(NAME corpus_test COMMAND metaagent_corpus_test)
+
 add_executable(metaagent_camera_rig_test tests/camera_rig_test.cpp)
 target_link_libraries(metaagent_camera_rig_test PRIVATE metaagent)
 add_test(NAME camera_rig_test COMMAND metaagent_camera_rig_test)

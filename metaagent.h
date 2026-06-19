@@ -24,6 +24,7 @@
 #include "media/pipeline.hpp"
 #include "media/probe.hpp"
 #include "media/store.hpp"
+#include "media/corpus.hpp"
 
 #include "camera/controller.hpp"
 #include "camera/rig.hpp"
