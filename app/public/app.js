@@ -90,6 +90,14 @@ async function refreshNetwork() {
     ? `Media Player online`
     : `Media Player offline`;
   document.getElementById("network-badge").title = url;
+
+  const detectLabel = document.getElementById("media-detection-label");
+  if (detectLabel) {
+    detectLabel.textContent = online
+      ? `Detection: media-player-cpp online (${url})`
+      : `Detection: media-player-cpp offline (${url})`;
+    detectLabel.classList.toggle("error", !online);
+  }
 }
 
 async function refreshMediaStatus() {
@@ -136,6 +144,35 @@ async function mediaCommand(path, body = null) {
   await refreshMediaStatus();
   await refreshCommsLog();
   return result;
+}
+
+async function refreshMediaClips() {
+  const select = document.getElementById("media-clip-select");
+  if (!select) return;
+
+  const result = await fetchJson("/api/media/clips");
+  select.innerHTML = "";
+
+  const clips = Array.isArray(result) ? result : result.clips || [];
+  if (!clips.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No clips available";
+    select.appendChild(option);
+    return;
+  }
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Select clip index…";
+  select.appendChild(placeholder);
+
+  for (const clip of clips) {
+    const option = document.createElement("option");
+    option.value = String(clip.index);
+    option.textContent = `[${clip.index}] ${clip.name || clip.path || "clip"}`;
+    select.appendChild(option);
+  }
 }
 
 async function refreshRuntimes() {
@@ -230,9 +267,10 @@ async function refreshOllama() {
 }
 
 async function refreshCommsLog() {
-  const mediaLog = await fetchJson("/api/media/log");
+  const mediaLog = await fetchJson("/api/app/log");
   const entries = (mediaLog.entries || []).map((entry) => ({
-    text: `[${entry.action}] ${entry.summary}`,
+    text: `${entry.timestamp || "--:--:--"} [${(entry.channel || "app").toUpperCase()}] [${(entry.direction || "event").toUpperCase()}] ${entry.summary}`,
+    direction: entry.direction || "event",
     delivered: !!entry.success,
   }));
 
@@ -245,7 +283,7 @@ async function refreshCommsLog() {
 
   for (const entry of entries.slice().reverse()) {
     const item = document.createElement("li");
-    item.className = `log-item ${entry.delivered ? "ok" : "fail"}`;
+    item.className = `log-item log-${entry.direction} ${entry.delivered ? "ok" : "fail"}`;
     item.textContent = entry.text;
     list.appendChild(item);
   }
@@ -253,9 +291,32 @@ async function refreshCommsLog() {
 
 document.getElementById("media-play").addEventListener("click", () => mediaCommand("/api/media/play"));
 document.getElementById("media-next").addEventListener("click", () => mediaCommand("/api/media/next"));
+document.getElementById("media-previous").addEventListener("click", () => mediaCommand("/api/media/previous"));
 document.getElementById("media-stop").addEventListener("click", () => mediaCommand("/api/media/stop"));
+document.getElementById("media-refresh-clips").addEventListener("click", async () => {
+  await refreshMediaClips();
+  await refreshCommsLog();
+});
+
+document.getElementById("media-open-clip").addEventListener("click", async () => {
+  const select = document.getElementById("media-clip-select");
+  if (!select || select.value === "") return;
+  await mediaCommand(`/api/media/clips/${select.value}`);
+});
+
 document.getElementById("media-subtitles").addEventListener("change", (event) => {
   mediaCommand("/api/media/subtitles", { enabled: event.target.checked });
+});
+
+document.getElementById("media-subtitle-apply").addEventListener("click", async () => {
+  const input = document.getElementById("media-subtitle-text");
+  await mediaCommand("/api/media/subtitles", { text: input?.value || "" });
+});
+
+document.getElementById("media-subtitle-clear").addEventListener("click", async () => {
+  const input = document.getElementById("media-subtitle-text");
+  if (input) input.value = "";
+  await mediaCommand("/api/media/subtitles", { text: "" });
 });
 
 document.getElementById("chat-form").addEventListener("submit", async (event) => {
@@ -314,6 +375,7 @@ async function refreshAll() {
   await Promise.all([
     refreshNetwork(),
     refreshMediaStatus(),
+    refreshMediaClips(),
     refreshRuntimes(),
     refreshOllama(),
     refreshCommsLog(),
@@ -321,8 +383,9 @@ async function refreshAll() {
 }
 
 refreshAll();
-setInterval(refreshNetwork, 3000);
-setInterval(refreshMediaStatus, 2500);
+setInterval(refreshNetwork, 5000);
+setInterval(refreshMediaStatus, 5000);
 setInterval(refreshCommsLog, 2500);
+setInterval(refreshMediaClips, 10000);
 setInterval(refreshRuntimes, 5000);
 setInterval(refreshOllama, 15000);

@@ -168,6 +168,13 @@ void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)
 			response);
 	});
 
+	server.Get("/api/app/log", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_metaagent_response(
+			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.build_app_log_json()},
+			response);
+	});
+
 	server.Post("/api/media/play", [&host](const httplib::Request& request, httplib::Response& response)
 	{
 		apply_json_body(host.proxy_media_player_post("/api/play", request.body), response);

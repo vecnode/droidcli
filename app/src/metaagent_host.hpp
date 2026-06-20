@@ -1,7 +1,9 @@
 #pragma once
 
 #include "metaagent.h"
+#include "media_dataset_mirror.hpp"
 
+#include <ctime>
 #include <mutex>
 
 namespace metaagent::app_host {
@@ -13,6 +15,7 @@ struct HostConfig {
 	core::String system_prompt =
 		"You are a concise assistant embedded in the MetaAgent desktop application.";
 	core::String media_player_base_url = "http://127.0.0.1:8080";
+	core::String media_data_directory;
 };
 
 class MetaAgentHost {
@@ -41,6 +44,7 @@ public:
 	core::String proxy_media_player_get(const core::String& path) const;
 	core::String proxy_media_player_post(const core::String& path, const core::String& body);
 	core::String build_media_control_log_json() const;
+	core::String build_app_log_json() const;
 
 	core::String build_ollama_status_json();
 	core::String update_ollama_config(const core::String& body);
@@ -56,7 +60,14 @@ private:
 	void apply_command_side_effects(app::CommandId command);
 
 	core::String build_media_player_url(const core::String& path) const;
-	void append_media_control_log(const core::String& action, const core::String& summary, bool success);
+	void append_media_control_log(
+		const core::String& action,
+		const core::String& summary,
+		bool success,
+		const core::String& direction = "out");
+	void append_app_log(const core::String& channel, const core::String& direction, const core::String& summary, bool success);
+	static core::String make_log_timestamp();
+	static bool should_emit_periodic_log(std::time_t now_utc, std::time_t& last_emit_utc, int32_t min_interval_seconds);
 
 	HostConfig config_;
 	session::RuntimeSession session_;
@@ -71,12 +82,20 @@ private:
 	core::Array<core::String> notify_log_;
 
 	struct MediaControlLogEntry {
+		core::String timestamp;
+		core::String channel;
+		core::String direction;
 		core::String action;
 		core::String summary;
 		bool success = false;
 	};
 
 	core::Array<MediaControlLogEntry> media_control_log_;
+	MediaDatasetMirror media_dataset_mirror_;
+	std::time_t last_status_out_log_utc_ = 0;
+	std::time_t last_status_fail_log_utc_ = 0;
+	std::time_t last_clips_fallback_log_utc_ = 0;
+	bool media_player_online_last_seen_ = true;
 	bool recording_active_ = false;
 	bool autopilot_enabled_ = false;
 	bool cinematic_enabled_ = false;
