@@ -163,15 +163,21 @@ code {
 }
 
 .layout {
-  padding: 12px;
+  padding: 10px;
   display: grid;
-  gap: 12px;
+  gap: 10px;
   align-content: start;
 }
 
 .layout-single {
   grid-template-columns: 1fr;
   max-width: 640px;
+}
+
+.layout-settings {
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+  align-items: start;
+  max-width: 1100px;
 }
 
 .layout-dashboard {
@@ -186,7 +192,7 @@ code {
 .dashboard-left,
 .dashboard-right {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
   min-height: 0;
 }
@@ -205,20 +211,20 @@ code {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 14px;
+  padding: 11px 12px;
   min-width: 0;
 }
 
 .panel-head h2 {
   margin: 0 0 2px;
   font-family: var(--font-serif);
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 .panel-desc {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 11px;
   color: var(--muted);
 }
@@ -227,16 +233,16 @@ code {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 7px;
 }
 
 .media-row {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 7px;
 }
 
 .media-row .field-label {
@@ -247,7 +253,7 @@ code {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 10px;
+  padding: 5px 9px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface-muted);
@@ -263,29 +269,29 @@ code {
 
 .media-status {
   margin: 0;
-  padding: 8px 10px;
+  padding: 5px 9px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface-muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   font-family: var(--mono);
   overflow-wrap: anywhere;
 }
 
 .process-block {
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--border);
 }
 
 .process-block .media-status {
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .process-title {
-  margin: 0 0 8px;
-  font-size: 11px;
+  margin: 0 0 6px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -296,11 +302,11 @@ code {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 10px 0;
+  margin: 8px 0;
 }
 
 .media-status + .media-status {
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .media-status.error {
@@ -325,8 +331,8 @@ code {
 }
 
 .runtime-section-title {
-  margin: 0 0 6px;
-  font-size: 11px;
+  margin: 0 0 4px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -337,8 +343,8 @@ code {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 14px 0 10px;
-  font-size: 11px;
+  margin: 9px 0 7px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--muted);
   text-transform: uppercase;
@@ -363,19 +369,19 @@ code {
 .runtime-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 9px;
+  padding: 5px 9px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface-muted);
 }
 
 .runtime-row + .runtime-row {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .runtime-row-name {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -391,18 +397,18 @@ code {
 
 .env-table th {
   text-align: left;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--muted);
   background: var(--surface-muted);
-  padding: 8px 12px;
+  padding: 4px 9px;
   border-bottom: 1px solid var(--border);
 }
 
 .env-table td {
-  padding: 10px 12px;
+  padding: 4px 9px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
@@ -412,21 +418,27 @@ code {
 }
 
 .env-table td:first-child {
-  width: 44%;
+  width: 46%;
 }
 
 .env-table code {
   display: block;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 10px;
   color: var(--accent);
   overflow-wrap: anywhere;
 }
 
+.env-table input {
+  padding: 4px 7px;
+  font-size: 11px;
+}
+
 .env-note {
   display: block;
-  margin-top: 2px;
-  font-size: 10px;
+  margin-top: 0;
+  font-size: 9px;
+  line-height: 1.25;
   color: var(--muted);
   white-space: normal;
 }
@@ -463,8 +475,8 @@ code {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
-  padding-bottom: 12px;
+  margin-bottom: 9px;
+  padding-bottom: 9px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -472,8 +484,8 @@ code {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 12px;
-  padding: 8px 10px;
+  margin-bottom: 9px;
+  padding: 6px 9px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface-muted);
@@ -491,7 +503,7 @@ select {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 6px 9px;
   font: inherit;
   font-size: 12px;
   color: var(--text);
@@ -512,7 +524,7 @@ select:focus {
   font: inherit;
   font-size: 12px;
   font-weight: 600;
-  padding: 8px 12px;
+  padding: 6px 11px;
   border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
@@ -609,7 +621,7 @@ select:focus {
 .ai-details {
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 8px 10px;
+  padding: 7px 10px;
   background: var(--surface-muted);
 }
 
@@ -620,7 +632,7 @@ select:focus {
 }
 
 .ai-sub {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   font-size: 11px;
   color: var(--muted);
 }
@@ -629,7 +641,8 @@ select:focus {
   color: var(--danger);
 }
 
-.adapter-lamp {
+.adapter-lamp,
+.media-lamp {
   display: inline-block;
   vertical-align: middle;
   margin-left: 6px;
@@ -637,8 +650,8 @@ select:focus {
 
 .stack {
   display: grid;
-  gap: 8px;
-  margin-top: 10px;
+  gap: 7px;
+  margin-top: 8px;
 }
 
 .reply {
@@ -661,6 +674,10 @@ select:focus {
     grid-template-columns: 1fr;
     grid-template-rows: none;
     height: auto;
+  }
+
+  .layout-settings {
+    grid-template-columns: 1fr;
   }
 
   .dashboard-left {

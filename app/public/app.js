@@ -85,6 +85,13 @@ async function refreshNetwork() {
   document.getElementById("network-dot").classList.toggle("online", online);
   document.getElementById("network-dot").classList.toggle("offline", !online);
 
+  const mediaLamp = document.getElementById("media-lamp");
+  if (mediaLamp) {
+    mediaLamp.classList.toggle("on", online);
+    mediaLamp.classList.toggle("off", !online);
+    mediaLamp.title = online ? "Media player online" : "Media player offline";
+  }
+
   const url = network.media_player_url || "media player";
   document.getElementById("network-label").textContent = online
     ? `Media Player online`

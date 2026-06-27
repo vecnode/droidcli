@@ -35,7 +35,10 @@
           <div class="dashboard-left">
             <section class="panel panel-media">
               <details class="ai-details" open>
-                <summary>Media Player</summary>
+                <summary>
+                  Media Player
+                  <span class="media-lamp status-lamp off" id="media-lamp" title="Media player status"></span>
+                </summary>
                 <p class="ai-sub">Controls forwarded from metaagent to media-player-cpp over HTTP.</p>
 
                 <div class="media-controls">
@@ -139,11 +142,11 @@
       </section>
 
       <section id="panel-settings" class="panel-view" role="tabpanel" hidden>
-        <div class="layout layout-single">
+        <div class="layout layout-settings">
           <section class="panel">
             <div class="panel-head">
               <h2>Endpoints</h2>
-              <p class="panel-desc">Runtime URLs for the connected applications. Overrides the matching environment variable for this session.</p>
+              <p class="panel-desc">URLs, project dirs and build/run commands for the connected apps. Overrides the matching environment variable for this session.</p>
             </div>
             <form id="endpoints-form">
               <table class="env-table">
@@ -154,7 +157,7 @@
                   <tr>
                     <td>
                       <code>METAAGENT_OLLAMA_URL</code>
-                      <span class="env-note">Adapter / Ollama base URL</span>
+                      <span class="env-note">Ollama text-gen base URL</span>
                     </td>
                     <td><input type="url" id="cfg-ollama-url" name="ollama_url" placeholder="http://127.0.0.1:11434" spellcheck="false"></td>
                   </tr>
@@ -227,7 +230,7 @@
           <section class="panel">
             <div class="panel-head">
               <h2>Ollama</h2>
-              <p class="panel-desc">Language model used by the AI assistant on the Dashboard.</p>
+              <p class="panel-desc">Text-gen model used by the Agent on the Dashboard.</p>
             </div>
             <div class="ollama-status-row">
               <span class="status-lamp" id="ollama-lamp"></span>
