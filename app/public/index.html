@@ -34,54 +34,40 @@
         <div class="layout layout-dashboard">
           <div class="dashboard-left">
             <section class="panel panel-media">
-              <div class="panel-head">
-                <h2>Media Player</h2>
-                <p class="panel-desc">Controls forwarded from metaagent to media-player-cpp over HTTP.</p>
-              </div>
+              <details class="ai-details" open>
+                <summary>Media Player</summary>
+                <p class="ai-sub">Controls forwarded from metaagent to media-player-cpp over HTTP.</p>
 
-              <div class="media-controls">
-                <button type="button" class="btn" id="media-play">Play</button>
-                <button type="button" class="btn" id="media-stop">Stop</button>
-                <button type="button" class="btn" id="media-next">Next</button>
-                <button type="button" class="btn" id="media-previous">Previous</button>
-                <button type="button" class="btn" id="media-refresh-clips">Refresh Clips</button>
-                <label class="media-toggle">
-                  <input type="checkbox" id="media-subtitles">
-                  <span>Subtitles</span>
-                </label>
-              </div>
-
-              <div class="media-row">
-                <label class="field-label" for="media-clip-select">Clip</label>
-                <select id="media-clip-select">
-                  <option value="">Load clips to select…</option>
-                </select>
-                <button type="button" class="btn" id="media-open-clip">Open Clip</button>
-              </div>
-
-              <p id="media-detection-label" class="media-status">Detection: checking every 5s…</p>
-              <p id="media-status-label" class="media-status">no clip loaded</p>
-
-              <div class="process-block">
-                <p class="process-title">Build &amp; run (centralised)</p>
                 <div class="media-controls">
-                  <button type="button" class="btn" id="media-build">Build</button>
-                  <button type="button" class="btn" id="media-run">RunRelease</button>
-                  <button type="button" class="btn" id="media-process-stop">Stop process</button>
+                  <button type="button" class="btn" id="media-next">Next</button>
+                  <button type="button" class="btn" id="media-previous">Previous</button>
+                  <button type="button" class="btn" id="media-refresh-clips">Refresh Clips</button>
+                  <label class="media-toggle">
+                    <input type="checkbox" id="media-subtitles">
+                    <span>Subtitles</span>
+                  </label>
                 </div>
-                <p id="media-process-status" class="media-status">Process: idle</p>
-              </div>
-            </section>
 
-            <section class="panel panel-ai">
-              <details class="ai-details">
-                <summary>Text Assistant · Ollama</summary>
-                <p class="ai-sub">General text generation via Ollama (<span id="chat-model-hint">model</span>).</p>
-                <form id="chat-form" class="stack">
-                  <textarea id="chat-input" rows="2" placeholder="Ask Ollama…"></textarea>
-                  <button type="submit" class="btn btn-dark">Ask</button>
-                  <pre id="chat-output" class="reply"></pre>
-                </form>
+                <div class="media-row">
+                  <label class="field-label" for="media-clip-select">Clip</label>
+                  <select id="media-clip-select">
+                    <option value="">Load clips to select…</option>
+                  </select>
+                  <button type="button" class="btn" id="media-open-clip">Open Clip</button>
+                </div>
+
+                <p id="media-detection-label" class="media-status">Detection: checking every 5s…</p>
+                <p id="media-status-label" class="media-status">no clip loaded</p>
+
+                <div class="process-block">
+                  <p class="process-title">Build &amp; run (centralised)</p>
+                  <div class="media-controls">
+                    <button type="button" class="btn" id="media-build">Build</button>
+                    <button type="button" class="btn" id="media-run">RunRelease</button>
+                    <button type="button" class="btn" id="media-process-stop">Stop process</button>
+                  </div>
+                  <p id="media-process-status" class="media-status">Process: idle</p>
+                </div>
               </details>
             </section>
 
@@ -104,6 +90,22 @@
                   <textarea id="adapter-input" rows="4" placeholder="Paste document OCR text…" spellcheck="false"></textarea>
                   <button type="submit" class="btn btn-dark">Summarize</button>
                   <pre id="adapter-output" class="reply"></pre>
+                </form>
+              </details>
+            </section>
+
+            <section class="panel panel-ai">
+              <details class="ai-details">
+                <summary>Agent</summary>
+                <p class="ai-sub">Autonomous control loop + text generation via Ollama (<span id="chat-model-hint">model</span>).</p>
+                <div class="agent-controls">
+                  <button type="button" class="btn btn-accent" id="agent-toggle">Start</button>
+                  <span id="agent-status" class="hint">Stopped</span>
+                </div>
+                <form id="chat-form" class="stack">
+                  <textarea id="chat-input" rows="2" placeholder="Ask Ollama…"></textarea>
+                  <button type="submit" class="btn btn-dark">Ask</button>
+                  <pre id="chat-output" class="reply"></pre>
                 </form>
               </details>
             </section>
