@@ -64,7 +64,7 @@ cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_BUILD_APP=ON -
 cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_BUILD_APP=ON -DMETAAGENT_FFMPEG_ALLOW_INSECURE_DOWNLOAD=OFF
 ```
 
-Shortcut: `.\app\build_and_run.bat`
+Shortcut: `.\build_and_run.bat` (configures only when needed; accepts `Debug`/`Release`, `--configure`, `--clean`, `--no-run`). The older `.\app\build_and_run.bat` always re-configures.
 
 Release: use `--config Release` → `build-msvc\app\Release\metaagent-app.exe`
 
