@@ -103,6 +103,7 @@ add_executable(metaagent-app
     src/metaagent_host.cpp
     src/metaagent_http_mount.cpp
     src/media_dataset_mirror.cpp
+    src/process_manager.cpp
     ${CMAKE_SOURCE_DIR}/tools/sync_http_client.cpp
 )
 

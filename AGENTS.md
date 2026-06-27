@@ -172,6 +172,19 @@ The **desktop app** (`app/src/main.cpp`) reads env vars:
 | `METAAGENT_ADAPTER_URL` | `http://127.0.0.1:8008` | **LoRA adapter** inference base URL (app #2) |
 | `METAAGENT_MEDIA_PLAYER_URL` | `http://127.0.0.1:8080` | media-player-cpp base URL (app #3) |
 | `METAAGENT_MEDIA_DATA_DIR` | empty | Local media dataset dir (corpus + clip mirror fallback) |
+| `METAAGENT_MEDIA_PLAYER_DIR` | empty | media-player-cpp project dir (build/run) |
+| `METAAGENT_MEDIA_BUILD_CMD` | `make Release` | Media player build command (MSYS2 MinGW64) |
+| `METAAGENT_MEDIA_RUN_CMD` | `media-player-cpp.exe` | Media player run binary (launched in project `bin/`) |
+| `METAAGENT_ADAPTER_DIR` | empty | pre-training `deploy/` dir (uv server) |
+| `METAAGENT_ADAPTER_LAUNCH_CMD` | `deploy.bat` | Adapter server launch command |
+
+**Centralised process control** lives in `app/src/process_manager.{hpp,cpp}`
+(Windows Job Object / POSIX process group, so stop kills the whole tree). The
+host (`MetaAgentHost::build_media_player` / `run_media_player` /
+`launch_adapter_server` / `stop_*`, mounted at `/api/media/build|run`,
+`/api/media/process/stop`, `/api/adapter/launch`, `/api/adapter/process/stop`,
+`/api/process/status`) launches the peer apps and reports their PIDs. Commands
+and project dirs are configuration — never hardcode a user's paths in core.
 
 All four URLs/model are also editable live in the app's **Settings → Endpoints**
 table, which `POST`s to `/api/config` (`MetaAgentHost::update_config`) and

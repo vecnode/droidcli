@@ -93,6 +93,11 @@ metaagent::app_host::HostConfig load_host_config()
 		"http://127.0.0.1:8080");
 	config.media_data_directory = env_or_default("METAAGENT_MEDIA_DATA_DIR", "");
 	config.adapter_url = env_or_default("METAAGENT_ADAPTER_URL", "http://127.0.0.1:8008");
+	config.media_player_project_dir = env_or_default("METAAGENT_MEDIA_PLAYER_DIR", "");
+	config.media_player_build_command = env_or_default("METAAGENT_MEDIA_BUILD_CMD", "make Release");
+	config.media_player_run_command = env_or_default("METAAGENT_MEDIA_RUN_CMD", "media-player-cpp.exe");
+	config.adapter_project_dir = env_or_default("METAAGENT_ADAPTER_DIR", "");
+	config.adapter_launch_command = env_or_default("METAAGENT_ADAPTER_LAUNCH_CMD", "deploy.bat");
 	return config;
 }
 

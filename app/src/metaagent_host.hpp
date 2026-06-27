@@ -2,6 +2,7 @@
 
 #include "metaagent.h"
 #include "media_dataset_mirror.hpp"
+#include "process_manager.hpp"
 
 #include <ctime>
 #include <mutex>
@@ -19,6 +20,15 @@ struct HostConfig {
 	// Trained LoRA adapter inference service (LLaVA OCR -> summary), separate
 	// from the Ollama text-generation endpoint above. Repo: vecnode/pre-training.
 	core::String adapter_url = "http://127.0.0.1:8008";
+
+	// Centralised build/run control over the apps metaagent coordinates.
+	// media-player-cpp (openFrameworks) project dir + build/run commands.
+	core::String media_player_project_dir;
+	core::String media_player_build_command = "make Release";
+	core::String media_player_run_command = "media-player-cpp.exe";
+	// pre-training repo deploy/ dir + the uv server launch command (deploy.bat).
+	core::String adapter_project_dir;
+	core::String adapter_launch_command = "deploy.bat";
 };
 
 class MetaAgentHost {
@@ -55,6 +65,14 @@ public:
 
 	core::String build_adapter_status_json();
 	core::String proxy_adapter_summarize(const core::String& body);
+
+	// Centralised process control (build/run media player, launch adapter server).
+	core::String build_media_player();
+	core::String run_media_player();
+	core::String stop_media_player_process();
+	core::String launch_adapter_server();
+	core::String stop_adapter_server();
+	core::String build_process_status_json();
 	core::String set_ue5_runtimes_enabled(const core::String& body);
 
 private:
@@ -81,6 +99,7 @@ private:
 	net::RouteTable routes_;
 
 	core::Array<core::String> notify_log_;
+	ProcessManager process_manager_;
 
 	struct MediaControlLogEntry {
 		core::String timestamp;

@@ -108,7 +108,7 @@ WebView + local HTTP server + control-panel UI. Serves embedded assets from `app
 | `GET` / `POST` | `/echo`                     | Echo query/body                                                   |
 | `POST`         | `/notify`                   | Ingest notify event                                               |
 | `POST`         | `/ai/chat`                  | Ollama text-gen chat via `LanguageAiRuntime`                      |
-| `GET`          | `/api/status`               | Host status: pattern FSM, particle count, toggles                 |
+| `GET`          | `/api/status`               | Host status: recording / autopilot / cinematic toggles            |
 | `GET`          | `/api/network/status`       | Peer connectivity: media player + adapter endpoint                |
 | `GET`          | `/api/config`               | Effective host configuration                                      |
 | `GET`          | `/api/gui/catalog`          | Portable GUI panel catalog                                        |
@@ -136,6 +136,21 @@ WebView + local HTTP server + control-panel UI. Serves embedded assets from `app
 | `POST` | `/api/media/subtitles`     | `/api/subtitles`        |
 | `POST` | `/api/media/clips/{index}` | `/api/clips/{index}`    |
 
+**Centralised process control** (build/run the controlled apps, tracking PID):
+
+| Method | Route                       | Description                                                  |
+| ------ | --------------------------- | ------------------------------------------------------------ |
+| `GET`  | `/api/process/status`       | PID + running state of every launched process                |
+| `POST` | `/api/media/build`          | Build media-player-cpp (`make Release` in its project dir)    |
+| `POST` | `/api/media/run`            | RunRelease media-player-cpp (`bin/media-player-cpp.exe`)      |
+| `POST` | `/api/media/process/stop`   | Stop the media player run process                            |
+| `POST` | `/api/adapter/launch`       | Start the LoRA adapter server (`deploy/deploy.bat`)          |
+| `POST` | `/api/adapter/process/stop` | Stop the adapter server process                              |
+
+Processes are launched in a Windows Job Object (POSIX process group) so stopping
+kills the whole tree. The build command, run command, and project dirs are
+configurable (env vars below / Settings → Endpoints).
+
 Static assets (`/`, `/style.css`, `/app.js`) are embedded in the executable.
 
 ### Environment variables
@@ -150,8 +165,13 @@ Static assets (`/`, `/style.css`, `/app.js`) are embedded in the executable.
 | `METAAGENT_ADAPTER_URL`      | `http://127.0.0.1:8008`  | **LoRA adapter** inference base URL (app #2)              |
 | `METAAGENT_MEDIA_PLAYER_URL` | `http://127.0.0.1:8080`  | media-player-cpp base URL (app #3)                        |
 | `METAAGENT_MEDIA_DATA_DIR`   | empty                    | Local media dataset dir (corpus + clip-mirror fallback)   |
+| `METAAGENT_MEDIA_PLAYER_DIR` | empty                    | media-player-cpp project dir, for build/run               |
+| `METAAGENT_MEDIA_BUILD_CMD`  | `make Release`           | Media player build command (MSYS2 MinGW64)                |
+| `METAAGENT_MEDIA_RUN_CMD`    | `media-player-cpp.exe`   | Media player run binary (launched in project `bin/`)      |
+| `METAAGENT_ADAPTER_DIR`      | empty                    | pre-training `deploy/` dir, for the uv server             |
+| `METAAGENT_ADAPTER_LAUNCH_CMD` | `deploy.bat`           | Adapter server launch command                             |
 
-All four URLs/model are also editable live from the app's **Settings → Endpoints**
+All URLs/model/paths above are also editable live from the app's **Settings → Endpoints**
 table (`POST /api/config`), overriding the env var for the running session.
 
 > Outbound forwarding to a UE/orchestrator host exists in core

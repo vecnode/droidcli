@@ -59,15 +59,18 @@
                 <button type="button" class="btn" id="media-open-clip">Open Clip</button>
               </div>
 
-              <div class="media-row">
-                <label class="field-label" for="media-subtitle-text">Subtitle override</label>
-                <input type="text" id="media-subtitle-text" placeholder="Type subtitle text (optional)">
-                <button type="button" class="btn" id="media-subtitle-apply">Set</button>
-                <button type="button" class="btn" id="media-subtitle-clear">Clear</button>
-              </div>
-
               <p id="media-detection-label" class="media-status">Detection: checking every 5s…</p>
               <p id="media-status-label" class="media-status">no clip loaded</p>
+
+              <div class="process-block">
+                <p class="process-title">Build &amp; run (centralised)</p>
+                <div class="media-controls">
+                  <button type="button" class="btn" id="media-build">Build</button>
+                  <button type="button" class="btn" id="media-run">RunRelease</button>
+                  <button type="button" class="btn" id="media-process-stop">Stop process</button>
+                </div>
+                <p id="media-process-status" class="media-status">Process: idle</p>
+              </div>
             </section>
 
             <section class="panel panel-ai">
@@ -89,6 +92,14 @@
                   <span class="adapter-lamp status-lamp off" id="adapter-lamp" title="Adapter status"></span>
                 </summary>
                 <p class="ai-sub">Trained adapter for OCR→summary generation. <span id="adapter-status-hint" class="muted">Checking…</span></p>
+                <div class="process-block">
+                  <p class="process-title">Inference server (uv)</p>
+                  <div class="media-controls">
+                    <button type="button" class="btn" id="adapter-launch">Launch server</button>
+                    <button type="button" class="btn" id="adapter-process-stop">Stop server</button>
+                  </div>
+                  <p id="adapter-process-status" class="media-status">Process: idle</p>
+                </div>
                 <form id="adapter-form" class="stack">
                   <textarea id="adapter-input" rows="4" placeholder="Paste document OCR text…" spellcheck="false"></textarea>
                   <button type="submit" class="btn btn-dark">Summarize</button>
@@ -165,6 +176,41 @@
                       <span class="env-note">LoRA adapter inference (LLaVA OCR→summary)</span>
                     </td>
                     <td><input type="url" id="cfg-adapter-url" name="adapter_url" placeholder="http://127.0.0.1:8008" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_MEDIA_PLAYER_DIR</code>
+                      <span class="env-note">media-player-cpp project dir (build/run)</span>
+                    </td>
+                    <td><input type="text" id="cfg-media-dir" name="media_player_project_dir" placeholder="C:\path\to\media-player-cpp" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_MEDIA_BUILD_CMD</code>
+                      <span class="env-note">build command (MSYS2 MinGW64)</span>
+                    </td>
+                    <td><input type="text" id="cfg-media-build" name="media_player_build_command" placeholder="make Release" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_MEDIA_RUN_CMD</code>
+                      <span class="env-note">run command (launched in project bin/)</span>
+                    </td>
+                    <td><input type="text" id="cfg-media-run" name="media_player_run_command" placeholder="media-player-cpp.exe" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_ADAPTER_DIR</code>
+                      <span class="env-note">pre-training deploy/ dir (uv server)</span>
+                    </td>
+                    <td><input type="text" id="cfg-adapter-dir" name="adapter_project_dir" placeholder="C:\path\to\pre-training\deploy" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_ADAPTER_LAUNCH_CMD</code>
+                      <span class="env-note">adapter server launch command</span>
+                    </td>
+                    <td><input type="text" id="cfg-adapter-launch" name="adapter_launch_command" placeholder="deploy.bat" spellcheck="false"></td>
                   </tr>
                 </tbody>
               </table>

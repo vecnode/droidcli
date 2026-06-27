@@ -282,7 +282,12 @@ core::String MetaAgentHost::build_config_json() const
 	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
 	stream << net::json_string_field("ollama_model", config_.ollama_model) << ',';
 	stream << net::json_string_field("media_player_base_url", config_.media_player_base_url) << ',';
-	stream << net::json_string_field("adapter_url", config_.adapter_url);
+	stream << net::json_string_field("adapter_url", config_.adapter_url) << ',';
+	stream << net::json_string_field("media_player_project_dir", config_.media_player_project_dir) << ',';
+	stream << net::json_string_field("media_player_build_command", config_.media_player_build_command) << ',';
+	stream << net::json_string_field("media_player_run_command", config_.media_player_run_command) << ',';
+	stream << net::json_string_field("adapter_project_dir", config_.adapter_project_dir) << ',';
+	stream << net::json_string_field("adapter_launch_command", config_.adapter_launch_command);
 	stream << '}';
 	return stream.str();
 }
@@ -766,6 +771,36 @@ core::String MetaAgentHost::update_config(const core::String& body)
 		config_.adapter_url = adapter_url;
 	}
 
+	const core::String media_player_project_dir = net::extract_json_string_field(body, "media_player_project_dir");
+	if (!media_player_project_dir.empty())
+	{
+		config_.media_player_project_dir = media_player_project_dir;
+	}
+
+	const core::String media_player_build_command = net::extract_json_string_field(body, "media_player_build_command");
+	if (!media_player_build_command.empty())
+	{
+		config_.media_player_build_command = media_player_build_command;
+	}
+
+	const core::String media_player_run_command = net::extract_json_string_field(body, "media_player_run_command");
+	if (!media_player_run_command.empty())
+	{
+		config_.media_player_run_command = media_player_run_command;
+	}
+
+	const core::String adapter_project_dir = net::extract_json_string_field(body, "adapter_project_dir");
+	if (!adapter_project_dir.empty())
+	{
+		config_.adapter_project_dir = adapter_project_dir;
+	}
+
+	const core::String adapter_launch_command = net::extract_json_string_field(body, "adapter_launch_command");
+	if (!adapter_launch_command.empty())
+	{
+		config_.adapter_launch_command = adapter_launch_command;
+	}
+
 	if (config_.enable_ai)
 	{
 		ai::OllamaConfig ollama_config;
@@ -782,7 +817,12 @@ core::String MetaAgentHost::update_config(const core::String& body)
 	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
 	stream << net::json_string_field("ollama_model", config_.ollama_model) << ',';
 	stream << net::json_string_field("media_player_base_url", config_.media_player_base_url) << ',';
-	stream << net::json_string_field("adapter_url", config_.adapter_url);
+	stream << net::json_string_field("adapter_url", config_.adapter_url) << ',';
+	stream << net::json_string_field("media_player_project_dir", config_.media_player_project_dir) << ',';
+	stream << net::json_string_field("media_player_build_command", config_.media_player_build_command) << ',';
+	stream << net::json_string_field("media_player_run_command", config_.media_player_run_command) << ',';
+	stream << net::json_string_field("adapter_project_dir", config_.adapter_project_dir) << ',';
+	stream << net::json_string_field("adapter_launch_command", config_.adapter_launch_command);
 	stream << '}';
 	return stream.str();
 }
@@ -885,6 +925,132 @@ core::String MetaAgentHost::proxy_adapter_summarize(const core::String& body)
 	const bool success = status_code >= 200 && status_code < 300;
 	append_app_log("adapter", "in", "POST /api/summarize -> " + std::to_string(status_code), success);
 	return response_body;
+}
+
+core::String MetaAgentHost::build_process_status_json()
+{
+	core::String media_dir;
+	core::String adapter_dir;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		media_dir = config_.media_player_project_dir;
+		adapter_dir = config_.adapter_project_dir;
+	}
+
+	const core::Array<ProcessInfo> processes = process_manager_.snapshot();
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_string_field("media_player_dir", media_dir) << ',';
+	stream << net::json_string_field("adapter_dir", adapter_dir) << ',';
+	stream << "\"processes\":[";
+	for (size_t index = 0; index < processes.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const ProcessInfo& info = processes[index];
+		stream << '{';
+		stream << net::json_string_field("key", info.key) << ',';
+		stream << net::json_string_field("label", info.label) << ',';
+		stream << "\"pid\":" << info.pid << ',';
+		stream << net::json_bool_field("running", info.running) << ',';
+		stream << net::json_string_field("status", info.status_text);
+		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
+}
+
+core::String MetaAgentHost::build_media_player()
+{
+	core::String dir;
+	core::String command;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		dir = config_.media_player_project_dir;
+		command = config_.media_player_build_command;
+	}
+
+	if (dir.empty())
+	{
+		append_app_log("process", "in", "media player project dir not configured", false);
+		return build_process_status_json();
+	}
+
+	core::String error;
+	const bool ok = process_manager_.launch("media_build", "Media Player build", dir, command, error);
+	append_app_log("process", "out", ok ? ("build started: " + command) : ("build failed: " + error), ok);
+	return build_process_status_json();
+}
+
+core::String MetaAgentHost::run_media_player()
+{
+	core::String dir;
+	core::String command;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		dir = config_.media_player_project_dir;
+		command = config_.media_player_run_command;
+	}
+
+	if (dir.empty())
+	{
+		append_app_log("process", "in", "media player project dir not configured", false);
+		return build_process_status_json();
+	}
+
+	// The openFrameworks Release binary expects its working directory to be bin/.
+	core::String run_dir = dir;
+	while (!run_dir.empty() && (run_dir.back() == '/' || run_dir.back() == '\\'))
+	{
+		run_dir.pop_back();
+	}
+	run_dir += "/bin";
+
+	core::String error;
+	const bool ok = process_manager_.launch("media_run", "Media Player (RunRelease)", run_dir, command, error);
+	append_app_log("process", "out", ok ? ("run started: " + command) : ("run failed: " + error), ok);
+	return build_process_status_json();
+}
+
+core::String MetaAgentHost::stop_media_player_process()
+{
+	core::String error;
+	const bool ok = process_manager_.stop("media_run", error);
+	append_app_log("process", "out", ok ? "media player process stopped" : ("stop failed: " + error), ok);
+	return build_process_status_json();
+}
+
+core::String MetaAgentHost::launch_adapter_server()
+{
+	core::String dir;
+	core::String command;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		dir = config_.adapter_project_dir;
+		command = config_.adapter_launch_command;
+	}
+
+	if (dir.empty())
+	{
+		append_app_log("process", "in", "adapter project dir not configured", false);
+		return build_process_status_json();
+	}
+
+	core::String error;
+	const bool ok = process_manager_.launch("adapter_server", "Adapter server (uv)", dir, command, error);
+	append_app_log("process", "out", ok ? ("adapter server started: " + command) : ("adapter launch failed: " + error), ok);
+	return build_process_status_json();
+}
+
+core::String MetaAgentHost::stop_adapter_server()
+{
+	core::String error;
+	const bool ok = process_manager_.stop("adapter_server", error);
+	append_app_log("process", "out", ok ? "adapter server stopped" : ("stop failed: " + error), ok);
+	return build_process_status_json();
 }
 
 core::String MetaAgentHost::set_ue5_runtimes_enabled(const core::String& body)

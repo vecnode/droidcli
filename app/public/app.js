@@ -225,6 +225,11 @@ function applyConfigToForm(config) {
     "cfg-ollama-model": lastConfig.ollama_model,
     "cfg-media-url": lastConfig.media_player_base_url,
     "cfg-adapter-url": lastConfig.adapter_url,
+    "cfg-media-dir": lastConfig.media_player_project_dir,
+    "cfg-media-build": lastConfig.media_player_build_command,
+    "cfg-media-run": lastConfig.media_player_run_command,
+    "cfg-adapter-dir": lastConfig.adapter_project_dir,
+    "cfg-adapter-launch": lastConfig.adapter_launch_command,
   };
   for (const [id, value] of Object.entries(fields)) {
     const input = document.getElementById(id);
@@ -260,6 +265,39 @@ async function refreshAdapter() {
       hint.classList.add("error");
     }
   }
+}
+
+function procText(proc) {
+  if (!proc) return "idle";
+  const pid = proc.pid ? ` PID ${proc.pid}` : "";
+  return `${proc.status || (proc.running ? "running" : "idle")}${pid}`;
+}
+
+async function refreshProcessStatus() {
+  const status = await fetchJson("/api/process/status");
+  const processes = status.processes || [];
+  const get = (key) => processes.find((proc) => proc.key === key);
+
+  const mediaLabel = document.getElementById("media-process-status");
+  if (mediaLabel) {
+    const build = get("media_build");
+    const run = get("media_run");
+    const parts = [];
+    if (build) parts.push(`build: ${procText(build)}`);
+    if (run) parts.push(`run: ${procText(run)}`);
+    mediaLabel.textContent = "Process: " + (parts.length ? parts.join("  ·  ") : "idle");
+  }
+
+  const adapterLabel = document.getElementById("adapter-process-status");
+  if (adapterLabel) {
+    adapterLabel.textContent = "Process: " + procText(get("adapter_server"));
+  }
+}
+
+async function postProcess(path) {
+  await fetchJson(path, { method: "POST" });
+  await refreshProcessStatus();
+  await refreshCommsLog();
 }
 
 async function refreshOllama() {
@@ -359,17 +397,6 @@ document.getElementById("media-subtitles").addEventListener("change", (event) =>
   mediaCommand("/api/media/subtitles", { enabled: event.target.checked });
 });
 
-document.getElementById("media-subtitle-apply").addEventListener("click", async () => {
-  const input = document.getElementById("media-subtitle-text");
-  await mediaCommand("/api/media/subtitles", { text: input?.value || "" });
-});
-
-document.getElementById("media-subtitle-clear").addEventListener("click", async () => {
-  const input = document.getElementById("media-subtitle-text");
-  if (input) input.value = "";
-  await mediaCommand("/api/media/subtitles", { text: "" });
-});
-
 document.getElementById("chat-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = document.getElementById("chat-input");
@@ -411,6 +438,12 @@ document.getElementById("adapter-form").addEventListener("submit", async (event)
   await refreshCommsLog();
 });
 
+document.getElementById("media-build").addEventListener("click", () => postProcess("/api/media/build"));
+document.getElementById("media-run").addEventListener("click", () => postProcess("/api/media/run"));
+document.getElementById("media-process-stop").addEventListener("click", () => postProcess("/api/media/process/stop"));
+document.getElementById("adapter-launch").addEventListener("click", () => postProcess("/api/adapter/launch"));
+document.getElementById("adapter-process-stop").addEventListener("click", () => postProcess("/api/adapter/process/stop"));
+
 document.getElementById("ollama-refresh").addEventListener("click", refreshOllama);
 
 document.getElementById("ue5-runtimes-toggle").addEventListener("click", async () => {
@@ -434,6 +467,11 @@ document.getElementById("endpoints-form").addEventListener("submit", async (even
     ollama_model: document.getElementById("cfg-ollama-model").value.trim(),
     media_player_base_url: document.getElementById("cfg-media-url").value.trim(),
     adapter_url: document.getElementById("cfg-adapter-url").value.trim(),
+    media_player_project_dir: document.getElementById("cfg-media-dir").value.trim(),
+    media_player_build_command: document.getElementById("cfg-media-build").value.trim(),
+    media_player_run_command: document.getElementById("cfg-media-run").value.trim(),
+    adapter_project_dir: document.getElementById("cfg-adapter-dir").value.trim(),
+    adapter_launch_command: document.getElementById("cfg-adapter-launch").value.trim(),
   };
 
   const result = await fetchJson("/api/config", {
@@ -482,6 +520,7 @@ async function refreshAll() {
     refreshOllama(),
     refreshConfig(),
     refreshAdapter(),
+    refreshProcessStatus(),
     refreshCommsLog(),
   ]);
 }
@@ -494,3 +533,4 @@ setInterval(refreshMediaClips, 10000);
 setInterval(refreshRuntimes, 5000);
 setInterval(refreshOllama, 15000);
 setInterval(refreshAdapter, 10000);
+setInterval(refreshProcessStatus, 4000);

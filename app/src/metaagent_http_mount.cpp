@@ -239,6 +239,36 @@ void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)
 		apply_json_body(host.proxy_adapter_summarize(request.body), response);
 	});
 
+	server.Get("/api/process/status", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.build_process_status_json(), response);
+	});
+
+	server.Post("/api/media/build", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.build_media_player(), response);
+	});
+
+	server.Post("/api/media/run", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.run_media_player(), response);
+	});
+
+	server.Post("/api/media/process/stop", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.stop_media_player_process(), response);
+	});
+
+	server.Post("/api/adapter/launch", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.launch_adapter_server(), response);
+	});
+
+	server.Post("/api/adapter/process/stop", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_json_body(host.stop_adapter_server(), response);
+	});
+
 	server.Post("/api/command", [&host](const httplib::Request& request, httplib::Response& response)
 	{
 		const core::String command_name = extract_command_name(request.body);
