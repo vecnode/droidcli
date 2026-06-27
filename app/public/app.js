@@ -378,10 +378,8 @@ async function refreshCommsLog() {
   }
 }
 
-document.getElementById("media-play").addEventListener("click", () => mediaCommand("/api/media/play"));
 document.getElementById("media-next").addEventListener("click", () => mediaCommand("/api/media/next"));
 document.getElementById("media-previous").addEventListener("click", () => mediaCommand("/api/media/previous"));
-document.getElementById("media-stop").addEventListener("click", () => mediaCommand("/api/media/stop"));
 document.getElementById("media-refresh-clips").addEventListener("click", async () => {
   await refreshMediaClips();
   await refreshCommsLog();
@@ -395,6 +393,34 @@ document.getElementById("media-open-clip").addEventListener("click", async () =>
 
 document.getElementById("media-subtitles").addEventListener("change", (event) => {
   mediaCommand("/api/media/subtitles", { enabled: event.target.checked });
+});
+
+// Agent loop: when started, trigger the media player "Next" every 5 seconds
+// (same action as the Next button). Further per-tick logic can be added here.
+let agentTimer = null;
+
+function agentTick() {
+  mediaCommand("/api/media/next");
+}
+
+function setAgentRunning(running) {
+  const toggle = document.getElementById("agent-toggle");
+  const status = document.getElementById("agent-status");
+  toggle.textContent = running ? "Stop" : "Start";
+  toggle.classList.toggle("active", running);
+  status.textContent = running ? "Running — Next every 5s" : "Stopped";
+}
+
+document.getElementById("agent-toggle").addEventListener("click", () => {
+  if (agentTimer) {
+    clearInterval(agentTimer);
+    agentTimer = null;
+    setAgentRunning(false);
+    return;
+  }
+  agentTick();
+  agentTimer = setInterval(agentTick, 5000);
+  setAgentRunning(true);
 });
 
 document.getElementById("chat-form").addEventListener("submit", async (event) => {
