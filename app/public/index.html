@@ -72,11 +72,27 @@
 
             <section class="panel panel-ai">
               <details class="ai-details">
-                <summary>AI Assistant</summary>
+                <summary>Text Assistant · Ollama</summary>
+                <p class="ai-sub">General text generation via Ollama (<span id="chat-model-hint">model</span>).</p>
                 <form id="chat-form" class="stack">
                   <textarea id="chat-input" rows="2" placeholder="Ask Ollama…"></textarea>
                   <button type="submit" class="btn btn-dark">Ask</button>
                   <pre id="chat-output" class="reply"></pre>
+                </form>
+              </details>
+            </section>
+
+            <section class="panel panel-adapter">
+              <details class="ai-details">
+                <summary>
+                  Document Adapter · LLaVA LoRA
+                  <span class="adapter-lamp status-lamp off" id="adapter-lamp" title="Adapter status"></span>
+                </summary>
+                <p class="ai-sub">Trained adapter for OCR→summary generation. <span id="adapter-status-hint" class="muted">Checking…</span></p>
+                <form id="adapter-form" class="stack">
+                  <textarea id="adapter-input" rows="4" placeholder="Paste document OCR text…" spellcheck="false"></textarea>
+                  <button type="submit" class="btn btn-dark">Summarize</button>
+                  <pre id="adapter-output" class="reply"></pre>
                 </form>
               </details>
             </section>
@@ -111,6 +127,55 @@
 
       <section id="panel-settings" class="panel-view" role="tabpanel" hidden>
         <div class="layout layout-single">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Endpoints</h2>
+              <p class="panel-desc">Runtime URLs for the connected applications. Overrides the matching environment variable for this session.</p>
+            </div>
+            <form id="endpoints-form">
+              <table class="env-table">
+                <thead>
+                  <tr><th>Variable</th><th>Value</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_OLLAMA_URL</code>
+                      <span class="env-note">Adapter / Ollama base URL</span>
+                    </td>
+                    <td><input type="url" id="cfg-ollama-url" name="ollama_url" placeholder="http://127.0.0.1:11434" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_OLLAMA_MODEL</code>
+                      <span class="env-note">Model / adapter name</span>
+                    </td>
+                    <td><input type="text" id="cfg-ollama-model" name="ollama_model" placeholder="llama3.2" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_MEDIA_PLAYER_URL</code>
+                      <span class="env-note">media-player-cpp base URL</span>
+                    </td>
+                    <td><input type="url" id="cfg-media-url" name="media_player_base_url" placeholder="http://127.0.0.1:8080" spellcheck="false"></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>METAAGENT_ADAPTER_URL</code>
+                      <span class="env-note">LoRA adapter inference (LLaVA OCR→summary)</span>
+                    </td>
+                    <td><input type="url" id="cfg-adapter-url" name="adapter_url" placeholder="http://127.0.0.1:8008" spellcheck="false"></td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="endpoints-actions">
+                <button type="submit" class="btn btn-dark">Apply Endpoints</button>
+                <button type="button" class="btn" id="endpoints-reset">Reset</button>
+                <span id="endpoints-output" class="hint"></span>
+              </div>
+            </form>
+          </section>
+
           <section class="panel">
             <div class="panel-head">
               <h2>Ollama</h2>

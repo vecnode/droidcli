@@ -10,22 +10,6 @@
 namespace metaagent::app_host {
 namespace {
 
-core::String particle_pattern_state_name(const particle::PatternState state)
-{
-	switch (state)
-	{
-	case particle::PatternState::Idle: return "Idle";
-	case particle::PatternState::Preparing: return "Preparing";
-	case particle::PatternState::Anticipating: return "Anticipating";
-	case particle::PatternState::Forming: return "Forming";
-	case particle::PatternState::Holding: return "Holding";
-	case particle::PatternState::Returning: return "Returning";
-	case particle::PatternState::Dissipating: return "Dissipating";
-	case particle::PatternState::Releasing: return "Releasing";
-	default: return "Unknown";
-	}
-}
-
 core::Array<core::String> parse_ollama_model_names(const core::String& tags_json)
 {
 	core::Array<core::String> names;
@@ -98,11 +82,9 @@ void MetaAgentHost::initialize()
 		session_.features.ai = config_.enable_ai;
 		session_.features.recording = true;
 
-		scheduler_.pattern_config = particle::PatternConfig::make_from_preset(particle::PatternPreset::Normal);
-		scheduler_.settings.manual_pattern_state_advance = true;
-		scheduler_.reset_pattern_runtime();
-
-		seed_mock_particles();
+		// Particles are a UE-plugin runtime; the desktop host does not run a
+		// ParticleScheduler. The session keeps the particle feature flag so the
+		// (ue5-scoped) particle runtime reports correctly when UE5 runtimes are on.
 		wire_callbacks();
 
 		language_ai_transport_.post_json = [](
@@ -139,38 +121,6 @@ void MetaAgentHost::initialize()
 
 void MetaAgentHost::wire_callbacks()
 {
-	scheduler_callbacks_ = particle::SchedulerCallbacks {};
-	scheduler_callbacks_.build_pattern_targets = [this]() { return build_pattern_targets(); };
-	scheduler_callbacks_.begin_pattern_start = [this]()
-	{
-		scheduler_.pattern_runtime.pattern_center = core::Vec3 {0.0f, 0.0f, 120.0f};
-		return true;
-	};
-	scheduler_callbacks_.begin_configured_return = []() { return true; };
-	scheduler_callbacks_.request_dissipate_to_center = []() { return true; };
-	scheduler_callbacks_.complete_pattern_run = [this]()
-	{
-		seed_mock_particles();
-	};
-	scheduler_callbacks_.enter_pattern_state = [](particle::PatternState, particle::PatternState) {};
-	scheduler_callbacks_.commit_anticipation_baseline_for_forming = []() {};
-	scheduler_callbacks_.on_transition_side_effects = [](particle::PatternState) {};
-	scheduler_callbacks_.log_info = [](const core::String& message)
-	{
-		std::cout << "[scheduler] " << message << std::endl;
-	};
-	scheduler_callbacks_.log_warning = [](const core::String& message)
-	{
-		std::cerr << "[scheduler] " << message << std::endl;
-	};
-
-	scheduler_callbacks_.particle_host.read_displayed_positions =
-		[this](particle::DisplayedPose& out_pose) { return read_displayed_positions(out_pose); };
-	scheduler_callbacks_.particle_host.apply_world_positions =
-		[this](const core::Array<core::Vec3>& positions) { apply_world_positions(positions); };
-	scheduler_callbacks_.particle_host.authoritative_particle_count =
-		[this]() { return authoritative_particle_count(); };
-
 	host_services_.toggle_recording = [this]()
 	{
 		recording_active_ = !recording_active_;
@@ -199,88 +149,10 @@ void MetaAgentHost::wire_callbacks()
 	};
 }
 
-void MetaAgentHost::seed_mock_particles()
+void MetaAgentHost::tick(float /*delta_seconds*/)
 {
-	constexpr int32_t k_columns = 10;
-	constexpr int32_t k_rows = 10;
-	constexpr float k_spacing = 12.0f;
-
-	mock_world_positions_.clear();
-	mock_world_positions_.reserve(static_cast<size_t>(k_columns * k_rows));
-
-	for (int32_t row = 0; row < k_rows; ++row)
-	{
-		for (int32_t column = 0; column < k_columns; ++column)
-		{
-			const float x = (static_cast<float>(column) - static_cast<float>(k_columns - 1) * 0.5f) * k_spacing;
-			const float y = (static_cast<float>(row) - static_cast<float>(k_rows - 1) * 0.5f) * k_spacing;
-			mock_world_positions_.push_back(core::Vec3 {x, y, 100.0f});
-		}
-	}
-
-	auto& runtime = scheduler_.pattern_runtime;
-	runtime.baseline_world_positions = mock_world_positions_;
-	runtime.idle_baseline_world_positions = mock_world_positions_;
-	runtime.pattern_columns = k_columns;
-	runtime.pattern_center = core::Vec3 {0.0f, 0.0f, 100.0f};
-}
-
-bool MetaAgentHost::build_pattern_targets()
-{
-	particle::ShapeContext shape_context;
-	shape_context.baseline_world_positions = mock_world_positions_;
-
-	const particle::ShapeBuildResult result = particle::ShapeBuilder::build_pattern_targets(
-		scheduler_.pattern_config,
-		shape_context);
-	if (!result.success)
-	{
-		return false;
-	}
-
-	auto& runtime = scheduler_.pattern_runtime;
-	runtime.pattern_world_targets = result.pattern_world_targets;
-	runtime.canonical_pattern_world_targets = result.pattern_world_targets;
-	runtime.active_shape = result.resolved_shape;
-	runtime.active_shape_frame = result.shape_frame;
-	runtime.shape_debug_info = result.debug_info;
-	runtime.pattern_columns = result.pattern_columns;
-	runtime.awaiting_async_mask = false;
-	return true;
-}
-
-bool MetaAgentHost::read_displayed_positions(particle::DisplayedPose& out_pose)
-{
-	if (mock_world_positions_.empty())
-	{
-		return false;
-	}
-	out_pose.world_positions = mock_world_positions_;
-	out_pose.pattern_center = scheduler_.pattern_runtime.pattern_center;
-	return true;
-}
-
-void MetaAgentHost::apply_world_positions(const core::Array<core::Vec3>& positions)
-{
-	if (!positions.empty())
-	{
-		mock_world_positions_ = positions;
-	}
-}
-
-int32_t MetaAgentHost::authoritative_particle_count() const
-{
-	return static_cast<int32_t>(mock_world_positions_.size());
-}
-
-void MetaAgentHost::tick(float delta_seconds)
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	if (ue5_runtimes_enabled_)
-	{
-		scheduler_.tick_pattern_runtime(delta_seconds, scheduler_callbacks_);
-		scheduler_.tick_state_effects();
-	}
+	// No particle simulation runs in the desktop host; particles are driven by
+	// the Unreal Engine plugin. Kept as a stub so the host tick timer is harmless.
 }
 
 session::RuntimeSession& MetaAgentHost::session()
@@ -348,7 +220,6 @@ core::String MetaAgentHost::build_notify_log_json() const
 core::String MetaAgentHost::build_status_json() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	const auto& runtime = scheduler_.pattern_runtime;
 	const runtime::RecordingSnapshot recording = runtime::invoke_query_recording(host_services_);
 	const runtime::AiSnapshot ai = runtime::invoke_query_ai(host_services_);
 
@@ -358,17 +229,10 @@ core::String MetaAgentHost::build_status_json() const
 	stream << net::json_string_field("map", session_.map_name) << ',';
 	stream << net::json_string_field("build", session_.build_label) << ',';
 	stream << net::json_bool_field("active", session_.active) << ',';
-	stream << net::json_string_field("pattern_state", particle_pattern_state_name(runtime.state)) << ',';
-	stream << net::json_string_field("pattern_status",
-		scheduler_.build_pattern_status_text(
-			authoritative_particle_count(),
-			0)) << ',';
-	stream << net::json_string_field("pattern_preset", runtime.active_config.get_preset_display_name()) << ',';
 	stream << net::json_bool_field("recording", recording.capture_active) << ',';
 	stream << net::json_bool_field("autopilot", ai.autopilot_enabled) << ',';
 	stream << net::json_bool_field("cinematic", cinematic_enabled_) << ',';
-	stream << net::json_bool_field("focus_particles", focus_particles_) << ',';
-	stream << "\"particle_count\":" << authoritative_particle_count();
+	stream << net::json_bool_field("focus_particles", focus_particles_);
 	stream << '}';
 	return stream.str();
 }
@@ -417,7 +281,8 @@ core::String MetaAgentHost::build_config_json() const
 	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
 	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
 	stream << net::json_string_field("ollama_model", config_.ollama_model) << ',';
-	stream << net::json_string_field("media_player_base_url", config_.media_player_base_url);
+	stream << net::json_string_field("media_player_base_url", config_.media_player_base_url) << ',';
+	stream << net::json_string_field("adapter_url", config_.adapter_url);
 	stream << '}';
 	return stream.str();
 }
@@ -426,11 +291,10 @@ void MetaAgentHost::apply_command_side_effects(const app::CommandId command)
 {
 	switch (command)
 	{
+	// Pattern stepping is a particle command handled by the UE plugin; the
+	// desktop host has no scheduler, so these are intentionally no-ops here.
 	case app::CommandId::PatternStepForward:
-		scheduler_.dispatch_pattern_transition(particle::TransitionTrigger::Advance, scheduler_callbacks_);
-		break;
 	case app::CommandId::PatternStepBackward:
-		scheduler_.dispatch_pattern_transition(particle::TransitionTrigger::Retreat, scheduler_callbacks_);
 		break;
 	case app::CommandId::ToggleRecording:
 		runtime::invoke_toggle_recording(host_services_);
@@ -471,9 +335,6 @@ core::String MetaAgentHost::dispatch_command(const core::String& command_name)
 	if (validation.success)
 	{
 		apply_command_side_effects(command);
-		stream << ',';
-		stream << net::json_string_field("pattern_state",
-			particle_pattern_state_name(scheduler_.pattern_runtime.state));
 	}
 
 	stream << '}';
@@ -875,6 +736,155 @@ core::String MetaAgentHost::update_ollama_config(const core::String& body)
 		+ net::json_bool_field("success", true) + ","
 		+ net::json_string_field("model", config_.ollama_model)
 		+ "}";
+}
+
+core::String MetaAgentHost::update_config(const core::String& body)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	const core::String ollama_url = net::extract_json_string_field(body, "ollama_url");
+	if (!ollama_url.empty())
+	{
+		config_.ollama_url = ollama_url;
+	}
+
+	const core::String ollama_model = net::extract_json_string_field(body, "ollama_model");
+	if (!ollama_model.empty())
+	{
+		config_.ollama_model = ollama_model;
+	}
+
+	const core::String media_player_base_url = net::extract_json_string_field(body, "media_player_base_url");
+	if (!media_player_base_url.empty())
+	{
+		config_.media_player_base_url = media_player_base_url;
+	}
+
+	const core::String adapter_url = net::extract_json_string_field(body, "adapter_url");
+	if (!adapter_url.empty())
+	{
+		config_.adapter_url = adapter_url;
+	}
+
+	if (config_.enable_ai)
+	{
+		ai::OllamaConfig ollama_config;
+		ollama_config.base_url = config_.ollama_url;
+		ollama_config.model = config_.ollama_model;
+		ollama_config.enabled = true;
+		language_ai_.set_ollama_config(ollama_config);
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("success", true) << ',';
+	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
+	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
+	stream << net::json_string_field("ollama_model", config_.ollama_model) << ',';
+	stream << net::json_string_field("media_player_base_url", config_.media_player_base_url) << ',';
+	stream << net::json_string_field("adapter_url", config_.adapter_url);
+	stream << '}';
+	return stream.str();
+}
+
+core::String MetaAgentHost::build_adapter_status_json()
+{
+	core::String base;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		base = config_.adapter_url;
+	}
+	while (!base.empty() && base.back() == '/')
+	{
+		base.pop_back();
+	}
+
+	bool online = false;
+	core::String device;
+	core::String mode;
+	core::String dtype;
+	if (!base.empty())
+	{
+		int32_t status_code = 0;
+		core::String response_body;
+		const bool transport_ok = tools::sync_http_get(base + "/api/health", status_code, response_body);
+		online = transport_ok && status_code >= 200 && status_code < 300;
+		if (online)
+		{
+			device = net::extract_json_string_field(response_body, "device");
+
+			int32_t info_status = 0;
+			core::String info_body;
+			if (tools::sync_http_get(base + "/api/model-info", info_status, info_body)
+				&& info_status >= 200 && info_status < 300)
+			{
+				mode = net::extract_json_string_field(info_body, "mode");
+				dtype = net::extract_json_string_field(info_body, "dtype");
+				if (device.empty())
+				{
+					device = net::extract_json_string_field(info_body, "device");
+				}
+			}
+		}
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("online", online) << ',';
+	stream << net::json_string_field("adapter_url", base) << ',';
+	stream << net::json_string_field("device", device) << ',';
+	stream << net::json_string_field("mode", mode) << ',';
+	stream << net::json_string_field("dtype", dtype);
+	stream << '}';
+	return stream.str();
+}
+
+core::String MetaAgentHost::proxy_adapter_summarize(const core::String& body)
+{
+	append_app_log("adapter", "out", "POST /api/summarize", true);
+
+	core::String base;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		base = config_.adapter_url;
+	}
+
+	if (base.empty())
+	{
+		append_app_log("adapter", "in", "adapter URL not configured", false);
+		return "{"
+			+ net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "adapter URL not configured")
+			+ "}";
+	}
+
+	while (!base.empty() && base.back() == '/')
+	{
+		base.pop_back();
+	}
+
+	const core::String url = base + "/api/summarize";
+	int32_t status_code = 0;
+	core::String response_body;
+	const bool transport_ok = tools::sync_http_post_json(url, body, status_code, response_body);
+	if (!transport_ok)
+	{
+		append_app_log("adapter", "in", "adapter unreachable", false);
+		return "{"
+			+ net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "adapter unreachable") + ","
+			+ net::json_string_field("adapter_url", base)
+			+ "}";
+	}
+
+	if (response_body.empty())
+	{
+		response_body = "{}";
+	}
+
+	const bool success = status_code >= 200 && status_code < 300;
+	append_app_log("adapter", "in", "POST /api/summarize -> " + std::to_string(status_code), success);
+	return response_body;
 }
 
 core::String MetaAgentHost::set_ue5_runtimes_enabled(const core::String& body)

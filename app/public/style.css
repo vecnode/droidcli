@@ -10,7 +10,10 @@
   --success: #067647;
   --danger: #b42318;
   --font: "Segoe UI", system-ui, -apple-system, sans-serif;
-  --mono: "Cascadia Mono", "Consolas", monospace;
+  --font-serif: "Copernicus", "Tiempos Headline", Georgia, "Times New Roman", ui-serif, serif;
+  --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  --radius: 8px;
+  --shadow: 0 1px 2px rgba(28, 25, 23, 0.04);
 }
 
 * {
@@ -75,8 +78,10 @@ code {
 }
 
 .brand-name {
-  font-size: 14px;
-  font-weight: 700;
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1.2;
 }
 
@@ -171,8 +176,11 @@ code {
 
 .layout-dashboard {
   grid-template-columns: 1fr 1fr;
+  grid-template-rows: minmax(0, 1fr);
   max-width: none;
-  align-items: start;
+  align-items: stretch;
+  align-content: stretch;
+  height: 100%;
 }
 
 .dashboard-left,
@@ -180,20 +188,33 @@ code {
   display: grid;
   gap: 12px;
   min-width: 0;
+  min-height: 0;
+}
+
+.dashboard-left {
+  align-content: start;
+  overflow: auto;
+}
+
+.dashboard-right {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 12px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 14px;
   min-width: 0;
 }
 
 .panel-head h2 {
   margin: 0 0 2px;
-  font-size: 14px;
-  font-weight: 700;
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .panel-desc {
@@ -327,6 +348,64 @@ code {
   font-weight: 600;
 }
 
+.env-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.env-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  background: var(--surface-muted);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.env-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.env-table tr:last-child td {
+  border-bottom: none;
+}
+
+.env-table td:first-child {
+  width: 46%;
+  white-space: nowrap;
+}
+
+.env-table code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.env-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: normal;
+}
+
+.endpoints-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .ollama-form {
   display: grid;
   gap: 8px;
@@ -429,15 +508,18 @@ select:focus {
 }
 
 .panel-terminal {
-  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .terminal-log {
-  min-height: 200px;
-  max-height: calc(100vh - 180px);
-  background: #131314;
-  color: #d6e6d3;
-  border-color: #2c312f;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  background: var(--surface-muted);
+  color: var(--text);
+  border-color: var(--border);
 }
 
 .log-item {
@@ -457,26 +539,26 @@ select:focus {
 }
 
 .terminal-log .log-item {
-  border-bottom-color: #242927;
+  border-bottom-color: var(--border);
   font-family: var(--mono);
   font-size: 10px;
   line-height: 1.2;
 }
 
 .terminal-log .log-item.log-out {
-  color: #8ec7ff;
+  color: #1d4ed8;
 }
 
 .terminal-log .log-item.log-in {
-  color: #b8f8b9;
+  color: var(--success);
 }
 
 .terminal-log .log-item.log-event {
-  color: #d4c7ff;
+  color: #6d28d9;
 }
 
 .terminal-log .log-item.fail {
-  color: #ff8b8b;
+  color: var(--danger);
 }
 
 .muted {
@@ -506,6 +588,22 @@ select:focus {
   font-size: 12px;
 }
 
+.ai-sub {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ai-sub.error {
+  color: var(--danger);
+}
+
+.adapter-lamp {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
 .stack {
   display: grid;
   gap: 8px;
@@ -530,6 +628,17 @@ select:focus {
 @media (max-width: 900px) {
   .layout-dashboard {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
+    height: auto;
+  }
+
+  .dashboard-left {
+    overflow: visible;
+  }
+
+  .dashboard-right {
+    grid-template-rows: none;
+    min-height: 320px;
   }
 
   .media-row {

@@ -1,14 +1,37 @@
 # metaagent
 
-Portable C++17 core for the metaagent library. 
+Portable C++17 core for the metaagent library — the **agent controller and
+network trigger** of a three-application system.
 
-metaagent is a multimodal set of runtimes for media generation with humanoid design.
+metaagent is a multimodal set of runtimes for media generation with humanoid
+design. It does not render or play media itself: it holds the domain logic
+(particles, camera, masks, commands), and **coordinates two peer applications
+over HTTP**.
 
-Applications include: **particle pattern mechanics**, **camera rig math**, **media/mask pipeline**, **HTTP (inbound + outbound)**, **session + command validation**, and **input policy**.
+| # | Application | Role | How metaagent reaches it |
+| - | ----------- | ---- | ------------------------ |
+| 1 | **metaagent** (this repo) | Agent controller + network trigger | — |
+| 2 | **Adapter inference** (LoRA) | Trained **LLaVA 1.5 LoRA** adapter; OCR-text → summary generation. FastAPI service, [vecnode/pre-training](https://github.com/vecnode/pre-training) | Adapter seam: `/api/adapter/summarize` → `METAAGENT_ADAPTER_URL` (default `http://127.0.0.1:8008`) |
+| 3 | **media-player-cpp** (openFrameworks) | Plays the media metaagent cues (clips, subtitles, focus crops) | Media proxy: `/api/media/*` → `METAAGENT_MEDIA_PLAYER_URL` (default `http://127.0.0.1:8080`) |
 
-The **primary standalone host** is the desktop app in `[app/](./app/)` (WebView + embedded HTTP server). An Unreal Engine 5 plugin embeds the same library unchanged via `MetaAgentCoreAggregate.cpp`.
+> **Two separate AI models, do not conflate them.** **Ollama** (`METAAGENT_OLLAMA_URL`,
+> default `:11434`) is an ancillary, general **text-generation** endpoint used by
+> the Dashboard *Text Assistant* — it is not one of the three apps. The **LoRA
+> adapter** (app #2, `METAAGENT_ADAPTER_URL`, default `:8008`) is the purpose-trained
+> LLaVA model used only for its own OCR→summary generation, surfaced as the
+> separate *Document Adapter* panel.
 
-Full design notes: `[ARCHITECTURE.md](./ARCHITECTURE.md)`.
+Core capabilities: **particle pattern mechanics**, **camera rig math**,
+**media/mask + corpus pipeline**, **HTTP (inbound + outbound)**, **signal/trigger
+dispatch**, **session + command validation**, and **input policy**.
+
+The **primary standalone host** is the desktop app in `[app/](./app/)` (WebView +
+embedded HTTP server). A headless CLI lives in `[tools/](./tools/)`. An Unreal
+Engine 5 plugin (separate repo) embeds the same library unchanged via
+`MetaAgentCoreAggregate.cpp`.
+
+Full design notes: `[ARCHITECTURE.md](./ARCHITECTURE.md)`. Working in the repo as
+an agent: `[AGENTS.md](./AGENTS.md)`.
 
 ## Build
 
@@ -79,47 +102,78 @@ WebView + local HTTP server + control-panel UI. Serves embedded assets from `app
 ### Desktop app HTTP routes
 
 
-| Method         | Route              | Description                                                       |
-| -------------- | ------------------ | ----------------------------------------------------------------- |
-| `GET`          | `/health`          | Liveness + session snapshot (portable handler)                    |
-| `GET` / `POST` | `/echo`            | Echo query/body                                                   |
-| `POST`         | `/notify`          | Ingest notify event; optional forward to UE via platform URL      |
-| `POST`         | `/ai/chat`         | Ollama chat via `LanguageAiRuntime`                               |
-| `GET`          | `/api/status`      | Host status: pattern FSM, particle count, toggles                 |
-| `GET`          | `/api/config`      | Effective host configuration                                      |
-| `GET`          | `/api/gui/catalog` | Portable GUI panel catalog                                        |
-| `GET`          | `/api/notify/log`  | Recent notify messages                                            |
-| `POST`         | `/api/command`     | Dispatch validated command (`{"command":"pattern_step_forward"}`) |
+| Method         | Route                       | Description                                                       |
+| -------------- | --------------------------- | ----------------------------------------------------------------- |
+| `GET`          | `/health`                   | Liveness + session snapshot (portable handler)                    |
+| `GET` / `POST` | `/echo`                     | Echo query/body                                                   |
+| `POST`         | `/notify`                   | Ingest notify event                                               |
+| `POST`         | `/ai/chat`                  | Ollama text-gen chat via `LanguageAiRuntime`                      |
+| `GET`          | `/api/status`               | Host status: pattern FSM, particle count, toggles                 |
+| `GET`          | `/api/network/status`       | Peer connectivity: media player + adapter endpoint                |
+| `GET`          | `/api/config`               | Effective host configuration                                      |
+| `GET`          | `/api/gui/catalog`          | Portable GUI panel catalog                                        |
+| `GET`          | `/api/runtimes`             | Runtime catalog (incl. optional UE5 runtimes)                     |
+| `POST`         | `/api/runtimes/ue5`         | Enable/disable UE5 runtimes                                       |
+| `GET`          | `/api/notify/log`           | Recent notify messages                                            |
+| `GET`          | `/api/app/log`              | Recent host application log                                       |
+| `POST`         | `/api/command`              | Dispatch validated command (`{"command":"pattern_step_forward"}`) |
+| `GET`          | `/api/ollama/status`        | Ollama text-gen endpoint status + model list                      |
+| `POST`         | `/api/ollama/config`        | Update Ollama model at runtime                                    |
+| `GET`          | `/api/adapter/status`       | LoRA adapter liveness + device/mode/dtype                         |
+| `POST`         | `/api/adapter/summarize`    | Proxy OCR text → adapter (`{"ocr_text":"…"}` → `{"summary":…}`)   |
 
+**Media player coordination** (proxied to media-player-cpp, app #3):
+
+| Method | Route                      | Proxies to              |
+| ------ | -------------------------- | ----------------------- |
+| `GET`  | `/api/media/status`        | `/api/status`           |
+| `GET`  | `/api/media/clips`         | `/api/clips`            |
+| `GET`  | `/api/media/log`           | host media-control log  |
+| `POST` | `/api/media/play`          | `/api/play`             |
+| `POST` | `/api/media/stop`          | `/api/stop`             |
+| `POST` | `/api/media/next`          | `/api/next`             |
+| `POST` | `/api/media/previous`      | `/api/previous`         |
+| `POST` | `/api/media/subtitles`     | `/api/subtitles`        |
+| `POST` | `/api/media/clips/{index}` | `/api/clips/{index}`    |
 
 Static assets (`/`, `/style.css`, `/app.js`) are embedded in the executable.
 
 ### Environment variables
 
 
-| Variable                            | Default                  | Purpose                                          |
-| ----------------------------------- | ------------------------ | ------------------------------------------------ |
-| `METAAGENT_NO_AI`                   | off                      | Set to `1` to disable `/ai/chat`                 |
-| `METAAGENT_OLLAMA_URL`              | `http://127.0.0.1:11434` | Ollama base URL                                  |
-| `METAAGENT_OLLAMA_MODEL`            | `llama3.2`               | Ollama model name                                |
-| `METAAGENT_SYSTEM_PROMPT`           | built-in                 | System prompt for AI                             |
-| `METAAGENT_PLATFORM_URL`            | empty                    | Forward `/notify` to UE or external orchestrator |
-| `METAAGENT_PLATFORM_EVENT_ENDPOINT` | `/api/unreal/event`      | Path appended to platform URL                    |
+| Variable                     | Default                  | Purpose                                                   |
+| ---------------------------- | ------------------------ | --------------------------------------------------------- |
+| `METAAGENT_NO_AI`            | off                      | Set to `1` to disable `/ai/chat` (Ollama text-gen)        |
+| `METAAGENT_OLLAMA_URL`       | `http://127.0.0.1:11434` | Ollama **text-gen** base URL (ancillary, not app #2)      |
+| `METAAGENT_OLLAMA_MODEL`     | `llama3.2`               | Ollama text-gen model name                                |
+| `METAAGENT_SYSTEM_PROMPT`    | built-in                 | System prompt for Ollama text-gen                         |
+| `METAAGENT_ADAPTER_URL`      | `http://127.0.0.1:8008`  | **LoRA adapter** inference base URL (app #2)              |
+| `METAAGENT_MEDIA_PLAYER_URL` | `http://127.0.0.1:8080`  | media-player-cpp base URL (app #3)                        |
+| `METAAGENT_MEDIA_DATA_DIR`   | empty                    | Local media dataset dir (corpus + clip-mirror fallback)   |
 
+All four URLs/model are also editable live from the app's **Settings → Endpoints**
+table (`POST /api/config`), overriding the env var for the running session.
 
-Example — desktop app controlling a UE plugin instance that listens on port 8080:
+> Outbound forwarding to a UE/orchestrator host exists in core
+> (`net/platform_client`, default event endpoint `/api/unreal/event`) but is not
+> wired to an env var in the shipped hosts — wire it through a host if needed.
+
+Example — point the LoRA adapter and media player at custom ports while keeping
+Ollama text-gen on its default:
 
 ```powershell
-$env:METAAGENT_PLATFORM_URL = "http://127.0.0.1:8080"
+$env:METAAGENT_ADAPTER_URL = "http://127.0.0.1:8008"
+$env:METAAGENT_MEDIA_PLAYER_URL = "http://127.0.0.1:8090"
 .\build-msvc\app\Debug\metaagent-app.exe
 ```
 
 ## Headless HTTP server (`tools/`)
 
-Minimal CLI without UI — useful for CI and scripting:
+Minimal CLI without UI — useful for CI and scripting. Configured by flags
+(`--port`, default `30080`; `--ollama-url`; `--ollama-model`; `--no-ai`):
 
 ```sh
-./build/metaagent_server.exe --port 8080
+./build/metaagent_server.exe --port 30080 --ollama-url http://127.0.0.1:11434
 ```
 
 ## Shared HTTP API (library handlers)
@@ -152,27 +206,30 @@ Use `--no-ai` on `metaagent_server` to disable `/ai/chat`.
 
 ```mermaid
 flowchart LR
-    subgraph desktop["Desktop app (app/)"]
+    subgraph metaagent["metaagent — agent controller / network trigger"]
         UI[WebView UI]
         APP[metaagent-app.exe]
-        LIB[metaagent library]
+        LIB[metaagent core library]
+        SRV[metaagent_server.exe headless]
         UI --> APP --> LIB
+        SRV --> LIB
     end
 
-    subgraph headless["Headless (tools/)"]
-        CLI[curl / scripts]
-        SRV[metaagent_server.exe]
-        CLI --> SRV --> LIB
-    end
-
-    subgraph ue["Unreal plugin (unchanged)"]
+    subgraph ue["Unreal plugin (separate repo, unchanged core)"]
         GAME[Game / Editor]
         BRIDGE[Host bridges]
-        LIB2[metaagent library]
+        LIB2[metaagent core library]
         GAME --> BRIDGE --> LIB2
     end
 
-    APP -.->|optional METAAGENT_PLATFORM_URL| ue
+    ADAPTER[("App #2 — LoRA adapter inference\nLLaVA OCR→summary, FastAPI")]
+    MEDIA[("App #3 — media-player-cpp\n(openFrameworks)")]
+    OLLAMA[("Ollama — ancillary text-gen")]
+
+    APP -->|/api/adapter/* → METAAGENT_ADAPTER_URL| ADAPTER
+    APP -->|/api/media/* → METAAGENT_MEDIA_PLAYER_URL| MEDIA
+    APP -->|/ai/chat → METAAGENT_OLLAMA_URL| OLLAMA
+    APP -.->|optional platform forward| ue
 ```
 
 
@@ -185,8 +242,8 @@ flowchart LR
 | --------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `metaagent::particle` | FSM, scheduler, forming/return solvers, actuation compose, shape/mask, state effects, **visual continuity** |
 | `metaagent::camera`   | Zoom, cinematic orbit pose, sway, `CameraController`                                                        |
-| `metaagent::media`    | PNG/JPEG decode, mask pipeline, thumbnails                                                                  |
-| `metaagent::net`      | Router, inbound handlers, `platform_client` (outbound)                                                      |
+| `metaagent::media`    | PNG/JPEG decode, mask pipeline, thumbnails, **corpus** (PDF_TEXT/OBJS_TEXT → subtitles, focus crops)        |
+| `metaagent::net`      | Router, inbound handlers, `platform_client` (outbound), **`signal_router`** (network triggers to peers)     |
 | `metaagent::session`  | `RuntimeSession`, feature flags, status text                                                                |
 | `metaagent::app`      | Command parse/validate, GUI panel catalog, GUI action validation *(domain — not the desktop exe)*           |
 | `metaagent::runtime`  | Host service callbacks + **ParticleHostCallbacks**                                                          |
@@ -196,15 +253,20 @@ flowchart LR
 
 ## Host integration contract (particles)
 
-The scheduler is **callback-driven**. Each host implements `SchedulerCallbacks` and `ParticleHostCallbacks`:
+> **Particles run only in the Unreal Engine plugin.** The desktop app (`app/`)
+> does **not** instantiate or tick a `ParticleScheduler` — there is no mock
+> particle host. The `metaagent::particle` core remains in the library purely so
+> the UE plugin can drive it.
+
+The scheduler is **callback-driven**. The UE plugin implements `SchedulerCallbacks` and `ParticleHostCallbacks`:
 
 
-| Callback                                     | Desktop app (`app/`)           | UE plugin                         |
-| -------------------------------------------- | ------------------------------ | --------------------------------- |
-| `build_pattern_targets`                      | `ShapeBuilder` + mock baseline | Async mask cache, shape providers |
-| `particle_host.read_displayed_positions`     | In-memory mock buffer          | Niagara displayed pose            |
-| `particle_host.apply_world_positions`        | Write mock buffer              | Push to GPU/runtime               |
-| `particle_host.authoritative_particle_count` | Mock grid count                | Live Niagara count                |
+| Callback                                     | UE plugin                         |
+| -------------------------------------------- | --------------------------------- |
+| `build_pattern_targets`                      | Async mask cache, shape providers |
+| `particle_host.read_displayed_positions`     | Niagara displayed pose            |
+| `particle_host.apply_world_positions`        | Push to GPU/runtime               |
+| `particle_host.authoritative_particle_count` | Live Niagara count                |
 
 
 ## HTTP

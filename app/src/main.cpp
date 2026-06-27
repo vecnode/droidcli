@@ -92,6 +92,7 @@ metaagent::app_host::HostConfig load_host_config()
 		"METAAGENT_MEDIA_PLAYER_URL",
 		"http://127.0.0.1:8080");
 	config.media_data_directory = env_or_default("METAAGENT_MEDIA_DATA_DIR", "");
+	config.adapter_url = env_or_default("METAAGENT_ADAPTER_URL", "http://127.0.0.1:8008");
 	return config;
 }
 

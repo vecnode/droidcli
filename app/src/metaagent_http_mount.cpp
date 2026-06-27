@@ -137,6 +137,13 @@ void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)
 			response);
 	});
 
+	server.Post("/api/config", [&host](const httplib::Request& request, httplib::Response& response)
+	{
+		apply_metaagent_response(
+			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.update_config(request.body)},
+			response);
+	});
+
 	server.Get("/api/gui/catalog", [&host](const httplib::Request&, httplib::Response& response)
 	{
 		apply_metaagent_response(
@@ -218,6 +225,18 @@ void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)
 		apply_metaagent_response(
 			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.update_ollama_config(request.body)},
 			response);
+	});
+
+	server.Get("/api/adapter/status", [&host](const httplib::Request&, httplib::Response& response)
+	{
+		apply_metaagent_response(
+			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.build_adapter_status_json()},
+			response);
+	});
+
+	server.Post("/api/adapter/summarize", [&host](const httplib::Request& request, httplib::Response& response)
+	{
+		apply_json_body(host.proxy_adapter_summarize(request.body), response);
 	});
 
 	server.Post("/api/command", [&host](const httplib::Request& request, httplib::Response& response)

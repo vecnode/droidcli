@@ -216,6 +216,52 @@ async function refreshRuntimes() {
   }
 }
 
+let lastConfig = {};
+
+function applyConfigToForm(config) {
+  lastConfig = config || {};
+  const fields = {
+    "cfg-ollama-url": lastConfig.ollama_url,
+    "cfg-ollama-model": lastConfig.ollama_model,
+    "cfg-media-url": lastConfig.media_player_base_url,
+    "cfg-adapter-url": lastConfig.adapter_url,
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    const input = document.getElementById(id);
+    // Don't clobber a field the user is actively editing.
+    if (input && document.activeElement !== input) {
+      input.value = value || "";
+    }
+  }
+}
+
+async function refreshConfig() {
+  const config = await fetchJson("/api/config");
+  applyConfigToForm(config);
+}
+
+async function refreshAdapter() {
+  const status = await fetchJson("/api/adapter/status");
+  const lamp = document.getElementById("adapter-lamp");
+  const hint = document.getElementById("adapter-status-hint");
+  const online = !!status.online;
+
+  if (lamp) {
+    lamp.className = `adapter-lamp status-lamp ${online ? "on" : "off"}`;
+    lamp.title = online ? "Adapter online" : "Adapter offline";
+  }
+  if (hint) {
+    if (online) {
+      const bits = [status.mode, status.dtype, status.device].filter(Boolean).join(" · ");
+      hint.textContent = bits ? `online — ${bits}` : "online";
+      hint.classList.remove("error");
+    } else {
+      hint.textContent = `offline (${status.adapter_url || "adapter"})`;
+      hint.classList.add("error");
+    }
+  }
+}
+
 async function refreshOllama() {
   const status = await fetchJson("/api/ollama/status");
   const lamp = document.getElementById("ollama-lamp");
@@ -234,6 +280,11 @@ async function refreshOllama() {
   lamp.className = `status-lamp ${online ? "on" : "off"}`;
   text.textContent = online ? "Ollama is running" : "Ollama is not reachable";
   urlHint.textContent = `URL: ${status.ollama_url || "—"}`;
+
+  const modelHint = document.getElementById("chat-model-hint");
+  if (modelHint) {
+    modelHint.textContent = status.model || "model";
+  }
 
   if (!modelSelect) return;
 
@@ -337,6 +388,29 @@ document.getElementById("chat-form").addEventListener("submit", async (event) =>
     result.assistant || result.message || result.error || JSON.stringify(result, null, 2);
 });
 
+document.getElementById("adapter-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.getElementById("adapter-input");
+  const ocrText = input.value.trim();
+  if (!ocrText) return;
+
+  const output = document.getElementById("adapter-output");
+  output.textContent = "Generating…";
+
+  const result = await fetchJson("/api/adapter/summarize", {
+    method: "POST",
+    body: JSON.stringify({ ocr_text: ocrText }),
+  });
+
+  if (result.summary) {
+    const meta = result.elapsed_ms ? `\n\n— ${result.elapsed_ms} ms` : "";
+    output.textContent = result.summary + meta;
+  } else {
+    output.textContent = result.error || JSON.stringify(result, null, 2);
+  }
+  await refreshCommsLog();
+});
+
 document.getElementById("ollama-refresh").addEventListener("click", refreshOllama);
 
 document.getElementById("ue5-runtimes-toggle").addEventListener("click", async () => {
@@ -351,6 +425,34 @@ document.getElementById("ue5-runtimes-toggle").addEventListener("click", async (
     return;
   }
   await refreshRuntimes();
+});
+
+document.getElementById("endpoints-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {
+    ollama_url: document.getElementById("cfg-ollama-url").value.trim(),
+    ollama_model: document.getElementById("cfg-ollama-model").value.trim(),
+    media_player_base_url: document.getElementById("cfg-media-url").value.trim(),
+    adapter_url: document.getElementById("cfg-adapter-url").value.trim(),
+  };
+
+  const result = await fetchJson("/api/config", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+  if (result.success) {
+    applyConfigToForm(result);
+    setHint("endpoints-output", "Endpoints applied.", false);
+    await Promise.all([refreshNetwork(), refreshOllama(), refreshAdapter()]);
+  } else {
+    setHint("endpoints-output", result.message || "Update failed.", true);
+  }
+});
+
+document.getElementById("endpoints-reset").addEventListener("click", () => {
+  applyConfigToForm(lastConfig);
+  setHint("endpoints-output", "", false);
 });
 
 document.getElementById("ollama-form").addEventListener("submit", async (event) => {
@@ -378,6 +480,8 @@ async function refreshAll() {
     refreshMediaClips(),
     refreshRuntimes(),
     refreshOllama(),
+    refreshConfig(),
+    refreshAdapter(),
     refreshCommsLog(),
   ]);
 }
@@ -389,3 +493,4 @@ setInterval(refreshCommsLog, 2500);
 setInterval(refreshMediaClips, 10000);
 setInterval(refreshRuntimes, 5000);
 setInterval(refreshOllama, 15000);
+setInterval(refreshAdapter, 10000);

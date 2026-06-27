@@ -1,6 +1,43 @@
 # metaagent - Architecture
 
-Portable C++17 library for MetaAgent **domain logic**: particle pattern mechanics, camera rig math, media/mask pipeline, HTTP route handlers, session snapshots, command validation, and input policy. Unreal (or another host) supplies I/O, rendering, and engine APIs through thin bridges.
+Portable C++17 library for MetaAgent **domain logic**: particle pattern mechanics, camera rig math, media/mask + corpus pipeline, HTTP route handlers, signal/trigger dispatch, session snapshots, command validation, and input policy. A host (Unreal, the desktop app, or the headless server) supplies I/O, rendering, transport, and engine APIs through thin bridges.
+
+---
+
+## System context — three cooperating applications
+
+metaagent is the **agent controller and network trigger** in a three-application
+system. The portable core decides *what* should happen; hosts and peers perform
+the actual transport, inference, and rendering.
+
+```mermaid
+flowchart LR
+    subgraph MA["1 — metaagent (this repo)"]
+        CORE[Portable core src/]
+        HOSTS[Hosts: app/ desktop, tools/ headless, UE plugin]
+        HOSTS --> CORE
+    end
+    ADAPTER[("2 — LoRA adapter inference\nLLaVA OCR→summary, FastAPI :8008")]
+    MEDIA[("3 — media-player-cpp\nopenFrameworks :8080")]
+    OLLAMA[("Ollama — ancillary text-gen :11434")]
+
+    MA -->|host /api/adapter/* → METAAGENT_ADAPTER_URL| ADAPTER
+    MA -->|signal_router + media proxy /api/media/*\nMETAAGENT_MEDIA_PLAYER_URL| MEDIA
+    MA -->|ai::LanguageAiRuntime → /ai/chat\nMETAAGENT_OLLAMA_URL| OLLAMA
+```
+
+| App | What it owns | Seam in this repo |
+| --- | ------------ | ----------------- |
+| **1. metaagent** | Particle/camera/media domain logic, command + signal dispatch, HTTP in/out | — |
+| **2. Adapter inference** (LoRA) | Purpose-trained **LLaVA 1.5 LoRA**; OCR-text → summary generation only ([vecnode/pre-training](https://github.com/vecnode/pre-training), FastAPI) | Desktop host `/api/adapter/status` + `/api/adapter/summarize` proxy to `adapter_url` |
+| **3. media-player-cpp** | Playback of clips/subtitles/focus crops | `net::SignalRouter` (triggers) + the desktop host's `/api/media/*` proxy to `media_player_base_url` |
+
+> **Two distinct AI models.** The **LoRA adapter** (app #2) is the trained model,
+> used *only* for its OCR→summary generation, surfaced as the *Document Adapter*
+> panel. **Ollama** is a separate, ancillary general **text-generation** endpoint
+> behind `ai::LanguageAiRuntime` / `/ai/chat` (the *Text Assistant* panel) — it is
+> not one of the three apps. All endpoints/models are **configuration**, never
+> baked into core.
 
 ---
 
@@ -73,13 +110,14 @@ metaagent/
 ├── src/
 │   ├── initialize.hpp             initialize_defaults()
 │   ├── core/                      Vec3, math, log_sink
-│   ├── media/                     PNG/JPEG decode, MediaStore, mask pipeline
+│   ├── media/                     PNG/JPEG decode, MediaStore, mask pipeline, corpus (PDF_TEXT/OBJS_TEXT)
 │   ├── camera/                    Zoom + cinematic rig/controller
 │   ├── particle/                  Pattern domain (FSM, scheduler, actuation, shapes, visual_continuity)
-│   ├── net/                       Route table, handlers, platform_client
+│   ├── net/                       Route table, handlers, platform_client (outbound), signal_router (triggers), json
 │   ├── notify/                    Notify body parsing
 │   ├── session/                   RuntimeSession + status strings
-│   ├── app/                       Command registry, GUI catalog, action validation
+│   ├── app/                       Command registry, GUI catalog, action validation, runtime catalog
+│   ├── ai/                        Ollama text-gen client + LanguageAiRuntime (not the LoRA adapter)
 │   ├── runtime/                   Host service + particle host callbacks
 │   └── input/                     Input policy (GUI vs gameplay)
 ├── tools/
@@ -135,6 +173,12 @@ Public entry point: `#include <metaagent/metaagent.h>`.
 States: `Idle`, `Preparing`, `Anticipating`, `Forming`, `Holding`, `Returning`, `Dissipating`, `Releasing`.
 
 The scheduler advances via `TransitionGraph::evaluate_transition()`. The UE plugin calls through `MetaAgentParticleCoreBridge` — **no parallel FSM table in the plugin**.
+
+> **Only the UE plugin drives the scheduler.** The desktop app (`app/`) does not
+> instantiate or tick a `ParticleScheduler` and implements none of the particle
+> callbacks — particles are a UE-only runtime. The `particle` module stays in the
+> portable library solely for the plugin to consume; the desktop host links it
+> (via the umbrella `metaagent.h`) but never runs it.
 
 #### Manual step mode (`.` key) — current production flow
 
@@ -245,8 +289,11 @@ Focus resolution (particle bounds, locked observation target) remains host-side 
 | `app/gui_catalog`         | Panel sections, rows, action IDs                                      |
 | `app/gui_actions`         | GUI action string IDs → commands                                      |
 | `input/policy`            | Block move/look in observation mode; allow wheel zoom when GUI closed |
-| `net/router` + `handlers` | `/health`, `/echo`, `/notify`                                         |
+| `net/router` + `handlers` | `/health`, `/echo`, `/notify`, `/ai/chat`                             |
 | `net/platform_client`     | Outbound platform POST build/parse                                    |
+| `net/signal_router`       | **Network trigger**: register peer `SignalTarget`s, dispatch `SignalEnvelope`s via `SignalTransportFn`, log delivery |
+| `media/corpus`            | Load `PDF_TEXT.md`/`OBJS_TEXT.md`, OCR regions → subtitles, focus crops, region masks |
+| `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from the LoRA adapter, which the desktop host proxies directly |
 | `runtime/host_interfaces` | Recording + AI snapshots/toggles; **ParticleHostCallbacks**           |
 
 
@@ -291,6 +338,36 @@ Outbound: core `platform_client` builds/parses; `FMetaAgentPlatformBridge` perfo
 
 ---
 
+## Network triggers (`metaagent/net/signal_router`)
+
+The "network trigger" half of metaagent's role: a portable registry + dispatcher
+for sending typed signals to peer applications (the media player, a UE host, or
+any external orchestrator). Core owns the **envelope shape, target registry, and
+delivery log**; the host supplies the actual transport.
+
+| Type | Role |
+| ---- | ---- |
+| `SignalTarget` | Registered peer: `id`, `control_url`, `capabilities`, `enabled` |
+| `SignalEnvelope` | Versioned message: `id`, `type`, `target`, `timestamp_ms`, `payload_json` |
+| `SignalRouter` | Register/unregister targets, `dispatch(envelope, transport)`, ring-buffered log (128 entries) |
+| `SignalTransportFn` | Host-provided `std::function` performing the POST (httplib / `FHttpModule`) |
+| `SignalDispatchResult` / `SignalLogEntry` | Per-dispatch outcome + auditable history |
+
+Build/parse helpers (`build_signal_envelope_json`, `parse_signal_envelope`,
+`build_targets_json`, `parse_target_from_json`, `build_signal_log_json`) keep all
+JSON in core. The same router instance drives media-player cues and any future
+peer without a parallel implementation in a host. Tests: `signal_router_test.cpp`.
+
+```mermaid
+flowchart LR
+    Domain[Core domain event] --> Router[net::SignalRouter]
+    Router -->|envelope JSON| Transport[Host SignalTransportFn]
+    Transport --> Peer[(Media player / UE / orchestrator)]
+    Router --> Log[(Signal log — 128 entries)]
+```
+
+---
+
 ## Roadmap
 
 
@@ -312,6 +389,10 @@ Outbound: core `platform_client` builds/parses; `FMetaAgentPlatformBridge` perfo
 | N     | Wire recording/AI `HostServiceCallbacks` in UE + GUI rows             | Done                   |
 | O     | Authoritative count in core `PatternRuntime`                          | Planned                |
 | P     | Headless particle simulator (mock host callbacks) for CI              | Future                 |
+| Q     | `SignalRouter` + typed envelopes (network triggers to peer apps)      | Done                   |
+| R     | Media corpus (PDF_TEXT/OBJS_TEXT) → subtitles + focus crops          | Done                   |
+| S     | Ollama text-gen seam (`LanguageAiRuntime`, `/ai/chat`)               | Done                   |
+| T     | Separate LoRA adapter seam (`/api/adapter/*`, LLaVA OCR→summary)     | Done                   |
 
 
 ---
@@ -327,7 +408,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Tests: `transition_graph_test`, `forming_types_test`, `shape_builder_polyline_test`, `actuation_composer_test`, `media_decode_test`, `camera_rig_test`, `net_handler_test`, `app_command_test`, `gui_actions_test`, `platform_client_test`, `gui_catalog_test`, `effect_catalog_test`, `host_interfaces_test`, `state_effects_test`, `**visual_continuity_test**`.
+Tests: `transition_graph_test`, `forming_types_test`, `shape_builder_polyline_test`, `actuation_composer_test`, `media_decode_test`, `camera_rig_test`, `net_handler_test`, `signal_router_test`, `app_command_test`, `gui_actions_test`, `platform_client_test`, `gui_catalog_test`, `effect_catalog_test`, `host_interfaces_test`, `language_runtime_test`, `ollama_client_test`, `runtime_catalog_test`, `corpus_test`, `state_effects_test`, `**visual_continuity_test**`.
 
 ### Unreal
 
@@ -341,6 +422,7 @@ Tests: `transition_graph_test`, `forming_types_test`, `shape_builder_polyline_te
 2. **New shape source** — UE provider in shape registry; portable assignment in `shape_builder.cpp`.
 3. **New camera style** — `CinematicStyle` + `compute_cinematic_pose` + UE enum/sync.
 4. **New HTTP route** — handler in `net/handlers.cpp`, register in router.
+4b. **New network trigger / signal type** — extend `net/signal_types` (envelope/target + JSON) and `net/signal_router` (dispatch/log); host supplies the `SignalTransportFn`; add a `signal_router_test` case.
 5. **New validated command** — `CommandId` + `validate_command` + host handler + optional GUI action ID.
 6. **New FSM transition** — row in `transition_graph.cpp` + case in `apply_visual_continuity_for_transition()` + test in `transition_graph_test.cpp` / `visual_continuity_test.cpp`.
 7. **Visual continuity on new edge** — add branch in `apply_visual_continuity_for_transition()` + assert zero compose delta in `visual_continuity_test`.

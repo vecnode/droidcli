@@ -16,6 +16,9 @@ struct HostConfig {
 		"You are a concise assistant embedded in the MetaAgent desktop application.";
 	core::String media_player_base_url = "http://127.0.0.1:8080";
 	core::String media_data_directory;
+	// Trained LoRA adapter inference service (LLaVA OCR -> summary), separate
+	// from the Ollama text-generation endpoint above. Repo: vecnode/pre-training.
+	core::String adapter_url = "http://127.0.0.1:8008";
 };
 
 class MetaAgentHost {
@@ -48,15 +51,14 @@ public:
 
 	core::String build_ollama_status_json();
 	core::String update_ollama_config(const core::String& body);
+	core::String update_config(const core::String& body);
+
+	core::String build_adapter_status_json();
+	core::String proxy_adapter_summarize(const core::String& body);
 	core::String set_ue5_runtimes_enabled(const core::String& body);
 
 private:
 	void wire_callbacks();
-	void seed_mock_particles();
-	bool build_pattern_targets();
-	bool read_displayed_positions(particle::DisplayedPose& out_pose);
-	void apply_world_positions(const core::Array<core::Vec3>& positions);
-	int32_t authoritative_particle_count() const;
 	void apply_command_side_effects(app::CommandId command);
 
 	core::String build_media_player_url(const core::String& path) const;
@@ -71,14 +73,13 @@ private:
 
 	HostConfig config_;
 	session::RuntimeSession session_;
-	particle::ParticleScheduler scheduler_;
-	particle::SchedulerCallbacks scheduler_callbacks_;
+	// Particles run in the Unreal Engine plugin, not in the desktop host. No
+	// ParticleScheduler is instantiated or ticked here.
 	runtime::HostServiceCallbacks host_services_;
 	ai::LanguageAiRuntime language_ai_;
 	ai::LanguageAiTransportCallbacks language_ai_transport_;
 	net::RouteTable routes_;
 
-	core::Array<core::Vec3> mock_world_positions_;
 	core::Array<core::String> notify_log_;
 
 	struct MediaControlLogEntry {
