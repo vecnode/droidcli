@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# One MSVC runtime for the whole tree (library, app, tests, FetchContent deps):
+# dynamic in Debug, static in Release so the distributed exe needs no VC redist.
+# Mixing /MT and /MD across targets breaks the Release link.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY
+        "$<$<CONFIG:Debug>:MultiThreadedDebugDLL>$<$<NOT:$<CONFIG:Debug>>:MultiThreaded>")
+endif()
+
 include(cmake/FFmpeg.cmake)
 
 add_library(metaagent STATIC

@@ -1494,13 +1494,20 @@ core::String MetaAgentHost::run_media_player()
 		return build_process_status_json();
 	}
 
-	// The openFrameworks Release binary expects its working directory to be bin/.
+	// Dev layout: the OF project dir contains bin/ and the binary runs from there.
+	// Dist layout: media-player/ is the staged bin content itself (exe at top).
 	core::String run_dir = dir;
 	while (!run_dir.empty() && (run_dir.back() == '/' || run_dir.back() == '\\'))
 	{
 		run_dir.pop_back();
 	}
-	run_dir += "/bin";
+	{
+		std::error_code ec;
+		if (std::filesystem::is_directory(run_dir + "/bin", ec))
+		{
+			run_dir += "/bin";
+		}
+	}
 
 	core::String error;
 	const bool ok = process_manager_.launch("media_run", "Media Player (RunRelease)", run_dir, command, error);

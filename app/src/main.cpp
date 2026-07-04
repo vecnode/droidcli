@@ -102,6 +102,62 @@ metaagent::app_host::HostConfig load_host_config()
 	return config;
 }
 
+std::filesystem::path executable_directory()
+{
+#if defined(_WIN32)
+	char buffer[MAX_PATH] = {};
+	const DWORD length = GetModuleFileNameA(nullptr, buffer, MAX_PATH);
+	if (length == 0 || length >= MAX_PATH)
+	{
+		return {};
+	}
+	return std::filesystem::path(buffer).parent_path();
+#elif defined(__linux__)
+	std::error_code ec;
+	const auto self = std::filesystem::read_symlink("/proc/self/exe", ec);
+	return ec ? std::filesystem::path {} : self.parent_path();
+#else
+	return {};
+#endif
+}
+
+// Distribution auto-discovery: when metaagent runs from the dist layout
+// (metaagent/ next to media-player/, adapter/, datasets/ — see
+// build_and_distribute.bat), default any unset paths to those siblings so an
+// unzipped dist works with zero configuration. Env vars always win.
+void apply_dist_layout_defaults(metaagent::app_host::HostConfig& config)
+{
+	const std::filesystem::path exe_dir = executable_directory();
+	if (exe_dir.empty())
+	{
+		return;
+	}
+	const std::filesystem::path root = exe_dir.parent_path();
+	std::error_code ec;
+
+	const auto exists_dir = [&ec](const std::filesystem::path& path)
+	{
+		return std::filesystem::is_directory(path, ec);
+	};
+
+	if (config.media_player_project_dir.empty() && exists_dir(root / "media-player"))
+	{
+		config.media_player_project_dir = (root / "media-player").string();
+	}
+	if (config.adapter_project_dir.empty() && exists_dir(root / "adapter" / "deploy"))
+	{
+		config.adapter_project_dir = (root / "adapter" / "deploy").string();
+	}
+	if (config.dataset_output_dir.empty() && exists_dir(root / "datasets"))
+	{
+		config.dataset_output_dir = (root / "datasets").string();
+	}
+	if (config.media_data_directory.empty() && exists_dir(root / "media-player" / "data"))
+	{
+		config.media_data_directory = (root / "media-player" / "data").string();
+	}
+}
+
 void schedule_tick(
 	boost::asio::steady_timer& timer,
 	metaagent::app_host::MetaAgentHost& host,
@@ -259,7 +315,9 @@ int main()
 	std::cout << "metaagent-app v" << kAppVersion << std::endl;
 
 	metaagent::app_host::MetaAgentHost host;
-	host.configure(load_host_config());
+	metaagent::app_host::HostConfig host_config = load_host_config();
+	apply_dist_layout_defaults(host_config);
+	host.configure(host_config);
 	host.initialize();
 
 	boost::asio::io_context io_context;
