@@ -1,3 +1,6 @@
+# Distribution output (build_and_distribute.bat)
+dist/
+
 # CMake / build trees
 build/
 cmake-build-*/

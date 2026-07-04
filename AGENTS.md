@@ -68,6 +68,8 @@ tools/         Headless metaagent_server CLI + mini_http_server
 tests/         One *_test.cpp per core module (no engine, no network)
 cmake/         FFmpeg.cmake (auto-download helper)
 third_party/   Vendored deps (FFmpeg is local-only, git-ignored)
+external/      Submodules: pre-training (app #2) + media-player-cpp (app #3)
+distribute/    Templates staged into the dist (run_all.bat, README_DIST.txt)
 ```
 
 Public include is `#include "metaagent.h"` (or `<metaagent/metaagent.h>` when
@@ -94,7 +96,19 @@ cmake --build build-msvc --config Debug -j
 # Desktop app (Linux, needs GTK3 + WebKit2GTK dev packages)
 cmake -B build -DMETAAGENT_BUILD_APP=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j && ./build/metaagent-app  # or ./app/build_and_run.sh
+
+# Portable distribution (Release build of everything + dist/ folder + zip)
+build_and_distribute.bat   # see README "Distribution"; needs MSYS2 for the media player
 ```
+
+**Distribution rules:** the whole tree builds with **one MSVC runtime**
+(`CMAKE_MSVC_RUNTIME_LIBRARY` in the root CMakeLists: dynamic Debug, static
+Release) — never set a per-target runtime that diverges, the Release link breaks.
+The app auto-discovers the dist layout (sibling `media-player/`, `adapter/deploy/`,
+`datasets/` next to the exe — `apply_dist_layout_defaults` in `app/src/main.cpp`);
+keep that in sync with `build_and_distribute.bat` staging. Weights and media are
+git-ignored in the submodules — the distribute script copies them from configured
+working copies, never from `external/`. `.bat` files must be **CRLF**.
 
 **Always run `ctest` after touching anything in `src/`.** Tests are
 engine-free and network-free by design; if a change makes a core module require a

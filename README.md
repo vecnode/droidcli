@@ -66,6 +66,36 @@ cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_BUILD_APP=ON -
 
 Shortcut: `.\build_and_run.bat` (configures only when needed; accepts `Debug`/`Release`, `--configure`, `--clean`, `--no-run`). The older `.\app\build_and_run.bat` always re-configures.
 
+## Distribution
+
+The two controlled apps are pinned as submodules under `external/`
+(`pre-training`, `media-player-cpp`); clone with `git clone --recurse-submodules`.
+
+`.\build_and_distribute.bat` builds everything **Release** and stages a portable
+folder + zip under `dist\metaagent-<version>\`:
+
+| Folder | Contents |
+| ------ | -------- |
+| `metaagent\` | `metaagent-app.exe` + WebView2/FFmpeg DLLs + assets |
+| `media-player\` | `media-player-cpp.exe` + MinGW DLLs + `data\` corpus/media |
+| `adapter\` | pre-training deploy code + uv files (**no model weights** — first run bootstraps/downloads) |
+| `datasets\` | corpus CSVs |
+| `run_all.bat` | starts metaagent wired to the sibling folders |
+
+The app also **auto-discovers this layout**: unset paths default to the sibling
+`media-player\`, `adapter\deploy\`, `datasets\` folders next to the exe, so an
+unzipped dist runs with zero configuration (env vars still win).
+
+Config (env vars): `DIST_MEDIA_DIR` (media player working copy — point it at your
+openFrameworks tree so `bin\data` media ships; the submodule has code only),
+`DIST_OF_ROOT` (when the media dir is outside an OF tree), `DIST_ADAPTER_DIR`,
+`DIST_DATASET_DIR`, `MSYS2_ROOT`. Flags: `--skip-media`, `--no-zip`.
+
+Docker was considered and deliberately **not** used: metaagent and the media
+player are native Windows GUI apps (WebView2 / OpenGL + Media Foundation) and
+cannot meaningfully run in containers. The adapter is the only container
+candidate — worth a Dockerfile only if it moves to a Linux GPU server.
+
 Release: use `--config Release` → `build-msvc\app\Release\metaagent-app.exe`
 
 **Linux** — C++20, GTK 3, WebKit2GTK dev packages
