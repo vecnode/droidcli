@@ -123,13 +123,6 @@ void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)
 			response);
 	});
 
-	server.Post("/api/runtimes/ue5", [&host](const httplib::Request& request, httplib::Response& response)
-	{
-		apply_metaagent_response(
-			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.set_ue5_runtimes_enabled(request.body)},
-			response);
-	});
-
 	server.Get("/api/config", [&host](const httplib::Request&, httplib::Response& response)
 	{
 		apply_metaagent_response(
@@ -141,13 +134,6 @@ void mount_metaagent_routes(httplib::Server& server, MetaAgentHost& host)
 	{
 		apply_metaagent_response(
 			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.update_config(request.body)},
-			response);
-	});
-
-	server.Get("/api/gui/catalog", [&host](const httplib::Request&, httplib::Response& response)
-	{
-		apply_metaagent_response(
-			net::HttpResponse {net::HttpStatus::Ok, "application/json", host.build_gui_catalog_json()},
 			response);
 	});
 

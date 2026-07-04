@@ -23,9 +23,3 @@ struct RgbaImage {
 };
 
 } // namespace metaagent::media
-
-namespace metaagent::particle {
-
-using RgbaImage = media::RgbaImage;
-
-} // namespace metaagent::particle

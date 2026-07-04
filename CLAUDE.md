@@ -7,19 +7,21 @@ in `AGENTS.md` — read it first.
 
 ## Claude-specific quick reference
 
-- **`metaagent` is the C++ agent controller / network trigger** in a four-way
-  embedding: the portable core (`src/`) is shared by the desktop app (`app/`),
-  the headless server (`tools/`), and an out-of-repo Unreal Engine 5 plugin, and
-  it talks to two peer apps — the **LoRA adapter inference** service (LLaVA
-  OCR→summary, its own `/api/adapter/*` proxy) and the **media-player-cpp**
-  openFrameworks player (via `/api/media/*`).
+- **`metaagent` is the C++ agent controller / network trigger** (app title
+  **agent core 0.2.0** — hold at 0.2.x, do not bump to 0.3). The portable core
+  (`src/`) is shared by the desktop app (`app/`) and the headless server
+  (`tools/`), and it talks to two peer apps — the **LoRA adapter inference**
+  service (LLaVA OCR→summary, its own `/api/adapter/*` proxy) and the
+  **media-player-cpp** openFrameworks player (via `/api/media/*`).
 - **Two separate AI models — don't conflate.** The **LoRA adapter** (app #2,
   `METAAGENT_ADAPTER_URL` :8008) is proxied directly by the desktop host
   (`/api/adapter/*`, *Document Adapter* panel). **Ollama** (`METAAGENT_OLLAMA_URL`
   :11434) is an ancillary text-gen endpoint behind the `ai/` seam (`/ai/chat`,
-  *Text Assistant* panel) — not one of the three apps.
-- **Before editing, decide core vs host.** Pure state/math/JSON/validation →
-  `src/`. Any real transport, GPU, window, or filesystem I/O → a host via a
+  *Agent* panel + subtitle condensing) — not one of the three apps.
+- **No engine code.** Unreal Engine / particle / camera support was removed at
+  0.2.0 — do not reintroduce engine modules, UE callbacks, or "ue5" scoping.
+- **Before editing, decide core vs host.** Pure state/parsing/JSON/validation →
+  `src/`. Any real transport, process, window, or filesystem I/O → a host via a
   callback. See the "Golden rule" in `AGENTS.md`.
 - **Fast inner loop:**
   ```sh
@@ -27,10 +29,12 @@ in `AGENTS.md` — read it first.
   ctest --test-dir build --output-on-failure
   ```
   Run `ctest` after every change under `src/`. Tests are engine-free and
-  network-free — keep them that way.
+  network-free — keep them that way. On Windows prefer `build_and_run.bat`
+  (MSVC); a stray MinGW on PATH breaks the FFmpeg link in fresh trees.
 - **A new `src/<module>/foo.cpp` must be `#include`d from `metaagent.cpp`**, and
   a new `*_test.cpp` must be registered in `CMakeLists.txt`.
-- **Don't** add a parallel FSM/command/JSON schema in a host, hardcode peer URLs
-  or secrets in core, or commit build trees / vendored binaries (all git-ignored).
-- Product UI + HTTP route tables: `README.md`. Layer model + UE plugin split +
-  extension points: `ARCHITECTURE.md`. Keep both in sync with behavior changes.
+- **Don't** add a parallel command/JSON schema in a host, hardcode peer URLs
+  or paths in core, or commit build trees / `dist/` / vendored binaries (all
+  git-ignored).
+- Product UI + HTTP route tables: `README.md`. Layer model + extension points:
+  `ARCHITECTURE.md`. Keep both in sync with behavior changes.

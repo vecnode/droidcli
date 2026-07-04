@@ -11,55 +11,47 @@ int main()
 	runtime_session.features.networking = true;
 	runtime_session.features.ai = true;
 	runtime_session.features.recording = true;
-	runtime_session.features.particle = true;
 
-	const metaagent::core::Array<metaagent::app::RuntimeDescriptor> catalog_off =
-		metaagent::app::build_runtime_catalog(runtime_session, false);
-	assert(catalog_off.size() >= 8);
+	const metaagent::core::Array<metaagent::app::RuntimeDescriptor> catalog =
+		metaagent::app::build_runtime_catalog(runtime_session);
+	assert(catalog.size() >= 6);
 
 	bool found_networking = false;
-	bool found_particle = false;
 	bool found_recording = false;
-	for (const metaagent::app::RuntimeDescriptor& descriptor : catalog_off)
+	for (const metaagent::app::RuntimeDescriptor& descriptor : catalog)
 	{
+		// Every runtime is host-local now; nothing is scoped to an external engine.
+		assert(descriptor.host_scope == "core");
 		if (descriptor.id == "networking")
 		{
 			found_networking = true;
 			assert(descriptor.active_in_session);
-			assert(descriptor.host_scope == "core");
-		}
-		if (descriptor.id == "particle")
-		{
-			found_particle = true;
-			assert(descriptor.host_scope == "ue5");
-			assert(!descriptor.active_in_session);
 		}
 		if (descriptor.id == "recording")
 		{
 			found_recording = true;
-			assert(descriptor.host_scope == "ue5");
-			assert(!descriptor.active_in_session);
-		}
-	}
-
-	assert(found_networking);
-	assert(found_particle);
-	assert(found_recording);
-
-	const metaagent::core::Array<metaagent::app::RuntimeDescriptor> catalog_on =
-		metaagent::app::build_runtime_catalog(runtime_session, true);
-	for (const metaagent::app::RuntimeDescriptor& descriptor : catalog_on)
-	{
-		if (descriptor.id == "particle")
-		{
 			assert(descriptor.active_in_session);
 		}
 	}
 
+	assert(found_networking);
+	assert(found_recording);
+
+	metaagent::session::RuntimeSession recording_off = runtime_session;
+	recording_off.features.recording = false;
+	for (const metaagent::app::RuntimeDescriptor& descriptor :
+		metaagent::app::build_runtime_catalog(recording_off))
+	{
+		if (descriptor.id == "recording")
+		{
+			assert(!descriptor.active_in_session);
+		}
+	}
+
 	const metaagent::core::String json =
-		metaagent::app::build_runtime_catalog_json(runtime_session, false);
-	assert(json.find("\"ue5_runtimes_enabled\":false") != metaagent::core::String::npos);
+		metaagent::app::build_runtime_catalog_json(runtime_session);
 	assert(json.find("\"runtimes\"") != metaagent::core::String::npos);
+	assert(json.find("ue5") == metaagent::core::String::npos);
 
 	std::cout << "runtime_catalog_test passed" << std::endl;
 	return 0;

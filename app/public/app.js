@@ -42,21 +42,13 @@ document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => activateTab(tab.dataset.tab));
 });
 
-function isUe5Runtime(runtime) {
-  return runtime.host_scope === "ue5";
-}
-
-function runtimeTitle(runtime) {
-  return isUe5Runtime(runtime) ? `UE5 ${runtime.title}` : runtime.title;
-}
-
 function renderRuntimeRow(runtime) {
   const row = document.createElement("li");
   row.className = "runtime-row";
   const running = !!runtime.active_in_session;
   row.innerHTML = `
     <span class="status-lamp ${running ? "on" : "off"}" title="${running ? "Running" : "Stopped"}"></span>
-    <span class="runtime-row-name">${runtimeTitle(runtime)}</span>
+    <span class="runtime-row-name">${runtime.title}</span>
   `;
   return row;
 }
@@ -189,37 +181,11 @@ async function refreshRuntimes() {
 
   const payload = await fetchJson("/api/runtimes");
   const runtimes = payload.runtimes || [];
-  const ue5Enabled = !!payload.ue5_runtimes_enabled;
   container.innerHTML = "";
 
-  const toggle = document.getElementById("ue5-runtimes-toggle");
-  const hint = document.getElementById("ue5-runtimes-hint");
-  if (toggle) {
-    toggle.classList.toggle("active", ue5Enabled);
-    toggle.textContent = ue5Enabled ? "Disable UE5 Runtimes" : "Enable UE5 Runtimes";
-  }
-  if (hint) {
-    hint.textContent = ue5Enabled
-      ? "UE5 plugin runtimes are enabled."
-      : "UE5 plugin runtimes are off by default.";
-  }
+  appendRuntimeGroup(container, "Core", runtimes);
 
-  const core = runtimes.filter((runtime) => !isUe5Runtime(runtime));
-  const ue5 = runtimes.filter((runtime) => isUe5Runtime(runtime));
-
-  appendRuntimeGroup(container, "Core", core);
-
-  if (core.length && ue5.length) {
-    const divider = document.createElement("div");
-    divider.className = "runtime-divider";
-    divider.setAttribute("role", "separator");
-    divider.textContent = "Unreal Engine 5";
-    container.appendChild(divider);
-  }
-
-  appendRuntimeGroup(container, "UE5 Plugin", ue5);
-
-  if (!core.length && !ue5.length) {
+  if (!runtimes.length) {
     container.innerHTML = "<p class='muted'>No runtimes reported.</p>";
   }
 }
@@ -512,20 +478,6 @@ document.getElementById("adapter-process-stop").addEventListener("click", () => 
 document.getElementById("corpus-refresh").addEventListener("click", refreshDataset);
 
 document.getElementById("ollama-refresh").addEventListener("click", refreshOllama);
-
-document.getElementById("ue5-runtimes-toggle").addEventListener("click", async () => {
-  const payload = await fetchJson("/api/runtimes");
-  const nextEnabled = !payload.ue5_runtimes_enabled;
-  const result = await fetchJson("/api/runtimes/ue5", {
-    method: "POST",
-    body: JSON.stringify({ enabled: nextEnabled }),
-  });
-  if (!result.success) {
-    setHint("settings-output", result.message || "Failed to update UE5 runtimes.", true);
-    return;
-  }
-  await refreshRuntimes();
-});
 
 document.getElementById("endpoints-form").addEventListener("submit", async (event) => {
   event.preventDefault();

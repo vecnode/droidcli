@@ -51,7 +51,6 @@ public:
 	core::String build_status_json() const;
 	core::String build_network_status_json() const;
 	core::String build_runtime_catalog_json() const;
-	core::String build_gui_catalog_json() const;
 	core::String dispatch_command(const core::String& command_name);
 	core::String build_config_json() const;
 
@@ -87,7 +86,6 @@ public:
 	// Reads the configured dataset output/ dir CSVs and returns the corpus
 	// structure (image, status, OCR + summary previews, object count).
 	core::String build_dataset_json();
-	core::String set_ue5_runtimes_enabled(const core::String& body);
 
 private:
 	void wire_callbacks();
@@ -110,8 +108,6 @@ private:
 
 	HostConfig config_;
 	session::RuntimeSession session_;
-	// Particles run in the Unreal Engine plugin, not in the desktop host. No
-	// ParticleScheduler is instantiated or ticked here.
 	runtime::HostServiceCallbacks host_services_;
 	ai::LanguageAiRuntime language_ai_;
 	ai::LanguageAiTransportCallbacks language_ai_transport_;
@@ -144,9 +140,6 @@ private:
 	bool media_player_online_last_seen_ = true;
 	bool recording_active_ = false;
 	bool autopilot_enabled_ = false;
-	bool cinematic_enabled_ = false;
-	bool focus_particles_ = false;
-	bool ue5_runtimes_enabled_ = false;
 	mutable std::mutex mutex_;
 };
 

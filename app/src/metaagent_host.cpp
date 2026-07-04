@@ -187,17 +187,11 @@ void MetaAgentHost::initialize()
 		session_.build_label = "desktop";
 		session_.http_enabled = true;
 		session_.http_router_bound = true;
-		session_.features.input = true;
-		session_.features.camera = true;
 		session_.features.networking = true;
 		session_.features.ui = true;
-		session_.features.particle = true;
 		session_.features.ai = config_.enable_ai;
 		session_.features.recording = true;
 
-		// Particles are a UE-plugin runtime; the desktop host does not run a
-		// ParticleScheduler. The session keeps the particle feature flag so the
-		// (ue5-scoped) particle runtime reports correctly when UE5 runtimes are on.
 		wire_callbacks();
 
 		language_ai_transport_.post_json = [](
@@ -264,8 +258,7 @@ void MetaAgentHost::wire_callbacks()
 
 void MetaAgentHost::tick(float /*delta_seconds*/)
 {
-	// No particle simulation runs in the desktop host; particles are driven by
-	// the Unreal Engine plugin. Kept as a stub so the host tick timer is harmless.
+	// No periodic simulation runs in the host; kept as a stub for the tick timer.
 }
 
 session::RuntimeSession& MetaAgentHost::session()
@@ -343,46 +336,8 @@ core::String MetaAgentHost::build_status_json() const
 	stream << net::json_string_field("build", session_.build_label) << ',';
 	stream << net::json_bool_field("active", session_.active) << ',';
 	stream << net::json_bool_field("recording", recording.capture_active) << ',';
-	stream << net::json_bool_field("autopilot", ai.autopilot_enabled) << ',';
-	stream << net::json_bool_field("cinematic", cinematic_enabled_) << ',';
-	stream << net::json_bool_field("focus_particles", focus_particles_);
+	stream << net::json_bool_field("autopilot", ai.autopilot_enabled);
 	stream << '}';
-	return stream.str();
-}
-
-core::String MetaAgentHost::build_gui_catalog_json() const
-{
-	const app::GuiPanelCatalog catalog = app::build_gui_panel_catalog();
-	std::ostringstream stream;
-	stream << "{\"sections\":[";
-	for (size_t section_index = 0; section_index < catalog.sections.size(); ++section_index)
-	{
-		if (section_index > 0)
-		{
-			stream << ',';
-		}
-		const app::GuiPanelSection& section = catalog.sections[section_index];
-		stream << '{';
-		stream << net::json_string_field("section_id", section.section_id) << ',';
-		stream << net::json_string_field("title", section.title) << ',';
-		stream << net::json_bool_field("always_on", section.always_on) << ',';
-		stream << "\"rows\":[";
-		for (size_t row_index = 0; row_index < section.rows.size(); ++row_index)
-		{
-			if (row_index > 0)
-			{
-				stream << ',';
-			}
-			const app::GuiPanelRow& row = section.rows[row_index];
-			stream << '{';
-			stream << net::json_string_field("action_id", row.action_id) << ',';
-			stream << net::json_string_field("key_label", row.key_label) << ',';
-			stream << net::json_string_field("description", row.description);
-			stream << '}';
-		}
-		stream << "]}";
-	}
-	stream << "]}";
 	return stream.str();
 }
 
@@ -410,24 +365,11 @@ void MetaAgentHost::apply_command_side_effects(const app::CommandId command)
 {
 	switch (command)
 	{
-	// Pattern stepping is a particle command handled by the UE plugin; the
-	// desktop host has no scheduler, so these are intentionally no-ops here.
-	case app::CommandId::PatternStepForward:
-	case app::CommandId::PatternStepBackward:
-		break;
 	case app::CommandId::ToggleRecording:
 		runtime::invoke_toggle_recording(host_services_);
 		break;
 	case app::CommandId::ToggleAutopilot:
 		runtime::invoke_toggle_autopilot(host_services_);
-		break;
-	case app::CommandId::ToggleCinematicCamera:
-		cinematic_enabled_ = !cinematic_enabled_;
-		break;
-	case app::CommandId::ToggleFocusParticles:
-		focus_particles_ = !focus_particles_;
-		break;
-	case app::CommandId::CycleCinematicStyle:
 		break;
 	case app::CommandId::ToggleNetworkingRuntime:
 		session_.features.networking = !session_.features.networking;
@@ -990,7 +932,7 @@ core::String MetaAgentHost::build_network_status_json() const
 core::String MetaAgentHost::build_runtime_catalog_json() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	return app::build_runtime_catalog_json(session_, ue5_runtimes_enabled_);
+	return app::build_runtime_catalog_json(session_);
 }
 
 core::String MetaAgentHost::build_ollama_status_json()
@@ -1551,25 +1493,6 @@ core::String MetaAgentHost::stop_adapter_server()
 	const bool ok = process_manager_.stop("adapter_server", error);
 	append_app_log("process", "out", ok ? "adapter server stopped" : ("stop failed: " + error), ok);
 	return build_process_status_json();
-}
-
-core::String MetaAgentHost::set_ue5_runtimes_enabled(const core::String& body)
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	bool enabled = false;
-	if (!net::extract_json_bool_field(body, "enabled", enabled))
-	{
-		return "{"
-			+ net::json_bool_field("success", false) + ","
-			+ net::json_string_field("message", "Missing enabled field.")
-			+ "}";
-	}
-
-	ue5_runtimes_enabled_ = enabled;
-	return "{"
-		+ net::json_bool_field("success", true) + ","
-		+ net::json_bool_field("ue5_runtimes_enabled", ue5_runtimes_enabled_)
-		+ "}";
 }
 
 } // namespace metaagent::app_host

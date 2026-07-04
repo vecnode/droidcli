@@ -43,22 +43,6 @@ metaagent_link_ffmpeg(metaagent)
 
 enable_testing()
 
-add_executable(metaagent_transition_graph_test tests/transition_graph_test.cpp)
-target_link_libraries(metaagent_transition_graph_test PRIVATE metaagent)
-add_test(NAME transition_graph_test COMMAND metaagent_transition_graph_test)
-
-add_executable(metaagent_forming_types_test tests/forming_types_test.cpp)
-target_link_libraries(metaagent_forming_types_test PRIVATE metaagent)
-add_test(NAME forming_types_test COMMAND metaagent_forming_types_test)
-
-add_executable(metaagent_shape_builder_polyline_test tests/shape_builder_polyline_test.cpp)
-target_link_libraries(metaagent_shape_builder_polyline_test PRIVATE metaagent)
-add_test(NAME shape_builder_polyline_test COMMAND metaagent_shape_builder_polyline_test)
-
-add_executable(metaagent_actuation_composer_test tests/actuation_composer_test.cpp)
-target_link_libraries(metaagent_actuation_composer_test PRIVATE metaagent)
-add_test(NAME actuation_composer_test COMMAND metaagent_actuation_composer_test)
-
 add_executable(metaagent_media_decode_test tests/media_decode_test.cpp)
 target_link_libraries(metaagent_media_decode_test PRIVATE metaagent)
 metaagent_stage_ffmpeg_runtime(metaagent_media_decode_test)
@@ -68,10 +52,6 @@ add_executable(metaagent_corpus_test tests/corpus_test.cpp)
 target_link_libraries(metaagent_corpus_test PRIVATE metaagent)
 add_test(NAME corpus_test COMMAND metaagent_corpus_test)
 
-add_executable(metaagent_camera_rig_test tests/camera_rig_test.cpp)
-target_link_libraries(metaagent_camera_rig_test PRIVATE metaagent)
-add_test(NAME camera_rig_test COMMAND metaagent_camera_rig_test)
-
 add_executable(metaagent_net_handler_test tests/net_handler_test.cpp)
 target_link_libraries(metaagent_net_handler_test PRIVATE metaagent)
 add_test(NAME net_handler_test COMMAND metaagent_net_handler_test)
@@ -80,33 +60,9 @@ add_executable(metaagent_app_command_test tests/app_command_test.cpp)
 target_link_libraries(metaagent_app_command_test PRIVATE metaagent)
 add_test(NAME app_command_test COMMAND metaagent_app_command_test)
 
-add_executable(metaagent_gui_actions_test tests/gui_actions_test.cpp)
-target_link_libraries(metaagent_gui_actions_test PRIVATE metaagent)
-add_test(NAME gui_actions_test COMMAND metaagent_gui_actions_test)
-
-add_executable(metaagent_platform_client_test tests/platform_client_test.cpp)
-target_link_libraries(metaagent_platform_client_test PRIVATE metaagent)
-add_test(NAME platform_client_test COMMAND metaagent_platform_client_test)
-
-add_executable(metaagent_gui_catalog_test tests/gui_catalog_test.cpp)
-target_link_libraries(metaagent_gui_catalog_test PRIVATE metaagent)
-add_test(NAME gui_catalog_test COMMAND metaagent_gui_catalog_test)
-
-add_executable(metaagent_effect_catalog_test tests/effect_catalog_test.cpp)
-target_link_libraries(metaagent_effect_catalog_test PRIVATE metaagent)
-add_test(NAME effect_catalog_test COMMAND metaagent_effect_catalog_test)
-
 add_executable(metaagent_host_interfaces_test tests/host_interfaces_test.cpp)
 target_link_libraries(metaagent_host_interfaces_test PRIVATE metaagent)
 add_test(NAME host_interfaces_test COMMAND metaagent_host_interfaces_test)
-
-add_executable(metaagent_state_effects_test tests/state_effects_test.cpp)
-target_link_libraries(metaagent_state_effects_test PRIVATE metaagent)
-add_test(NAME state_effects_test COMMAND metaagent_state_effects_test)
-
-add_executable(metaagent_visual_continuity_test tests/visual_continuity_test.cpp)
-target_link_libraries(metaagent_visual_continuity_test PRIVATE metaagent)
-add_test(NAME visual_continuity_test COMMAND metaagent_visual_continuity_test)
 
 add_executable(metaagent_ollama_client_test tests/ollama_client_test.cpp)
 target_link_libraries(metaagent_ollama_client_test PRIVATE metaagent)

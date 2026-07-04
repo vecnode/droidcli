@@ -43,7 +43,9 @@
 namespace {
 
 constexpr std::size_t kMaxRequestBodyBytes = 4 * 1024 * 1024;
-constexpr const char* kAppVersion = "0.1.0";
+// App title/version follow the library version (0.2.0 — hold here, no 0.3 yet).
+constexpr const char* kAppVersion = METAAGENT_VERSION_STRING;
+constexpr const char* kAppTitle = "agent core " METAAGENT_VERSION_STRING;
 constexpr int kWindowWidth = 1920;
 constexpr int kWindowHeight = 1080;
 
@@ -349,7 +351,7 @@ int main()
 	std::thread server_thread([&server]() { server.listen_after_bind(); });
 
 	webview::webview window(false, nullptr);
-	window.set_title("MetaAgent");
+	window.set_title(kAppTitle);
 	window.set_size(kWindowWidth, kWindowHeight, WEBVIEW_HINT_FIXED);
 #ifdef _WIN32
 	apply_windows_icons(window);

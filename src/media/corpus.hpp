@@ -72,7 +72,7 @@ public:
 		IntRect& out_rect,
 		float padding_fraction = 0.12f) const;
 
-	/// Mask weights (1 inside text bboxes, 0 elsewhere) for particle / highlight use.
+	/// Mask weights (1 inside text bboxes, 0 elsewhere) for highlight use.
 	METAAGENT_API bool build_region_mask(
 		const ImageCorpusEntry& entry,
 		int32_t mask_width,

@@ -2,7 +2,6 @@
 
 #include "core/types.hpp"
 #include "export.hpp"
-#include "particle/visual_continuity.hpp"
 
 #include <functional>
 
@@ -19,12 +18,6 @@ struct AiSnapshot {
 	bool runtime_enabled = false;
 	bool autopilot_enabled = false;
 	core::String status_text;
-};
-
-struct ParticleHostCallbacks {
-	std::function<bool(particle::DisplayedPose& out)> read_displayed_positions;
-	std::function<void(const core::Array<core::Vec3>& positions)> apply_world_positions;
-	std::function<int32_t()> authoritative_particle_count;
 };
 
 struct HostServiceCallbacks {
