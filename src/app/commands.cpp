@@ -17,14 +17,6 @@ core::String to_lower_ascii(core::String value)
 
 bool feature_enabled(const session::RuntimeSession& session, const char* feature_name)
 {
-	if (std::string(feature_name) == "input")
-	{
-		return session.features.input;
-	}
-	if (std::string(feature_name) == "camera")
-	{
-		return session.features.camera;
-	}
 	if (std::string(feature_name) == "networking")
 	{
 		return session.features.networking;
@@ -32,10 +24,6 @@ bool feature_enabled(const session::RuntimeSession& session, const char* feature
 	if (std::string(feature_name) == "ui")
 	{
 		return session.features.ui;
-	}
-	if (std::string(feature_name) == "particle")
-	{
-		return session.features.particle;
 	}
 	if (std::string(feature_name) == "ai")
 	{
@@ -53,26 +41,6 @@ bool feature_enabled(const session::RuntimeSession& session, const char* feature
 CommandId parse_command_name(const core::String& name)
 {
 	const core::String normalized = to_lower_ascii(name);
-	if (normalized == "pattern_step_forward" || normalized == "pattern>>" || normalized == "step_forward")
-	{
-		return CommandId::PatternStepForward;
-	}
-	if (normalized == "pattern_step_backward" || normalized == "pattern<<" || normalized == "step_backward")
-	{
-		return CommandId::PatternStepBackward;
-	}
-	if (normalized == "toggle_cinematic_camera" || normalized == "cinematic")
-	{
-		return CommandId::ToggleCinematicCamera;
-	}
-	if (normalized == "toggle_focus_particles" || normalized == "focus_particles")
-	{
-		return CommandId::ToggleFocusParticles;
-	}
-	if (normalized == "cycle_cinematic_style" || normalized == "cinematic_style")
-	{
-		return CommandId::CycleCinematicStyle;
-	}
 	if (normalized == "toggle_networking_runtime" || normalized == "networking")
 	{
 		return CommandId::ToggleNetworkingRuntime;
@@ -81,10 +49,6 @@ CommandId parse_command_name(const core::String& name)
 	{
 		return CommandId::ToggleGuiHelp;
 	}
-	if (normalized == "load_preview_image" || normalized == "preview_image")
-	{
-		return CommandId::LoadPreviewImage;
-	}
 	if (normalized == "start_platform_audio" || normalized == "start audio")
 	{
 		return CommandId::StartPlatformAudio;
@@ -92,19 +56,6 @@ CommandId parse_command_name(const core::String& name)
 	if (normalized == "start_platform_image" || normalized == "start image")
 	{
 		return CommandId::StartPlatformImage;
-	}
-	if (normalized == "toggle_state_effect_cohesion" || normalized == "state_effect_cohesion")
-	{
-		return CommandId::ToggleStateEffectCohesion;
-	}
-	if (normalized == "toggle_state_effect_turbulence" || normalized == "state_effect_turbulence")
-	{
-		return CommandId::ToggleStateEffectTurbulence;
-	}
-	if (normalized == "particle_gui_effect" || normalized == "cycle_preset" || normalized == "cycle_sampling"
-		|| normalized == "cycle_forming" || normalized == "cycle_returning" || normalized == "cycle_overlay")
-	{
-		return CommandId::ParticleGuiEffect;
 	}
 	if (normalized == "quit_application" || normalized == "quit")
 	{
@@ -129,32 +80,14 @@ core::String command_display_name(const CommandId command)
 {
 	switch (command)
 	{
-	case CommandId::PatternStepForward:
-		return "Pattern Step Forward";
-	case CommandId::PatternStepBackward:
-		return "Pattern Step Backward";
-	case CommandId::ToggleCinematicCamera:
-		return "Toggle Cinematic Camera";
-	case CommandId::ToggleFocusParticles:
-		return "Toggle Focus Particles";
-	case CommandId::CycleCinematicStyle:
-		return "Cycle Cinematic Style";
 	case CommandId::ToggleNetworkingRuntime:
 		return "Toggle Networking Runtime";
 	case CommandId::ToggleGuiHelp:
 		return "Toggle GUI Help";
-	case CommandId::LoadPreviewImage:
-		return "Load Preview Image";
 	case CommandId::StartPlatformAudio:
 		return "Start Platform Audio";
 	case CommandId::StartPlatformImage:
 		return "Start Platform Image";
-	case CommandId::ToggleStateEffectCohesion:
-		return "Toggle Cohesion Overlay";
-	case CommandId::ToggleStateEffectTurbulence:
-		return "Toggle Turbulence Overlay";
-	case CommandId::ParticleGuiEffect:
-		return "Particle Effect";
 	case CommandId::ToggleAutopilot:
 		return "Toggle Autopilot";
 	case CommandId::ToggleRecording:
@@ -187,27 +120,6 @@ CommandResult validate_command(const CommandId command, const session::RuntimeSe
 
 	switch (command)
 	{
-	case CommandId::PatternStepForward:
-	case CommandId::PatternStepBackward:
-	case CommandId::LoadPreviewImage:
-	case CommandId::ToggleStateEffectCohesion:
-	case CommandId::ToggleStateEffectTurbulence:
-	case CommandId::ParticleGuiEffect:
-		result.success = feature_enabled(session, "particle");
-		if (!result.success)
-		{
-			result.user_message = "Particle runtime is disabled.";
-		}
-		return result;
-	case CommandId::ToggleCinematicCamera:
-	case CommandId::ToggleFocusParticles:
-	case CommandId::CycleCinematicStyle:
-		result.success = feature_enabled(session, "camera");
-		if (!result.success)
-		{
-			result.user_message = "Camera runtime is disabled.";
-		}
-		return result;
 	case CommandId::ToggleNetworkingRuntime:
 	case CommandId::StartPlatformAudio:
 	case CommandId::StartPlatformImage:

@@ -25,16 +25,16 @@ int main()
 	HttpRequest notify_request;
 	notify_request.method = HttpMethod::Post;
 	notify_request.path = "/notify";
-	notify_request.body = "{\"message\":\"particle_ready\"}";
+	notify_request.body = "{\"message\":\"media_ready\"}";
 	const NotifyHandleResult notify = handle_notify(notify_request);
 	assert(notify.response.body.find("true") != std::string::npos);
-	assert(notify.notify_message.text == "particle_ready");
+	assert(notify.notify_message.text == "media_ready");
 
 	RouteTable routes;
 	HttpRequest routed_notify = notify_request;
 	RouteDispatchResult dispatch = routes.dispatch(routed_notify, context);
 	assert(dispatch.handled);
-	assert(dispatch.notify.notify_message.text == "particle_ready");
+	assert(dispatch.notify.notify_message.text == "media_ready");
 
 	const metaagent::notify::NotifyParseResult parsed =
 		metaagent::notify::parse_notify_body("{\"message\":\"from_core\"}");

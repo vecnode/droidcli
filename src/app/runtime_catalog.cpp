@@ -23,28 +23,22 @@ RuntimeDescriptor make_runtime(
 	return descriptor;
 }
 
-bool ue5_active(const bool ue5_runtimes_enabled, const bool feature_enabled)
-{
-	return ue5_runtimes_enabled && feature_enabled;
-}
-
 } // namespace
 
 core::Array<RuntimeDescriptor> build_runtime_catalog(
-	const session::RuntimeSession& session,
-	const bool ue5_runtimes_enabled)
+	const session::RuntimeSession& session)
 {
 	core::Array<RuntimeDescriptor> catalog;
 	catalog.push_back(make_runtime(
 		"networking",
 		"Networking Engine",
-		"Signal bus, target registry, HTTP inbound/outbound, platform event forwarding.",
+		"Signal bus, target registry, HTTP inbound/outbound.",
 		"core",
 		session.features.networking && session.http_enabled));
 	catalog.push_back(make_runtime(
 		"media",
 		"Media Runtime",
-		"FFmpeg media probe/decode and mask pipeline for image-driven particle forming.",
+		"FFmpeg media probe/decode and corpus (OCR/objects) reading.",
 		"core",
 		true));
 	catalog.push_back(make_runtime(
@@ -56,7 +50,7 @@ core::Array<RuntimeDescriptor> build_runtime_catalog(
 	catalog.push_back(make_runtime(
 		"session",
 		"Session + Commands",
-		"RuntimeSession snapshot, command parse/validate, GUI action catalog.",
+		"RuntimeSession snapshot and command parse/validate.",
 		"core",
 		session.active));
 	catalog.push_back(make_runtime(
@@ -66,47 +60,26 @@ core::Array<RuntimeDescriptor> build_runtime_catalog(
 		"core",
 		session.http_enabled));
 	catalog.push_back(make_runtime(
-		"particle",
-		"Particle Runtime",
-		"Niagara pattern FSM, scheduler, actuation, shape/mask formation, visual continuity.",
-		"ue5",
-		ue5_active(ue5_runtimes_enabled, session.features.particle)));
-	catalog.push_back(make_runtime(
-		"camera",
-		"Camera Runtime",
-		"Cinematic orbit rig, zoom, focus styles (OscillatingHold / SlowOrbit).",
-		"ue5",
-		ue5_active(ue5_runtimes_enabled, session.features.camera)));
-	catalog.push_back(make_runtime(
 		"recording",
 		"Recording Runtime",
-		"MovieSceneCapture video capture toggles and status queries.",
-		"ue5",
-		ue5_active(ue5_runtimes_enabled, session.features.recording)));
+		"Capture toggles and status queries via host services.",
+		"core",
+		session.features.recording));
 	catalog.push_back(make_runtime(
 		"autopilot",
 		"Autopilot Runtime",
-		"AI-driven pawn autopilot toggles and status.",
-		"ue5",
-		ue5_active(ue5_runtimes_enabled, session.features.ai)));
-	catalog.push_back(make_runtime(
-		"input",
-		"Input Policy",
-		"GUI-open vs observation-mode input routing and wheel zoom policy.",
-		"ue5",
-		ue5_active(ue5_runtimes_enabled, session.features.input)));
+		"AI-driven control loop toggles and status.",
+		"core",
+		session.features.ai));
 	return catalog;
 }
 
 core::String build_runtime_catalog_json(
-	const session::RuntimeSession& session,
-	const bool ue5_runtimes_enabled)
+	const session::RuntimeSession& session)
 {
-	const core::Array<RuntimeDescriptor> catalog =
-		build_runtime_catalog(session, ue5_runtimes_enabled);
+	const core::Array<RuntimeDescriptor> catalog = build_runtime_catalog(session);
 	std::ostringstream stream;
 	stream << '{';
-	stream << net::json_bool_field("ue5_runtimes_enabled", ue5_runtimes_enabled) << ',';
 	stream << "\"runtimes\":[";
 	for (size_t index = 0; index < catalog.size(); ++index)
 	{

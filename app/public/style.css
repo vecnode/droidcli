@@ -470,15 +470,6 @@ code {
   flex-shrink: 0;
 }
 
-.ue5-toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 9px;
-  padding-bottom: 9px;
-  border-bottom: 1px solid var(--border);
-}
-
 .ollama-status-row {
   display: flex;
   align-items: center;

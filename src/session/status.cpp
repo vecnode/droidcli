@@ -31,13 +31,10 @@ core::String build_http_server_status_text(const RuntimeSession& session)
 
 core::String build_startup_feature_flags_text(const RuntimeSession& session)
 {
-	return "Input=" + core::String(enabled_label(session.features.input))
-		+ " Camera=" + enabled_label(session.features.camera)
-		+ " AI=" + enabled_label(session.features.ai)
+	return "AI=" + core::String(enabled_label(session.features.ai))
 		+ " Networking=" + enabled_label(session.features.networking)
 		+ " Recording=" + enabled_label(session.features.recording)
-		+ " UI=" + enabled_label(session.features.ui)
-		+ " Particle=" + enabled_label(session.features.particle);
+		+ " UI=" + enabled_label(session.features.ui);
 }
 
 } // namespace metaagent::session

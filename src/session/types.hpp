@@ -6,13 +6,10 @@
 namespace metaagent::session {
 
 struct FeatureFlags {
-	bool input = true;
-	bool camera = true;
 	bool ai = true;
 	bool networking = true;
 	bool recording = true;
 	bool ui = true;
-	bool particle = true;
 };
 
 struct RuntimeSession {

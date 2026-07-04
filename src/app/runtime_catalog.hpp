@@ -14,11 +14,9 @@ struct RuntimeDescriptor {
 };
 
 METAAGENT_API core::Array<RuntimeDescriptor> build_runtime_catalog(
-	const session::RuntimeSession& session,
-	bool ue5_runtimes_enabled = false);
+	const session::RuntimeSession& session);
 
 METAAGENT_API core::String build_runtime_catalog_json(
-	const session::RuntimeSession& session,
-	bool ue5_runtimes_enabled = false);
+	const session::RuntimeSession& session);
 
 } // namespace metaagent::app
