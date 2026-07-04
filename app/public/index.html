@@ -21,8 +21,24 @@
       <section id="panel-dashboard" class="panel-view active" role="tabpanel">
         <div class="layout layout-dashboard">
           <div class="dashboard-left">
-            <section class="panel panel-media">
+            <section class="panel panel-ai">
               <details class="ai-details" open>
+                <summary>Agent</summary>
+                <p class="ai-sub">Autonomous control loop + text generation via Ollama (<span id="chat-model-hint">model</span>).</p>
+                <div class="agent-controls">
+                  <button type="button" class="btn btn-accent" id="agent-toggle">Start</button>
+                  <span id="agent-status" class="hint">Stopped</span>
+                </div>
+                <form id="chat-form" class="stack">
+                  <textarea id="chat-input" rows="2" placeholder="Ask Ollama…"></textarea>
+                  <button type="submit" class="btn btn-dark">Ask</button>
+                  <pre id="chat-output" class="reply"></pre>
+                </form>
+              </details>
+            </section>
+
+            <section class="panel panel-media">
+              <details class="ai-details">
                 <summary>
                   Media Player
                   <span class="media-lamp status-lamp off" id="media-lamp" title="Media player status"></span>
@@ -96,21 +112,6 @@
               </details>
             </section>
 
-            <section class="panel panel-ai">
-              <details class="ai-details">
-                <summary>Agent</summary>
-                <p class="ai-sub">Autonomous control loop + text generation via Ollama (<span id="chat-model-hint">model</span>).</p>
-                <div class="agent-controls">
-                  <button type="button" class="btn btn-accent" id="agent-toggle">Start</button>
-                  <span id="agent-status" class="hint">Stopped</span>
-                </div>
-                <form id="chat-form" class="stack">
-                  <textarea id="chat-input" rows="2" placeholder="Ask Ollama…"></textarea>
-                  <button type="submit" class="btn btn-dark">Ask</button>
-                  <pre id="chat-output" class="reply"></pre>
-                </form>
-              </details>
-            </section>
           </div>
 
           <div class="dashboard-right">
