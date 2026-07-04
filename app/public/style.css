@@ -32,6 +32,15 @@ body {
   background: var(--bg);
 }
 
+/* Render the whole UI at 80% — the density the app is designed to be read at
+   (equivalent to Ctrl-minus once). Width/height compensate (1 / 0.8 = 125%)
+   so the zoomed layout still fills the window. */
+body {
+  zoom: 0.8;
+  width: 125%;
+  height: 125%;
+}
+
 code {
   font-family: var(--mono);
   font-size: 0.92em;

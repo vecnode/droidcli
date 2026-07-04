@@ -1,5 +1,6 @@
 #include "process_manager.hpp"
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -69,7 +70,22 @@ bool ProcessManager::launch(
 	SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
 
 	// Run through cmd.exe so shell commands (make, .bat) resolve via PATH.
-	core::String command_line = "cmd.exe /c " + command;
+	// With NoDefaultCurrentDirectoryInExePath set (as on hardened systems), cmd
+	// does NOT resolve bare names from the working directory — so if the command
+	// starts with a file that exists in working_dir, make it explicitly relative.
+	core::String effective_command = command;
+	const size_t first_space = effective_command.find(' ');
+	const core::String first_token =
+		first_space == core::String::npos ? effective_command : effective_command.substr(0, first_space);
+	if (!working_dir.empty() && first_token.find_first_of("/\\") == core::String::npos)
+	{
+		std::error_code ec;
+		if (std::filesystem::exists(std::filesystem::path(working_dir) / first_token, ec))
+		{
+			effective_command = ".\\" + effective_command;
+		}
+	}
+	core::String command_line = "cmd.exe /c " + effective_command;
 	std::vector<char> mutable_command(command_line.begin(), command_line.end());
 	mutable_command.push_back('\0');
 
