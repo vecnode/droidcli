@@ -346,6 +346,14 @@ void apply_linux_icon(webview::webview& window)
 
 int main()
 {
+#ifdef _WIN32
+	// The console's default OEM codepage isn't UTF-8, so raw UTF-8 bytes
+	// (e.g. curly quotes/em-dashes in Ollama-sourced subtitle text) printed
+	// via std::cout/std::cerr render as mojibake without this.
+	SetConsoleOutputCP(CP_UTF8);
+	SetConsoleCP(CP_UTF8);
+#endif
+
 	std::cout << "metaagent-app v" << kAppVersion << std::endl;
 
 	metaagent::app_host::MetaAgentHost host;
