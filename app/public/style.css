@@ -25,20 +25,18 @@ body {
   width: 100%;
   height: 100%;
   margin: 0;
+  overflow: hidden;
   font-family: var(--font);
-  font-size: 13px;
+  /* Compact density (previously implemented as a body-level `zoom: 0.8`,
+     which mis-rendered the whole layout into a small top-left corner of the
+     window with its own internal scrollbars - a real, visible bug, not a
+     preview artifact). A plain smaller base font-size is the honest,
+     reliable way to get the same "read a notch smaller" feel without
+     breaking percentage-based sizing anywhere else in the page. */
+  font-size: 11px;
   line-height: 1.45;
   color: var(--text);
   background: var(--bg);
-}
-
-/* Render the whole UI at 80% — the density the app is designed to be read at
-   (equivalent to Ctrl-minus once). Width/height compensate (1 / 0.8 = 125%)
-   so the zoomed layout still fills the window. */
-body {
-  zoom: 0.8;
-  width: 125%;
-  height: 125%;
 }
 
 code {

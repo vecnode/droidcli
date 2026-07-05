@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -88,6 +89,23 @@ bool env_flag_enabled_default_on(const char* name)
 	return !(value == "0" || value == "false" || value == "FALSE" || value == "no" || value == "NO");
 }
 
+int env_int_or_default(const char* name, const int default_value)
+{
+	const std::string value = env_or_default(name, "");
+	if (value.empty())
+	{
+		return default_value;
+	}
+	try
+	{
+		return std::stoi(value);
+	}
+	catch (const std::exception&)
+	{
+		return default_value;
+	}
+}
+
 metaagent::app_host::HostConfig load_host_config()
 {
 	metaagent::app_host::HostConfig config;
@@ -110,6 +128,11 @@ metaagent::app_host::HostConfig load_host_config()
 	config.dataset_output_dir = env_or_default("METAAGENT_DATASET_DIR", "");
 	config.auto_start_media_player = env_flag_enabled_default_on("METAAGENT_AUTOSTART_MEDIA_PLAYER");
 	config.auto_start_adapter = env_flag_enabled_default_on("METAAGENT_AUTOSTART_ADAPTER");
+	config.google_api_key = env_or_default("METAAGENT_GOOGLE_API_KEY", "");
+	config.google_search_engine_id = env_or_default("METAAGENT_GOOGLE_CSE_ID", "");
+	config.google_search_query = env_or_default("METAAGENT_GOOGLE_SEARCH_QUERY", "");
+	config.google_search_interval_seconds =
+		env_int_or_default("METAAGENT_GOOGLE_SEARCH_INTERVAL_SECONDS", 10);
 	return config;
 }
 

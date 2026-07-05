@@ -17,7 +17,9 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #endif
 #include <winsock2.h>
+#include <winhttp.h>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winhttp.lib")
 using NativeSocket = SOCKET;
 constexpr NativeSocket kInvalidNativeSocket = INVALID_SOCKET;
 #else
@@ -37,8 +39,174 @@ struct ParsedHttpUrl {
 	core::String host;
 	core::String path = "/";
 	int32_t port = 80;
+	bool is_https = false;
 	bool valid = false;
 };
+
+ParsedHttpUrl parse_http_url(const core::String& url)
+{
+	ParsedHttpUrl parsed;
+
+	core::String scheme_prefix = "http://";
+	if (url.rfind("https://", 0) == 0)
+	{
+		scheme_prefix = "https://";
+		parsed.is_https = true;
+		parsed.port = 443;
+	}
+	else if (url.rfind(scheme_prefix, 0) != 0)
+	{
+		return parsed;
+	}
+
+	core::String remainder = url.substr(scheme_prefix.size());
+	const size_t path_index = remainder.find('/');
+	if (path_index != core::String::npos)
+	{
+		parsed.path = remainder.substr(path_index);
+		remainder = remainder.substr(0, path_index);
+	}
+
+	const size_t port_index = remainder.find(':');
+	if (port_index != core::String::npos)
+	{
+		parsed.host = remainder.substr(0, port_index);
+		parsed.port = std::max(1, std::atoi(remainder.substr(port_index + 1).c_str()));
+	}
+	else
+	{
+		parsed.host = remainder;
+	}
+
+	parsed.valid = !parsed.host.empty();
+	return parsed;
+}
+
+#if defined(_WIN32)
+
+// ASCII-only widening: adequate for hostnames and already percent-encoded
+// paths/query strings (the only things this function ever needs to widen).
+std::wstring widen_ascii(const core::String& value)
+{
+	std::wstring wide;
+	wide.reserve(value.size());
+	for (const char character : value)
+	{
+		wide.push_back(static_cast<wchar_t>(static_cast<unsigned char>(character)));
+	}
+	return wide;
+}
+
+// HTTPS transport via WinHTTP (handles the TLS handshake natively - no
+// OpenSSL/Schannel code of our own). The plain-HTTP path below (raw sockets)
+// is untouched and still used for the local Ollama/media-player/adapter
+// peers; this path exists for external HTTPS-only APIs (e.g. Google's Custom
+// Search JSON API), which have no plain-HTTP fallback.
+bool https_request_winhttp(
+	const core::String& method,
+	const ParsedHttpUrl& parsed,
+	const core::String& body,
+	int32_t& status_code_out,
+	core::String& response_body_out)
+{
+	bool ok = false;
+
+	const HINTERNET session = WinHttpOpen(
+		L"metaagent/1.0",
+		WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+		WINHTTP_NO_PROXY_NAME,
+		WINHTTP_NO_PROXY_BYPASS,
+		0);
+	if (!session)
+	{
+		return false;
+	}
+
+	const HINTERNET connect = WinHttpConnect(
+		session,
+		widen_ascii(parsed.host).c_str(),
+		static_cast<INTERNET_PORT>(parsed.port),
+		0);
+	if (!connect)
+	{
+		WinHttpCloseHandle(session);
+		return false;
+	}
+
+	const HINTERNET request = WinHttpOpenRequest(
+		connect,
+		widen_ascii(method).c_str(),
+		widen_ascii(parsed.path).c_str(),
+		nullptr,
+		WINHTTP_NO_REFERER,
+		WINHTTP_DEFAULT_ACCEPT_TYPES,
+		WINHTTP_FLAG_SECURE);
+	if (!request)
+	{
+		WinHttpCloseHandle(connect);
+		WinHttpCloseHandle(session);
+		return false;
+	}
+
+	const wchar_t* headers = nullptr;
+	std::wstring content_type_header;
+	if (method == "POST")
+	{
+		content_type_header = L"Content-Type: application/json\r\n";
+		headers = content_type_header.c_str();
+	}
+
+	const BOOL sent = WinHttpSendRequest(
+		request,
+		headers,
+		headers ? static_cast<DWORD>(-1) : 0,
+		body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
+		static_cast<DWORD>(body.size()),
+		static_cast<DWORD>(body.size()),
+		0);
+
+	if (sent && WinHttpReceiveResponse(request, nullptr))
+	{
+		DWORD status_code = 0;
+		DWORD status_size = sizeof(status_code);
+		WinHttpQueryHeaders(
+			request,
+			WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+			WINHTTP_HEADER_NAME_BY_INDEX,
+			&status_code,
+			&status_size,
+			WINHTTP_NO_HEADER_INDEX);
+		status_code_out = static_cast<int32_t>(status_code);
+
+		core::String body_accum;
+		for (;;)
+		{
+			DWORD available = 0;
+			if (!WinHttpQueryDataAvailable(request, &available) || available == 0)
+			{
+				break;
+			}
+
+			core::Array<char> chunk(available);
+			DWORD read = 0;
+			if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0)
+			{
+				break;
+			}
+			body_accum.append(chunk.data(), static_cast<size_t>(read));
+		}
+
+		response_body_out = std::move(body_accum);
+		ok = true;
+	}
+
+	WinHttpCloseHandle(request);
+	WinHttpCloseHandle(connect);
+	WinHttpCloseHandle(session);
+	return ok;
+}
+
+#endif // _WIN32
 
 bool ensure_socket_library()
 {
@@ -64,39 +232,6 @@ void close_socket(const NativeSocket socket_handle)
 #else
 	close(socket_handle);
 #endif
-}
-
-ParsedHttpUrl parse_http_url(const core::String& url)
-{
-	ParsedHttpUrl parsed;
-	const core::String scheme_prefix = "http://";
-	if (url.rfind(scheme_prefix, 0) != 0)
-	{
-		return parsed;
-	}
-
-	core::String remainder = url.substr(scheme_prefix.size());
-	const size_t path_index = remainder.find('/');
-	if (path_index != core::String::npos)
-	{
-		parsed.path = remainder.substr(path_index);
-		remainder = remainder.substr(0, path_index);
-	}
-
-	const size_t port_index = remainder.find(':');
-	if (port_index != core::String::npos)
-	{
-		parsed.host = remainder.substr(0, port_index);
-		parsed.port = std::max(1, std::atoi(remainder.substr(port_index + 1).c_str()));
-	}
-	else
-	{
-		parsed.host = remainder;
-		parsed.port = 80;
-	}
-
-	parsed.valid = !parsed.host.empty();
-	return parsed;
 }
 
 bool read_http_response(const NativeSocket socket_handle, int32_t& status_code_out, core::String& body_out)
@@ -177,13 +312,26 @@ bool sync_http_request(
 	status_code_out = 0;
 	response_body_out.clear();
 
-	if (!ensure_socket_library())
+	const ParsedHttpUrl parsed = parse_http_url(url);
+	if (!parsed.valid)
 	{
 		return false;
 	}
 
-	const ParsedHttpUrl parsed = parse_http_url(url);
-	if (!parsed.valid)
+	if (parsed.is_https)
+	{
+#if defined(_WIN32)
+		return https_request_winhttp(method, parsed, body, status_code_out, response_body_out);
+#else
+		// No TLS transport wired up on this platform yet - every peer this
+		// codebase talks to today (Ollama, media-player-cpp, the LoRA
+		// adapter) is plain HTTP on localhost. Add an OpenSSL (or similar)
+		// path here if a non-Windows host needs outbound HTTPS.
+		return false;
+#endif
+	}
+
+	if (!ensure_socket_library())
 	{
 		return false;
 	}
