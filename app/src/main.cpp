@@ -81,6 +81,13 @@ bool env_flag_enabled(const char* name)
 	return value == "1" || value == "true" || value == "TRUE" || value == "yes" || value == "YES";
 }
 
+// Same truthiness check, but the flag is ON unless explicitly disabled.
+bool env_flag_enabled_default_on(const char* name)
+{
+	const std::string value = env_or_default(name, "1");
+	return !(value == "0" || value == "false" || value == "FALSE" || value == "no" || value == "NO");
+}
+
 metaagent::app_host::HostConfig load_host_config()
 {
 	metaagent::app_host::HostConfig config;
@@ -101,6 +108,8 @@ metaagent::app_host::HostConfig load_host_config()
 	config.adapter_project_dir = env_or_default("METAAGENT_ADAPTER_DIR", "");
 	config.adapter_launch_command = env_or_default("METAAGENT_ADAPTER_LAUNCH_CMD", "deploy.bat");
 	config.dataset_output_dir = env_or_default("METAAGENT_DATASET_DIR", "");
+	config.auto_start_media_player = env_flag_enabled_default_on("METAAGENT_AUTOSTART_MEDIA_PLAYER");
+	config.auto_start_adapter = env_flag_enabled_default_on("METAAGENT_AUTOSTART_ADAPTER");
 	return config;
 }
 

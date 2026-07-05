@@ -221,9 +221,17 @@ Static assets (`/`, `/style.css`, `/app.js`) are embedded in the executable.
 | `METAAGENT_ADAPTER_DIR`      | empty                    | pre-training `deploy/` dir, for the uv server             |
 | `METAAGENT_ADAPTER_LAUNCH_CMD` | `deploy.bat`           | Adapter server launch command                             |
 | `METAAGENT_DATASET_DIR`      | empty                    | pre-training `output/` dir with corpus CSVs (read by `/api/dataset`) |
+| `METAAGENT_AUTOSTART_MEDIA_PLAYER` | on                | Set to `0` to disable auto-launching the media player on startup |
+| `METAAGENT_AUTOSTART_ADAPTER` | on                      | Set to `0` to disable auto-launching the adapter server on startup |
 
 All URLs/model/paths above are also editable live from the app's **Settings → Endpoints**
 table (`POST /api/config`), overriding the env var for the running session.
+
+**Auto-start on launch.** By default, when metaagent starts it tries to
+**launch (not build)** the media player and the adapter server, so you don't
+have to click RunRelease / Launch server every time — same as pressing those
+buttons, just automatic. It's a no-op (logged, not an error) if the matching
+`*_project_dir` isn't configured yet. Disable either with the env vars above.
 
 Example — point the LoRA adapter and media player at custom ports while keeping
 Ollama text-gen on its default:

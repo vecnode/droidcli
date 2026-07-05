@@ -184,6 +184,8 @@ The **desktop app** (`app/src/main.cpp`) reads env vars:
 | `METAAGENT_ADAPTER_DIR` | empty | pre-training `deploy/` dir (uv server) |
 | `METAAGENT_ADAPTER_LAUNCH_CMD` | `deploy.bat` | Adapter server launch command |
 | `METAAGENT_DATASET_DIR` | empty | pre-training `output/` dir; corpus CSVs read by `GET /api/dataset` |
+| `METAAGENT_AUTOSTART_MEDIA_PLAYER` | on (default-on flag) | `0` disables auto-launching the media player on host init |
+| `METAAGENT_AUTOSTART_ADAPTER` | on (default-on flag) | `0` disables auto-launching the adapter server on host init |
 
 **Centralised process control** lives in `app/src/process_manager.{hpp,cpp}`
 (Windows Job Object / POSIX process group, so stop kills the whole tree; bare
@@ -194,6 +196,15 @@ of `NoDefaultCurrentDirectoryInExePath`). The host
 `/api/media/process/stop`, `/api/adapter/launch`, `/api/adapter/process/stop`,
 `/api/process/status`) launches the peer apps and reports their PIDs. Commands
 and project dirs are configuration — never hardcode a user's paths in core.
+
+**Auto-start on host init:** `MetaAgentHost::initialize()` calls `run_media_player()`
+and `launch_adapter_server()` (launch only, never build) right after setup,
+gated by `HostConfig::auto_start_media_player` / `auto_start_adapter` (both
+default `true`, read via `env_flag_enabled_default_on()` in `main.cpp` — note
+this is the inverse-default sibling of `env_flag_enabled()`: unset/`1` = on,
+only `0`/`false`/`no` turns it off). Silently no-ops if the matching
+`*_project_dir` is empty. Runs after `initialize()`'s lock scope releases,
+since `run_media_player`/`launch_adapter_server` take the lock themselves.
 
 All URLs/model/paths are also editable live in the app's **Settings → Endpoints**
 table, which `POST`s to `/api/config` (`MetaAgentHost::update_config`) and

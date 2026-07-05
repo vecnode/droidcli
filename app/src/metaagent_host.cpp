@@ -224,6 +224,26 @@ void MetaAgentHost::initialize()
 
 	append_app_log("host", "event", "MetaAgentHost initialized", true);
 	media_dataset_mirror_.set_preferred_data_directory(config_.media_data_directory);
+
+	// Best-effort: try to launch the peer apps on startup so the user doesn't
+	// have to click RunRelease / Launch server every time. Launch only (never
+	// build); silently no-ops if the project dir isn't configured. Runs after
+	// the lock above is released, since these methods take the lock themselves.
+	bool auto_start_media_player = false;
+	bool auto_start_adapter = false;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		auto_start_media_player = config_.auto_start_media_player;
+		auto_start_adapter = config_.auto_start_adapter;
+	}
+	if (auto_start_media_player)
+	{
+		run_media_player();
+	}
+	if (auto_start_adapter)
+	{
+		launch_adapter_server();
+	}
 }
 
 void MetaAgentHost::wire_callbacks()
@@ -356,7 +376,9 @@ core::String MetaAgentHost::build_config_json() const
 	stream << net::json_string_field("media_player_run_command", config_.media_player_run_command) << ',';
 	stream << net::json_string_field("adapter_project_dir", config_.adapter_project_dir) << ',';
 	stream << net::json_string_field("adapter_launch_command", config_.adapter_launch_command) << ',';
-	stream << net::json_string_field("dataset_output_dir", config_.dataset_output_dir);
+	stream << net::json_string_field("dataset_output_dir", config_.dataset_output_dir) << ',';
+	stream << net::json_bool_field("auto_start_media_player", config_.auto_start_media_player) << ',';
+	stream << net::json_bool_field("auto_start_adapter", config_.auto_start_adapter);
 	stream << '}';
 	return stream.str();
 }
