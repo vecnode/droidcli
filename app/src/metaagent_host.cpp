@@ -3,6 +3,7 @@
 #include "tools/sync_http_client.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <ctime>
 #include <filesystem>
@@ -872,6 +873,16 @@ void MetaAgentHost::push_subtitle_for_clip(const core::String& clip_name)
 	ensure_summaries_loaded();
 
 	const core::String key = base_filename(clip_name);
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (key == last_subtitle_clip_key_)
+		{
+			// Still showing the same image — keep the subtitle.
+			return;
+		}
+		last_subtitle_clip_key_ = key;
+	}
+
 	core::String summary;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -888,8 +899,11 @@ void MetaAgentHost::push_subtitle_for_clip(const core::String& clip_name)
 		return;
 	}
 
-	// Use the cached condensed subtitle if we already rewrote this clip.
-	core::String text;
+	// Push in lockstep with the clip switch: use the cached condensed subtitle if
+	// we already rewrote this clip, otherwise the raw summary. Both are available
+	// with zero latency — never block this push on a live Ollama call, or the
+	// subtitle change desyncs from the image change by however long that takes.
+	core::String text = summary;
 	bool cached = false;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -901,18 +915,23 @@ void MetaAgentHost::push_subtitle_for_clip(const core::String& clip_name)
 		}
 	}
 
-	if (!cached)
-	{
-		text = condense_summary(summary);
-		std::lock_guard<std::mutex> lock(mutex_);
-		condensed_by_basename_[key] = text;
-	}
-
 	const core::String subtitle_body = "{"
 		+ net::json_string_field("text", text) + ","
 		+ net::json_bool_field("enabled", true)
 		+ "}";
 	proxy_media_player_post("/api/subtitles", subtitle_body);
+
+	if (!cached)
+	{
+		// Condense in the background for next time this image comes up. Never
+		// pushed mid-view, so the subtitle stays stable for the rest of this
+		// image's display (only the *next* visit benefits from the rewrite).
+		std::thread([this, key, summary]() {
+			const core::String condensed = condense_summary(summary);
+			std::lock_guard<std::mutex> lock(mutex_);
+			condensed_by_basename_[key] = condensed;
+		}).detach();
+	}
 }
 
 core::String MetaAgentHost::media_navigate(const core::String& media_path, const core::String& body)
@@ -1051,6 +1070,7 @@ core::String MetaAgentHost::update_ollama_config(const core::String& body)
 
 	config_.ollama_model = model;
 	condensed_by_basename_.clear();
+	last_subtitle_clip_key_.clear();
 	if (config_.enable_ai)
 	{
 		ai::OllamaConfig ollama_config;
@@ -1075,6 +1095,7 @@ core::String MetaAgentHost::update_config(const core::String& body)
 	{
 		config_.ollama_url = ollama_url;
 		condensed_by_basename_.clear();
+		last_subtitle_clip_key_.clear();
 	}
 
 	const core::String ollama_model = net::extract_json_string_field(body, "ollama_model");
@@ -1082,6 +1103,7 @@ core::String MetaAgentHost::update_config(const core::String& body)
 	{
 		config_.ollama_model = ollama_model;
 		condensed_by_basename_.clear();
+		last_subtitle_clip_key_.clear();
 	}
 
 	const core::String media_player_base_url = net::extract_json_string_field(body, "media_player_base_url");
@@ -1133,6 +1155,7 @@ core::String MetaAgentHost::update_config(const core::String& body)
 		// Force the subtitle summary map to reload from the new dir.
 		summaries_loaded_ = false;
 		condensed_by_basename_.clear();
+		last_subtitle_clip_key_.clear();
 	}
 
 	const core::String google_api_key = net::extract_json_string_field(body, "google_api_key");

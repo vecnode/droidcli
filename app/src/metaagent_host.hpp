@@ -142,6 +142,10 @@ private:
 	core::String summaries_loaded_for_dir_;
 	// image basename -> Ollama-condensed subtitle (cleared when model/dataset change).
 	std::map<core::String, core::String> condensed_by_basename_;
+	// Basename of the last clip a subtitle was actually pushed for, so we don't
+	// re-push the same text while the same image is still on screen (e.g. from
+	// a status poll), while still pushing fresh per-image text on every switch.
+	core::String last_subtitle_clip_key_;
 
 	struct MediaControlLogEntry {
 		core::String timestamp;
