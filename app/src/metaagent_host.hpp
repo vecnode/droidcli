@@ -33,6 +33,12 @@ struct HostConfig {
 	// pre-training output/ dir with the corpus CSVs (*_OCR.csv, *_SUMMARIES.csv,
 	// *_OBJS.csv); metaagent reads these to expose the corpus structure.
 	core::String dataset_output_dir;
+
+	// Best-effort auto-launch (not build) of the peer apps when the host starts,
+	// so the user doesn't have to click RunRelease / Launch server every time.
+	// No-ops silently if the matching *_project_dir is unset. Default on.
+	bool auto_start_media_player = true;
+	bool auto_start_adapter = true;
 };
 
 class MetaAgentHost {
