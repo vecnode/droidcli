@@ -7,7 +7,8 @@ REM
 REM Produces:  dist\metaagent-<version>\
 REM              metaagent\      metaagent-app.exe (Release) + DLLs + assets
 REM              media-player\   media-player-cpp.exe + DLLs + data\
-REM              adapter\        pre-training deploy code (no weights)
+REM              adapter\        pre-training deploy code + the trained LoRA
+REM                               adapter (~40 MB; no base/fused model weights)
 REM              datasets\       corpus CSVs
 REM              run_all.bat     launcher (see distribute\run_all.bat)
 REM
@@ -21,12 +22,18 @@ REM                     media (media files are git-ignored in the submodule).
 REM   DIST_OF_ROOT      openFrameworks root, required when DIST_MEDIA_DIR is not
 REM                     inside an OF tree (passed to make as OF_ROOT).
 REM   DIST_ADAPTER_DIR  pre-training repo root. Default: external\pre-training.
+REM   DIST_ADAPTER_WEIGHTS_DIR  Trained LoRA adapter dir to stage (small, ~40 MB;
+REM                     this is YOUR trained model, not downloaded from anywhere).
+REM                     Default: %DIST_ADAPTER_DIR%\training\runs\llava15_lora\final_adapter.
 REM   DIST_DATASET_DIR  folder with the corpus CSVs. Default: %DIST_ADAPTER_DIR%\output.
 REM   MSYS2_ROOT        MSYS2 install. Default: C:\msys64.
 REM
-REM Weights are intentionally NOT copied (light dist): the adapter bootstraps its
-REM env and downloads the base model on first run, or you copy a fused model to
-REM adapter\deploy\merged_model yourself.
+REM The ~14 GB base model (llava-hf/llava-1.5-7b-hf) is intentionally NOT copied
+REM (light dist): deploy/infer.py downloads it once from Hugging Face Hub into
+REM training/hf_cache/ next to the adapter (git-ignored, resolved relative to
+REM deploy/ so this works in the dist layout too) the first time the adapter
+REM server starts. Ship a fused model instead by copying it to
+REM adapter\deploy\merged_model yourself (skips the LoRA + base-model download).
 REM Copyright (c) vecnode 2026
 REM -----------------------------------------------------------------------------
 pushd "%~dp0"
@@ -45,6 +52,7 @@ goto parse
 if not defined MSYS2_ROOT set "MSYS2_ROOT=C:\msys64"
 if not defined DIST_MEDIA_DIR set "DIST_MEDIA_DIR=%ROOT%\external\media-player-cpp"
 if not defined DIST_ADAPTER_DIR set "DIST_ADAPTER_DIR=%ROOT%\external\pre-training"
+if not defined DIST_ADAPTER_WEIGHTS_DIR set "DIST_ADAPTER_WEIGHTS_DIR=%DIST_ADAPTER_DIR%\training\runs\llava15_lora\final_adapter"
 if not defined DIST_DATASET_DIR set "DIST_DATASET_DIR=%DIST_ADAPTER_DIR%\output"
 
 REM --- Version from src\version.hpp ---
@@ -58,6 +66,7 @@ set "DIST_DIR=%ROOT%\dist\%DIST_NAME%"
 echo === MetaAgent distribute: %DIST_NAME% ===
 echo   media source:   %DIST_MEDIA_DIR%
 echo   adapter source: %DIST_ADAPTER_DIR%
+echo   adapter weights: %DIST_ADAPTER_WEIGHTS_DIR%
 echo   dataset source: %DIST_DATASET_DIR%
 echo.
 
@@ -101,12 +110,22 @@ if errorlevel 8 goto error
 robocopy "%DIST_MEDIA_DIR%\bin" "%DIST_DIR%\media-player" /E /XF *.pdb *_debug.exe /NFL /NDL /NJH /NJS >nul
 if errorlevel 8 goto error
 
-REM --- [4/6] Adapter code (no weights, no caches) ---
+REM --- [4/6] Adapter code + trained LoRA weights (no base/fused model) ---
 echo [4/6] Staging adapter code
 robocopy "%DIST_ADAPTER_DIR%\deploy" "%DIST_DIR%\adapter\deploy" /E /XD merged_model __pycache__ /XF *.safetensors /NFL /NDL /NJH /NJS >nul
 if errorlevel 8 goto error
 for %%F in (pyproject.toml uv.lock uv_bootstrap.bat main.bat LICENSE) do (
   if exist "%DIST_ADAPTER_DIR%\%%F" copy /y "%DIST_ADAPTER_DIR%\%%F" "%DIST_DIR%\adapter\" >nul
+)
+
+if exist "%DIST_ADAPTER_WEIGHTS_DIR%" (
+  echo         Staging trained LoRA adapter from %DIST_ADAPTER_WEIGHTS_DIR%
+  robocopy "%DIST_ADAPTER_WEIGHTS_DIR%" "%DIST_DIR%\adapter\training\runs\llava15_lora\final_adapter" /E /NFL /NDL /NJH /NJS >nul
+  if errorlevel 8 goto error
+) else (
+  echo [warn] Trained adapter not found at %DIST_ADAPTER_WEIGHTS_DIR%.
+  echo        The adapter server will fail to start until this exists or
+  echo        adapter\deploy\merged_model is populated - see README.txt.
 )
 
 REM --- [5/6] Datasets + launcher + readme ---
