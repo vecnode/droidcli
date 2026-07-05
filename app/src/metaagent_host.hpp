@@ -39,6 +39,15 @@ struct HostConfig {
 	// No-ops silently if the matching *_project_dir is unset. Default on.
 	bool auto_start_media_player = true;
 	bool auto_start_adapter = true;
+
+	// Periodic Google Programmable Search Engine ("Custom Search JSON API")
+	// polling. Disabled (no-op) unless api_key + search_engine_id + query are
+	// all set - get a free key + engine id at
+	// https://programmablesearchengine.google.com/ (free tier: 100 queries/day).
+	core::String google_api_key;
+	core::String google_search_engine_id;
+	core::String google_search_query;
+	int32_t google_search_interval_seconds = 10;
 };
 
 class MetaAgentHost {
@@ -93,6 +102,11 @@ public:
 	// structure (image, status, OCR + summary previews, object count).
 	core::String build_dataset_json();
 
+	// Runs one Google search request (blocking HTTP) and logs each result to
+	// the app log (channel "search"), which the UI's Media Log terminal shows.
+	// No-op if not configured. Safe to call from any thread.
+	void run_google_search();
+
 private:
 	void wire_callbacks();
 	void apply_command_side_effects(app::CommandId command);
@@ -146,6 +160,8 @@ private:
 	bool media_player_online_last_seen_ = true;
 	bool recording_active_ = false;
 	bool autopilot_enabled_ = false;
+	float google_search_elapsed_seconds_ = 0.0f;
+	bool google_search_in_flight_ = false;
 	mutable std::mutex mutex_;
 };
 

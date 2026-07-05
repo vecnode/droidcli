@@ -137,7 +137,7 @@ if(WIN32)
         $<$<BOOL:${METAAGENT_APP_INCLUDE_TERMINAL_ON_RELEASE}>:METAAGENT_APP_INCLUDE_TERMINAL_ON_RELEASE=1>
         $<$<NOT:$<BOOL:${METAAGENT_APP_INCLUDE_TERMINAL_ON_RELEASE}>>:METAAGENT_APP_INCLUDE_TERMINAL_ON_RELEASE=0>
     )
-    target_link_libraries(metaagent-app PRIVATE ws2_32 mswsock)
+    target_link_libraries(metaagent-app PRIVATE ws2_32 mswsock winhttp)
 
     if(MSVC AND NOT METAAGENT_APP_INCLUDE_TERMINAL_ON_RELEASE)
         target_link_options(metaagent-app PRIVATE

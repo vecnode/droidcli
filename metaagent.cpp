@@ -19,6 +19,7 @@
 #include "ai/ollama_client.cpp"
 #include "ai/language_runtime.cpp"
 #include "net/json.cpp"
+#include "net/google_search.cpp"
 #include "net/handlers.cpp"
 #include "net/router.cpp"
 #include "net/signal_types.cpp"

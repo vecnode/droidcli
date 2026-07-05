@@ -30,6 +30,7 @@
 #include "ai/types.hpp"
 #include "app/commands.hpp"
 #include "app/runtime_catalog.hpp"
+#include "net/google_search.hpp"
 #include "net/handlers.hpp"
 #include "net/json.hpp"
 #include "net/router.hpp"

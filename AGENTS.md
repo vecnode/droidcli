@@ -148,6 +148,12 @@ in one change so the core/host/test trio stays in sync:
    `HostConfig::adapter_url` + `update_config` + the Settings Endpoints table.
 6. **New controlled process** — a `ProcessManager` key + host method + route +
    UI button (see `/api/media/build` as the template).
+7. **Outbound HTTPS to an external (non-localhost) API** — `tools/sync_http_client`
+   only did plain HTTP over raw sockets until the Google search feature needed
+   real TLS; `https://` URLs now route through WinHTTP (Windows-native, no new
+   dependency) while `http://` keeps the original raw-socket path. If you add
+   another external HTTPS integration, it gets this transport for free — just
+   build an `https://` URL. Don't add a second, parallel HTTPS implementation.
 
 **Every new core `src/<module>/*_test.cpp` must be registered in
 `CMakeLists.txt`** and pass under `ctest`.
@@ -186,6 +192,19 @@ The **desktop app** (`app/src/main.cpp`) reads env vars:
 | `METAAGENT_DATASET_DIR` | empty | pre-training `output/` dir; corpus CSVs read by `GET /api/dataset` |
 | `METAAGENT_AUTOSTART_MEDIA_PLAYER` | on (default-on flag) | `0` disables auto-launching the media player on host init |
 | `METAAGENT_AUTOSTART_ADAPTER` | on (default-on flag) | `0` disables auto-launching the adapter server on host init |
+| `METAAGENT_GOOGLE_API_KEY` | empty | Google Programmable Search Engine API key |
+| `METAAGENT_GOOGLE_CSE_ID` | empty | Google Programmable Search Engine ID ("cx") |
+| `METAAGENT_GOOGLE_SEARCH_QUERY` | empty | Query re-run periodically (search is a no-op until all three Google vars are set) |
+| `METAAGENT_GOOGLE_SEARCH_INTERVAL_SECONDS` | `10` | Re-run interval |
+
+**Google search** lives in `src/net/google_search.{hpp,cpp}` (core: URL build +
+hand-rolled JSON parse, no JSON library) + `MetaAgentHost::run_google_search()`
+(host: the actual HTTPS call via `tools::sync_http_get`, logged to the `search`
+app-log channel). `MetaAgentHost::tick()` accumulates `delta_seconds` and fires
+it on a detached background thread every `google_search_interval_seconds` -
+never on the io_context tick thread, since the HTTP call blocks. The API key is
+never echoed back by `GET /api/config` (only `google_api_key_configured: bool`)
+- keep that asymmetry if you touch `build_config_json`/`update_config`.
 
 **Centralised process control** lives in `app/src/process_manager.{hpp,cpp}`
 (Windows Job Object / POSIX process group, so stop kills the whole tree; bare

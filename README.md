@@ -223,9 +223,33 @@ Static assets (`/`, `/style.css`, `/app.js`) are embedded in the executable.
 | `METAAGENT_DATASET_DIR`      | empty                    | pre-training `output/` dir with corpus CSVs (read by `/api/dataset`) |
 | `METAAGENT_AUTOSTART_MEDIA_PLAYER` | on                | Set to `0` to disable auto-launching the media player on startup |
 | `METAAGENT_AUTOSTART_ADAPTER` | on                      | Set to `0` to disable auto-launching the adapter server on startup |
+| `METAAGENT_GOOGLE_API_KEY`   | empty                    | Google Programmable Search Engine API key (search disabled until all three Google vars are set) |
+| `METAAGENT_GOOGLE_CSE_ID`    | empty                    | Google Programmable Search Engine ID ("cx")               |
+| `METAAGENT_GOOGLE_SEARCH_QUERY` | empty                 | Query to run periodically                                 |
+| `METAAGENT_GOOGLE_SEARCH_INTERVAL_SECONDS` | `10`      | How often to re-run the search                             |
 
 All URLs/model/paths above are also editable live from the app's **Settings → Endpoints**
-table (`POST /api/config`), overriding the env var for the running session.
+table (`POST /api/config`), overriding the env var for the running session. The
+Google API key is write-only there — `GET /api/config` reports whether one is
+set (`google_api_key_configured`) but never echoes the key itself.
+
+### Google search (background)
+
+Once `METAAGENT_GOOGLE_API_KEY` + `METAAGENT_GOOGLE_CSE_ID` + `METAAGENT_GOOGLE_SEARCH_QUERY`
+are all set, metaagent runs that search every `METAAGENT_GOOGLE_SEARCH_INTERVAL_SECONDS`
+(default 10) via Google's official **Programmable Search Engine / Custom Search
+JSON API** — a real HTTP GET to `googleapis.com`, not HTML scraping of a search
+results page. Get a free API key + search engine ID at
+https://programmablesearchengine.google.com/ (free tier: 100 queries/day).
+Results are logged to the `search` channel in `GET /api/app/log`, which the
+desktop app's Media Log terminal already displays — no separate UI needed.
+
+This is also why the desktop app links `winhttp` (see `tools/sync_http_client.cpp`):
+outbound calls to local peers (Ollama, media-player-cpp, the LoRA adapter) are
+plain HTTP over raw sockets, but Google's API is HTTPS-only, so `sync_http_get`/
+`sync_http_post_json` transparently route `https://` URLs through WinHTTP
+(which handles the TLS handshake) while `http://` URLs keep using the original
+raw-socket path unchanged.
 
 **Auto-start on launch.** By default, when metaagent starts it tries to
 **launch (not build)** the media player and the adapter server, so you don't

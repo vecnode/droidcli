@@ -100,6 +100,7 @@ Public entry point: `#include "metaagent.h"`.
 | `media/corpus`            | Load OCR/objects corpora; subtitles, previews, focus rects, masks     |
 | `net/router` + `handlers` | `/health`, `/echo`, `/notify`, `/ai/chat`                             |
 | `net/signal_router`       | **Network trigger**: register peer `SignalTarget`s, dispatch `SignalEnvelope`s via `SignalTransportFn`, log delivery |
+| `net/google_search`       | Google Programmable Search Engine (Custom Search JSON API) URL build + hand-rolled JSON response parse |
 | `net/json`                | Escape/build/extract JSON fields (no external JSON dependency)        |
 | `notify/parse`            | Notify body parsing (JSON or text)                                    |
 | `session/types` + `status`| `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |

@@ -80,11 +80,15 @@ add_executable(metaagent_runtime_catalog_test tests/runtime_catalog_test.cpp)
 target_link_libraries(metaagent_runtime_catalog_test PRIVATE metaagent)
 add_test(NAME runtime_catalog_test COMMAND metaagent_runtime_catalog_test)
 
+add_executable(metaagent_google_search_test tests/google_search_test.cpp)
+target_link_libraries(metaagent_google_search_test PRIVATE metaagent)
+add_test(NAME google_search_test COMMAND metaagent_google_search_test)
+
 add_executable(metaagent_server tools/metaagent_server.cpp tools/mini_http_server.cpp tools/sync_http_client.cpp)
 target_include_directories(metaagent_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 target_link_libraries(metaagent_server PRIVATE metaagent)
 if(WIN32)
-    target_link_libraries(metaagent_server PRIVATE ws2_32)
+    target_link_libraries(metaagent_server PRIVATE ws2_32 winhttp)
     target_compile_definitions(metaagent_server PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
