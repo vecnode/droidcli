@@ -101,7 +101,7 @@ folder + zip under `dist\metaagent-<version>\`:
 | ------ | -------- |
 | `metaagent\` | `metaagent-app.exe` + WebView2/FFmpeg DLLs + assets |
 | `media-player\` | `media-player-cpp.exe` + MinGW DLLs + `data\` corpus/media |
-| `adapter\` | pre-training deploy code + uv files (**no model weights** — first run bootstraps/downloads) |
+| `adapter\` | pre-training deploy code + uv files + the **trained LoRA adapter** (`training/runs/llava15_lora/final_adapter`, ~40 MB — your model, staged as-is; **no base/fused model weights**, ~14 GB, downloaded on first run instead) |
 | `datasets\` | corpus CSVs |
 | `run_all.bat` | starts metaagent wired to the sibling folders |
 
@@ -112,7 +112,22 @@ unzipped dist runs with zero configuration (env vars still win).
 Config (env vars): `DIST_MEDIA_DIR` (media player working copy — point it at your
 openFrameworks tree so `bin\data` media ships; the submodule has code only),
 `DIST_OF_ROOT` (when the media dir is outside an OF tree), `DIST_ADAPTER_DIR`,
-`DIST_DATASET_DIR`, `MSYS2_ROOT`. Flags: `--skip-media`, `--no-zip`.
+`DIST_ADAPTER_WEIGHTS_DIR` (trained LoRA adapter to stage; default
+`%DIST_ADAPTER_DIR%\training\runs\llava15_lora\final_adapter` — warns, doesn't
+fail, if missing), `DIST_DATASET_DIR`, `MSYS2_ROOT`. Flags: `--skip-media`, `--no-zip`.
+
+**Two different weight sources — the adapter is shipped, the base model is
+downloaded.** The LoRA adapter is *your* trained model (small, ~40 MB) that
+already exists on the machine that built the dist — `build_and_distribute.bat`
+copies it in, it is never fetched from anywhere. The public base model
+(`llava-hf/llava-1.5-7b-hf`, ~14 GB) is the opposite: never shipped, always
+fetched — `deploy/infer.py`'s `ensure_base_model_cached()` downloads it via
+`huggingface_hub.snapshot_download` into `adapter\training\hf_cache\`
+(git-ignored, resolved relative to `deploy/` so this works in the dist layout
+too) the first time the adapter server starts, with progress logged; later
+starts are a fast cache check, no re-download. Needs internet + ~14 GB free
+disk on that first run. Ship a fused model instead
+(`adapter\deploy\merged_model`) to skip this download entirely.
 
 Docker was considered and deliberately **not** used: metaagent and the media
 player are native Windows GUI apps (WebView2 / OpenGL + Media Foundation) and
