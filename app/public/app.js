@@ -400,9 +400,9 @@ document.getElementById("media-subtitles").addEventListener("change", (event) =>
   mediaCommand("/api/media/subtitles", { enabled: event.target.checked });
 });
 
-// Agent loop: when started, trigger the media player "Next" every 10 seconds
+// Agent loop: when started, trigger the media player "Next" every 20 seconds
 // (same action as the Next button). Further per-tick logic can be added here.
-const kAgentIntervalMs = 10000;
+const kAgentIntervalMs = 20000;
 let agentTimer = null;
 
 function agentTick() {
@@ -414,7 +414,7 @@ function setAgentRunning(running) {
   const status = document.getElementById("agent-status");
   toggle.textContent = running ? "Stop" : "Start";
   toggle.classList.toggle("active", running);
-  status.textContent = running ? "Running — Next every 10s" : "Stopped";
+  status.textContent = running ? "Running — Next every 20s" : "Stopped";
 }
 
 document.getElementById("agent-toggle").addEventListener("click", () => {
