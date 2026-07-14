@@ -89,6 +89,26 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.update_ollama_config(request.body));
 			return true;
 		}
+		if (is_get && path == "/api/ollama/setup-status")
+		{
+			set_json(response, host.ollama_setup_status_json());
+			return true;
+		}
+		if (is_post && path == "/api/ollama/install")
+		{
+			set_json(response, host.install_ollama());
+			return true;
+		}
+		if (is_post && path == "/api/ollama/start")
+		{
+			set_json(response, host.start_ollama());
+			return true;
+		}
+		if (is_post && path == "/api/ollama/pull")
+		{
+			set_json(response, host.pull_ollama_model(request.body));
+			return true;
+		}
 		if (is_get && path == "/api/process/status")
 		{
 			set_json(response, host.build_process_status_json());

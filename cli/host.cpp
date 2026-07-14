@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -457,6 +458,188 @@ core::String DroidHost::update_ollama_config(const core::String& body)
 		+ net::json_bool_field("success", true) + ","
 		+ net::json_string_field("model", config_.ollama_model)
 		+ "}";
+}
+
+core::String DroidHost::ollama_setup_status_json()
+{
+	// "installed" - is an `ollama` binary on PATH. Windows-first (`where`);
+	// POSIX gets a best-effort `which` fallback, matching the rest of this
+	// codebase's Windows-first precedent (process_manager.cpp/command_runner.cpp).
+#if defined(_WIN32)
+	const CommandRunResult where_result = run_command_once("where ollama", "", 5000);
+#else
+	const CommandRunResult where_result = run_command_once("which ollama", "", 5000);
+#endif
+	const bool installed = where_result.launched && where_result.exit_code == 0
+		&& !where_result.stdout_text.empty();
+
+	core::String ollama_url_copy;
+	core::String ollama_model_copy;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		ollama_url_copy = config_.ollama_url;
+		ollama_model_copy = config_.ollama_model;
+	}
+
+	const core::String tags_url = strip_trailing_slashes(ollama_url_copy) + "/api/tags";
+	int32_t status_code = 0;
+	core::String response_body;
+	const bool transport_ok = tools::sync_http_get(tags_url, status_code, response_body);
+	const bool online = transport_ok && status_code >= 200 && status_code < 300;
+	const core::Array<core::String> models =
+		online ? parse_ollama_model_names(response_body) : core::Array<core::String> {};
+
+	bool configured_model_pulled = false;
+	for (const core::String& name : models)
+	{
+		if (name == ollama_model_copy)
+		{
+			configured_model_pulled = true;
+			break;
+		}
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("installed", installed) << ',';
+	stream << net::json_bool_field("online", online) << ',';
+	stream << "\"models\":[";
+	for (size_t index = 0; index < models.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		stream << '"' << net::escape_json_string(models[index]) << '"';
+	}
+	stream << "],";
+	stream << net::json_string_field("configured_model", ollama_model_copy) << ',';
+	stream << net::json_bool_field("configured_model_pulled", configured_model_pulled);
+	stream << '}';
+	return stream.str();
+}
+
+core::String DroidHost::install_ollama()
+{
+#if defined(_WIN32)
+	const CommandRunResult where_winget = run_command_once("where winget", "", 5000);
+	if (!where_winget.launched || where_winget.exit_code != 0)
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ "\"exit_code\":0,"
+			+ net::json_string_field("stdout", "") + ","
+			+ net::json_string_field("stderr", "") + ","
+			+ net::json_string_field("error",
+				"winget is not available on this system. Install Ollama manually from https://ollama.com/download.")
+			+ "}";
+	}
+
+	const CommandRunResult result = run_command_once(
+		"winget install --id Ollama.Ollama -e --source winget --accept-package-agreements --accept-source-agreements",
+		"", 300000);
+	const bool ok = result.launched && result.exit_code == 0;
+	append_app_log("ollama", "out", ok ? "installed Ollama via winget" : "winget install failed", ok);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", ok) << ',';
+	stream << "\"exit_code\":" << result.exit_code << ',';
+	stream << net::json_string_field("stdout", result.stdout_text) << ',';
+	stream << net::json_string_field("stderr", result.stderr_text) << ',';
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+#else
+	return "{" + net::json_bool_field("ok", false) + ","
+		+ "\"exit_code\":0,"
+		+ net::json_string_field("stdout", "") + ","
+		+ net::json_string_field("stderr", "") + ","
+		+ net::json_string_field("error",
+			"automatic install is only implemented on Windows; install Ollama manually from https://ollama.com/download.")
+		+ "}";
+#endif
+}
+
+core::String DroidHost::start_ollama()
+{
+	core::String error;
+	const bool launched = process_manager_.launch("__ollama__", "ollama serve", "", "ollama serve", error);
+	if (!launched)
+	{
+		append_app_log("ollama", "out", "failed to launch ollama serve: " + error, false);
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_bool_field("online", false) + ","
+			+ net::json_string_field("error", error) + "}";
+	}
+
+	int64_t pid = 0;
+	for (const ProcessInfo& info : process_manager_.snapshot())
+	{
+		if (info.key == "__ollama__")
+		{
+			pid = info.pid;
+			break;
+		}
+	}
+
+	core::String ollama_url_copy;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		ollama_url_copy = config_.ollama_url;
+	}
+	const core::String tags_url = strip_trailing_slashes(ollama_url_copy) + "/api/tags";
+
+	// Ollama's own startup is usually near-instant once the process exists,
+	// but give it a few beats before giving up on "online".
+	bool online = false;
+	for (int attempt = 0; attempt < 6 && !online; ++attempt)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		int32_t status_code = 0;
+		core::String response_body;
+		if (tools::sync_http_get(tags_url, status_code, response_body) && status_code >= 200 && status_code < 300)
+		{
+			online = true;
+		}
+	}
+
+	append_app_log("ollama", "out",
+		online ? "ollama serve came online" : "ollama serve launched but is not yet reachable", online);
+
+	return "{" + net::json_bool_field("ok", true) + ","
+		+ "\"pid\":" + std::to_string(pid) + ","
+		+ net::json_bool_field("online", online) + "}";
+}
+
+core::String DroidHost::pull_ollama_model(const core::String& body)
+{
+	const core::String model = net::extract_json_string_field(body, "model");
+	if (model.empty())
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("model", "") + ","
+			+ "\"exit_code\":0,"
+			+ net::json_string_field("error", "missing model") + "}";
+	}
+
+	const CommandRunResult result = run_command_once("ollama pull " + model, "", 600000);
+	const bool ok = result.launched && result.exit_code == 0;
+	append_app_log("ollama", "out", ok ? ("pulled model: " + model) : ("pull failed: " + model), ok);
+
+	if (ok)
+	{
+		update_ollama_config("{" + net::json_string_field("model", model) + "}");
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", ok) << ',';
+	stream << net::json_string_field("model", model) << ',';
+	stream << "\"exit_code\":" << result.exit_code << ',';
+	stream << net::json_string_field("error",
+		result.error_message.empty() && !ok ? result.stderr_text : result.error_message);
+	stream << '}';
+	return stream.str();
 }
 
 core::String DroidHost::register_connector(const core::String& body)
