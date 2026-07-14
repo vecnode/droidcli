@@ -9,11 +9,32 @@ enum class ChatRole {
 	System,
 	User,
 	Assistant,
+	Tool,
 };
 
 struct ChatMessage {
 	ChatRole role = ChatRole::User;
 	core::String content;
+};
+
+// A tool the model may call. `parameters_json_schema` is a raw, pre-built
+// JSON Schema object (e.g. {"type":"object","properties":{...}}) rather than
+// a modeled C++ type - keeps this file's hand-rolled-JSON style and avoids
+// building a JSON Schema type system for one call site.
+struct ToolDefinition {
+	core::String name;
+	core::String description;
+	core::String parameters_json_schema;
+};
+
+// One function call the model asked for in a response. `arguments_json` is
+// the raw JSON text of the arguments object exactly as Ollama sent it (Ollama
+// sends `arguments` as a JSON object, not an OpenAI-style JSON-encoded
+// string) - the caller re-parses whichever fields it needs.
+struct ToolCall {
+	core::String id;
+	core::String name;
+	core::String arguments_json;
 };
 
 struct OllamaConfig {
@@ -38,6 +59,7 @@ struct OllamaChatResponse {
 	bool done = false;
 	core::String model;
 	core::String assistant_message;
+	core::Array<ToolCall> tool_calls;
 	core::String error_message;
 };
 
