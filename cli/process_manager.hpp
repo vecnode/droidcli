@@ -5,7 +5,7 @@
 #include <map>
 #include <mutex>
 
-namespace metaagent::app_host {
+namespace metaagent::cli {
 
 // Tracks external processes launched by the desktop host (media-player build/run,
 // adapter inference server). Each process is keyed by a logical id so the host can
@@ -56,4 +56,4 @@ private:
 	std::mutex mutex_;
 };
 
-} // namespace metaagent::app_host
+} // namespace metaagent::cli
