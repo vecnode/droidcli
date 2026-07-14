@@ -13,8 +13,14 @@ enum class HttpMethod {
 enum class HttpStatus : int32_t {
 	Ok = 200,
 	BadRequest = 400,
+	Unauthorized = 401,
 	NotFound = 404,
 	InternalError = 500,
+};
+
+struct HttpHeader {
+	core::String name;
+	core::String value;
 };
 
 struct HttpRequest {
@@ -22,6 +28,7 @@ struct HttpRequest {
 	core::String path;
 	core::String query_string;
 	core::String body;
+	core::Array<HttpHeader> headers;
 };
 
 struct HttpResponse {
