@@ -6,16 +6,19 @@ guide; `CLAUDE.md` defers to it.
 
 ## What this repository is
 
-`metaagent` is the **C++ agent controller and network trigger**, built as a
-portable C++17 control library (`src/`) plus **droidcli**, a headless CLI
-agent daemon (`cli/`, entrypoint `cli/droidcli.cpp`). There is no windowed
-desktop app anymore — `app/` (WebView2/GTK) was deleted entirely. droidcli is
-a process you start once; it keeps a persistent task queue and dispatches
-queued tasks to whatever peers are registered as **connectors**.
+**droidcli** is the **C++ agent controller and network trigger**, built as a
+portable C++17 control library (`src/`, namespace `droidcli::`) plus the
+**droidcli** headless CLI agent daemon (`cli/`, entrypoint
+`cli/droidcli.cpp`). There is no windowed desktop app anymore — `app/`
+(WebView2/GTK) was deleted entirely. droidcli is a process you start once; it
+keeps a persistent task queue and dispatches queued tasks to whatever peers
+are registered as **connectors**.
 
-> **Not a namespace rename.** "droidcli" is the CLI binary/product name only.
-> The C++ namespace (`metaagent::`) and the repo/library name stay `metaagent`
-> — do not attempt a full rename.
+> **Full internal rename.** The C++ namespace (`droidcli::`), the umbrella
+> library files (`droidcli.h`/`droidcli.cpp`), the export macro
+> (`DROIDCLI_API`), and env var prefixes (`DROIDCLI_*`) all match the
+> `droidcli` product name. The repository directory (`metaagent/`) and the
+> GitHub repo name are unchanged — only internal code identifiers moved.
 
 Versioning: the library is at **0.2.0** — release 0.2.x builds freely, but
 do **not** bump to 0.3 without the owner's say-so.
@@ -61,7 +64,7 @@ core concern.
 ## Repository map
 
 ```
-metaagent.h / metaagent.cpp   Umbrella public API; single TU includes all module .cpp
+droidcli.h / droidcli.cpp   Umbrella public API; single TU includes all module .cpp
 src/
   core/        Vec3, math, log_sink, value types
   media/       PNG/JPEG decode, probe, MediaStore, corpus (OCR/objects/summaries)
@@ -87,9 +90,9 @@ external/      Submodules: pre-training + media-player-cpp (illustrative
 distribute/    Templates staged into the dist (run_all.bat, README_DIST.txt)
 ```
 
-Public include is `#include "metaagent.h"`. Everything compiles through the
-single `metaagent.cpp` translation unit — **a new `src/<module>/foo.cpp` must be
-`#include`d from `metaagent.cpp`** or it will not be built into the library.
+Public include is `#include "droidcli.h"`. Everything compiles through the
+single `droidcli.cpp` translation unit — **a new `src/<module>/foo.cpp` must be
+`#include`d from `droidcli.cpp`** or it will not be built into the library.
 `cli/*.cpp` and `tools/*.cpp` are NOT part of that TU — they're separate
 translation units linked into the `droidcli` executable target.
 
@@ -137,9 +140,9 @@ real socket, GPU, or file, the change is in the wrong layer.
   braces (opening brace on its own line) as in existing `.cpp` files.
 - **No framework-type leak in core public types.** Use `core::String`,
   `core::Array<T>`, `core::Vec3` — never raw `std::vector` in a public core header.
-- **Namespaces** mirror folders: `metaagent::net`, `metaagent::ai`,
-  `metaagent::app`, `metaagent::cli` (droidcli host only, not portable).
-- **Export macro:** annotate public free functions with `METAAGENT_API` (see
+- **Namespaces** mirror folders: `droidcli::net`, `droidcli::ai`,
+  `droidcli::app`, `droidcli::cli` (droidcli host only, not portable).
+- **Export macro:** annotate public free functions with `DROIDCLI_API` (see
   `export.hpp`); inline class methods don't need it.
 - **Host I/O via `std::function` callbacks**, never direct calls into a
   transport library from core.
@@ -214,9 +217,9 @@ env vars, read once at startup:
 
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
-| `METAAGENT_GOOGLE_API_KEY` | empty | Google Programmable Search Engine API key |
-| `METAAGENT_GOOGLE_CSE_ID` | empty | Google Programmable Search Engine ID ("cx") |
-| `METAAGENT_GOOGLE_SEARCH_QUERY` | empty | Query re-run periodically (search is a no-op until all three Google vars are set) |
+| `DROIDCLI_GOOGLE_API_KEY` | empty | Google Programmable Search Engine API key |
+| `DROIDCLI_GOOGLE_CSE_ID` | empty | Google Programmable Search Engine ID ("cx") |
+| `DROIDCLI_GOOGLE_SEARCH_QUERY` | empty | Query re-run periodically (search is a no-op until all three Google vars are set) |
 
 `google_search_interval_seconds` (default `10`) and the Ollama URL/model are
 also runtime-editable via `POST /api/config` / `POST /api/ollama/config`.
