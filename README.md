@@ -125,11 +125,38 @@ owns a session, the Ollama text-gen seam, a **connector registry** (generic
 peer config — no compiled-in adapter/media-player knowledge), and a
 **persistent task queue** it dispatches from its own poll loop.
 
+### Interactive TUI (default) vs `--headless`
+
+By default, running `droidcli` opens an **FTXUI terminal dashboard**
+(`cli/tui.{hpp,cpp}`, `metaagent::cli::run_tui`) on the main thread while the
+HTTP API keeps serving on a background thread underneath it — `curl`/scripts
+work exactly the same whether the TUI is up or not. Pass `--headless` to skip
+the TUI entirely and get the old plain-log foreground daemon loop unchanged
+(scriptable/CI/systemd use).
+
+The dashboard has three read-only-plus-launch/stop panels, refreshed roughly
+every 500ms from `DroidHost`'s existing JSON accessors (`list_connectors_json`,
+`connector_status_json`, `list_tasks_json`, `build_app_log_json`) — no new
+state, no connector-registration form (that stays JSON-config/API driven):
+
+- **Connectors** — every registered connector with live status (process
+  running/PID for `launched_process`, `/health` reachability for `http_peer`).
+- **Tasks** — the task queue with live pending → running → done/failed
+  transitions.
+- **App Log** — a scrolling tail of the host's application log.
+
+| Key | Action |
+| --- | ------ |
+| `↑`/`↓` or `j`/`k` | Move the connector selection |
+| `l` | Launch the selected connector (`launched_process` only) |
+| `s` | Stop the selected connector |
+| `q` or `Ctrl+C` | Quit (stops the HTTP server and exits) |
+
 ### CLI flags
 
 ```
 droidcli [--port 30080] [--config path/to/connectors.json] [--no-ai]
-         [--ollama-url URL] [--ollama-model NAME] [--daemon]
+         [--ollama-url URL] [--ollama-model NAME] [--headless] [--daemon]
 ```
 
 | Flag | Default | Purpose |
@@ -139,6 +166,7 @@ droidcli [--port 30080] [--config path/to/connectors.json] [--no-ai]
 | `--no-ai` | off | Disable `/ai/chat` (Ollama text-gen) |
 | `--ollama-url` | `http://127.0.0.1:11434` | Ollama base URL |
 | `--ollama-model` | `llama3.2` | Ollama model name |
+| `--headless` | off | Skip the interactive TUI; run the plain foreground daemon+HTTP-API loop only (unchanged scriptable behavior) |
 | `--daemon` | off | Documented no-op: droidcli always runs in the foreground (see "Deviations" in the design notes) — use a process supervisor (nssm, Task Scheduler, systemd) for true background operation |
 
 Google search polling reads `METAAGENT_GOOGLE_API_KEY` / `METAAGENT_GOOGLE_CSE_ID`
