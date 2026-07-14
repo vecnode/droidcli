@@ -2,7 +2,7 @@
 
 #include "tools/mini_http_server.hpp"
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 
 class DroidHost;
 
@@ -11,4 +11,4 @@ class DroidHost;
 // built-in net::RouteTable (health/echo/notify/ai-chat) fails to match.
 tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host);
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

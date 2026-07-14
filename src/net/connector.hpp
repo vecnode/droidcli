@@ -3,7 +3,7 @@
 #include "core/types.hpp"
 #include "export.hpp"
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 struct Connector {
 	core::String id;
@@ -26,11 +26,11 @@ private:
 	core::Array<Connector> connectors_;
 };
 
-METAAGENT_API core::String build_connectors_json(const core::Array<Connector>& connectors);
+DROIDCLI_API core::String build_connectors_json(const core::Array<Connector>& connectors);
 
-METAAGENT_API bool parse_connector_from_json(
+DROIDCLI_API bool parse_connector_from_json(
 	const core::String& json,
 	Connector& out_connector,
 	core::String& out_error);
 
-} // namespace metaagent::net
+} // namespace droidcli::net

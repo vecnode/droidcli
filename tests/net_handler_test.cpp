@@ -1,11 +1,11 @@
-#include "metaagent.h"
+#include "droidcli.h"
 
 #include <cassert>
 #include <cstring>
 
 int main()
 {
-	using namespace metaagent::net;
+	using namespace droidcli::net;
 
 	HandlerContext context;
 	context.session.map_name = "test_map";
@@ -36,18 +36,18 @@ int main()
 	assert(dispatch.handled);
 	assert(dispatch.notify.notify_message.text == "media_ready");
 
-	const metaagent::notify::NotifyParseResult parsed =
-		metaagent::notify::parse_notify_body("{\"message\":\"from_core\"}");
+	const droidcli::notify::NotifyParseResult parsed =
+		droidcli::notify::parse_notify_body("{\"message\":\"from_core\"}");
 	assert(parsed.message.text == "from_core");
 
-	const metaagent::app::CommandResult validation = metaagent::app::validate_command(
-		metaagent::app::CommandId::ToggleNetworkingRuntime,
+	const droidcli::app::CommandResult validation = droidcli::app::validate_command(
+		droidcli::app::CommandId::ToggleNetworkingRuntime,
 		context.session);
 	assert(validation.success);
 
-	metaagent::ai::LanguageAiRuntime runtime;
+	droidcli::ai::LanguageAiRuntime runtime;
 	runtime.set_system_prompt("test");
-	metaagent::ai::LanguageAiTransportCallbacks transport;
+	droidcli::ai::LanguageAiTransportCallbacks transport;
 	transport.post_json = [](const std::string&, const std::string&, int32_t& status_code_out, std::string& response_body_out) {
 		status_code_out = 200;
 		response_body_out = R"({"message":{"role":"assistant","content":"Hi from Ollama."},"done":true})";

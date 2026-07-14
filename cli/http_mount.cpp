@@ -2,7 +2,7 @@
 
 #include "host.hpp"
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 namespace {
 
 void set_json(net::HttpResponse& response, const core::String& body, net::HttpStatus status = net::HttpStatus::Ok)
@@ -185,4 +185,4 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 	};
 }
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

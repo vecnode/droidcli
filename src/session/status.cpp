@@ -1,6 +1,6 @@
 #include "session/status.hpp"
 
-namespace metaagent::session {
+namespace droidcli::session {
 namespace {
 
 const char* enabled_label(const bool value)
@@ -37,4 +37,4 @@ core::String build_startup_feature_flags_text(const RuntimeSession& session)
 		+ " UI=" + enabled_label(session.features.ui);
 }
 
-} // namespace metaagent::session
+} // namespace droidcli::session

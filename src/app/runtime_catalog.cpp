@@ -4,7 +4,7 @@
 
 #include <sstream>
 
-namespace metaagent::app {
+namespace droidcli::app {
 namespace {
 
 RuntimeDescriptor make_runtime(
@@ -100,4 +100,4 @@ core::String build_runtime_catalog_json(
 	return stream.str();
 }
 
-} // namespace metaagent::app
+} // namespace droidcli::app

@@ -5,7 +5,7 @@
 
 #include <functional>
 
-namespace metaagent::ai {
+namespace droidcli::ai {
 
 struct LanguageAiTransportCallbacks {
 	std::function<bool(const core::String& url, const core::String& body, int32_t& status_code_out, core::String& response_body_out)> post_json;
@@ -42,6 +42,6 @@ private:
 	bool awaiting_response_ = false;
 };
 
-METAAGENT_API LanguageAiSnapshot default_language_ai_snapshot();
+DROIDCLI_API LanguageAiSnapshot default_language_ai_snapshot();
 
-} // namespace metaagent::ai
+} // namespace droidcli::ai

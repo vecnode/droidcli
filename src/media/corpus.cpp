@@ -5,7 +5,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace metaagent::media {
+namespace droidcli::media {
 namespace {
 
 core::String read_text_file(const core::String& path)
@@ -731,4 +731,4 @@ bool MediaCorpus::build_region_mask(
 	return true;
 }
 
-} // namespace metaagent::media
+} // namespace droidcli::media

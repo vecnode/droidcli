@@ -1,6 +1,6 @@
 #include "host.hpp"
 #include "http_mount.hpp"
-#include "metaagent.h"
+#include "droidcli.h"
 #include "net/connector.hpp"
 #include "tools/mini_http_server.hpp"
 #include "tui.hpp"
@@ -77,16 +77,16 @@ std::string read_text_file(const std::string& path)
 // Extracts each top-level object of the "connectors" array in a config file's
 // JSON body, e.g. {"connectors":[{...},{...}]}. Hand-rolled brace-depth walk,
 // consistent with the rest of net/json.hpp - no JSON library dependency.
-std::vector<metaagent::core::String> extract_connector_objects(const metaagent::core::String& json)
+std::vector<droidcli::core::String> extract_connector_objects(const droidcli::core::String& json)
 {
-	std::vector<metaagent::core::String> objects;
+	std::vector<droidcli::core::String> objects;
 	const size_t array_key = json.find("\"connectors\":");
-	if (array_key == metaagent::core::String::npos)
+	if (array_key == droidcli::core::String::npos)
 	{
 		return objects;
 	}
 	size_t cursor = json.find('[', array_key);
-	if (cursor == metaagent::core::String::npos)
+	if (cursor == droidcli::core::String::npos)
 	{
 		return objects;
 	}
@@ -132,7 +132,7 @@ std::vector<metaagent::core::String> extract_connector_objects(const metaagent::
 	return objects;
 }
 
-void load_connectors_from_config(const std::string& path, metaagent::cli::DroidHost& host)
+void load_connectors_from_config(const std::string& path, droidcli::cli::DroidHost& host)
 {
 	const std::string content = read_text_file(path);
 	if (content.empty())
@@ -142,11 +142,11 @@ void load_connectors_from_config(const std::string& path, metaagent::cli::DroidH
 	}
 
 	const auto objects = extract_connector_objects(content);
-	for (const metaagent::core::String& object_json : objects)
+	for (const droidcli::core::String& object_json : objects)
 	{
-		metaagent::net::Connector connector;
-		metaagent::core::String error;
-		if (metaagent::net::parse_connector_from_json(object_json, connector, error))
+		droidcli::net::Connector connector;
+		droidcli::core::String error;
+		if (droidcli::net::parse_connector_from_json(object_json, connector, error))
 		{
 			host.register_connector(object_json);
 			std::cout << "droidcli: loaded connector \"" << connector.id << "\" (" << connector.kind << ")" << std::endl;
@@ -162,7 +162,7 @@ void load_connectors_from_config(const std::string& path, metaagent::cli::DroidH
 
 int main(int argc, char** argv)
 {
-	metaagent::initialize_defaults();
+	droidcli::initialize_defaults();
 
 	const int port = parse_port(argc, argv, 30080);
 	const bool enable_ai = !has_flag(argc, argv, "--no-ai");
@@ -181,15 +181,15 @@ int main(int argc, char** argv)
 			"systemd, etc.) to run this as a background service." << std::endl;
 	}
 
-	metaagent::cli::DroidHost host;
-	metaagent::cli::HostConfig host_config;
+	droidcli::cli::DroidHost host;
+	droidcli::cli::HostConfig host_config;
 	host_config.enable_ai = enable_ai;
 	host_config.ollama_url = ollama_url;
 	host_config.ollama_model = ollama_model;
 
-	const char* env_google_key = std::getenv("METAAGENT_GOOGLE_API_KEY");
-	const char* env_google_cse = std::getenv("METAAGENT_GOOGLE_CSE_ID");
-	const char* env_google_query = std::getenv("METAAGENT_GOOGLE_SEARCH_QUERY");
+	const char* env_google_key = std::getenv("DROIDCLI_GOOGLE_API_KEY");
+	const char* env_google_cse = std::getenv("DROIDCLI_GOOGLE_CSE_ID");
+	const char* env_google_query = std::getenv("DROIDCLI_GOOGLE_SEARCH_QUERY");
 	if (env_google_key != nullptr) host_config.google_api_key = env_google_key;
 	if (env_google_cse != nullptr) host_config.google_search_engine_id = env_google_cse;
 	if (env_google_query != nullptr) host_config.google_search_query = env_google_query;
@@ -202,19 +202,19 @@ int main(int argc, char** argv)
 		load_connectors_from_config(config_path, host);
 	}
 
-	metaagent::tools::MiniHttpServer server;
-	metaagent::tools::MiniHttpServerOptions options;
+	droidcli::tools::MiniHttpServer server;
+	droidcli::tools::MiniHttpServerOptions options;
 	options.port = port;
 	options.session = host.session();
 	options.enable_language_ai = enable_ai;
 	options.ollama_config.base_url = ollama_url;
 	options.ollama_config.model = ollama_model;
 	options.ollama_config.enabled = enable_ai;
-	options.on_notify = [](const metaagent::core::String& message)
+	options.on_notify = [](const droidcli::core::String& message)
 	{
 		std::cout << "[notify] " << message << std::endl;
 	};
-	options.custom_dispatch = metaagent::cli::make_droidcli_route_dispatch(host);
+	options.custom_dispatch = droidcli::cli::make_droidcli_route_dispatch(host);
 
 	if (!server.start(options))
 	{
@@ -270,7 +270,7 @@ int main(int argc, char** argv)
 			}
 		});
 
-		metaagent::cli::run_tui(host, port, g_running);
+		droidcli::cli::run_tui(host, port, g_running);
 
 		g_running = false;
 		if (server_thread.joinable())

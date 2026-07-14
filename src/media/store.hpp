@@ -5,19 +5,19 @@
 #include "export.hpp"
 #include "media/image.hpp"
 
-namespace metaagent::media {
+namespace droidcli::media {
 
 class MediaStore {
 public:
-	METAAGENT_API static MediaStore& instance();
+	DROIDCLI_API static MediaStore& instance();
 
-	METAAGENT_API bool load_file(const core::String& path, RgbaImage& out_image, bool force_reload = false);
+	DROIDCLI_API bool load_file(const core::String& path, RgbaImage& out_image, bool force_reload = false);
 
-	METAAGENT_API const RgbaImage* find_cached(const core::String& path) const;
+	DROIDCLI_API const RgbaImage* find_cached(const core::String& path) const;
 
-	METAAGENT_API void invalidate_path(const core::String& path);
+	DROIDCLI_API void invalidate_path(const core::String& path);
 
-	METAAGENT_API void invalidate_all();
+	DROIDCLI_API void invalidate_all();
 
 private:
 	struct CacheEntry {
@@ -30,4 +30,4 @@ private:
 	core::Array<CacheEntry> cache_entries_;
 };
 
-} // namespace metaagent::media
+} // namespace droidcli::media

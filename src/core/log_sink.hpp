@@ -2,7 +2,7 @@
 
 #include <string_view>
 
-namespace metaagent::core {
+namespace droidcli::core {
 
 struct LogSink {
 	virtual ~LogSink() = default;
@@ -14,4 +14,4 @@ struct LogSink {
 void set_log_sink(LogSink* sink);
 LogSink* get_log_sink();
 
-} // namespace metaagent::core
+} // namespace droidcli::core

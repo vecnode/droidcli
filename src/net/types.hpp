@@ -2,7 +2,7 @@
 
 #include "core/types.hpp"
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 enum class HttpMethod {
 	Get,
@@ -30,4 +30,4 @@ struct HttpResponse {
 	core::String body;
 };
 
-} // namespace metaagent::net
+} // namespace droidcli::net

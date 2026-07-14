@@ -1,6 +1,6 @@
 #include "net/json.hpp"
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 core::String escape_json_string(const core::String& input)
 {
@@ -142,4 +142,4 @@ bool extract_json_bool_field(
 	return false;
 }
 
-} // namespace metaagent::net
+} // namespace droidcli::net

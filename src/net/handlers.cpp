@@ -4,7 +4,7 @@
 #include "net/json.hpp"
 #include "notify/parse.hpp"
 
-namespace metaagent::net {
+namespace droidcli::net {
 namespace {
 
 core::String query_param(const core::String& query_string, const core::String& key)
@@ -167,4 +167,4 @@ AiChatHandleResult handle_ai_chat(const HttpRequest& request, const HandlerConte
 	return result;
 }
 
-} // namespace metaagent::net
+} // namespace droidcli::net

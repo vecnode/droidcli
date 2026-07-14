@@ -1,6 +1,6 @@
 #include "ai/language_runtime.hpp"
 
-namespace metaagent::ai {
+namespace droidcli::ai {
 namespace {
 
 void upsert_system_message(core::Array<ChatMessage>& transcript, const core::String& prompt)
@@ -204,4 +204,4 @@ LanguageAiSnapshot default_language_ai_snapshot()
 	return snapshot;
 }
 
-} // namespace metaagent::ai
+} // namespace droidcli::ai

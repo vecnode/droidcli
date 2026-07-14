@@ -5,7 +5,7 @@
 
 #include <functional>
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 struct SignalTarget {
 	core::String id;
@@ -48,13 +48,13 @@ using SignalTransportFn = std::function<bool(
 	int32_t& status_code_out,
 	core::String& response_body_out)>;
 
-METAAGENT_API core::String signal_type_display_name(const core::String& type);
+DROIDCLI_API core::String signal_type_display_name(const core::String& type);
 
-METAAGENT_API core::String build_signal_envelope_json(const SignalEnvelope& envelope);
+DROIDCLI_API core::String build_signal_envelope_json(const SignalEnvelope& envelope);
 
-METAAGENT_API bool parse_signal_envelope(
+DROIDCLI_API bool parse_signal_envelope(
 	const core::String& json,
 	SignalEnvelope& out_envelope,
 	core::String& out_error);
 
-} // namespace metaagent::net
+} // namespace droidcli::net

@@ -6,7 +6,7 @@
 
 #include "export.hpp"
 
-namespace metaagent::core {
+namespace droidcli::core {
 
 struct Vec2 {
 	float x = 0.0f;
@@ -42,7 +42,7 @@ struct Rotator {
 	float yaw_deg = 0.0f;
 	float roll_deg = 0.0f;
 
-	METAAGENT_API Vec3 rotate_vector(const Vec3& local) const;
+	DROIDCLI_API Vec3 rotate_vector(const Vec3& local) const;
 };
 
 struct ColorRGBA {
@@ -56,4 +56,4 @@ using String = std::string;
 template<typename T>
 using Array = std::vector<T>;
 
-} // namespace metaagent::core
+} // namespace droidcli::core

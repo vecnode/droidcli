@@ -14,7 +14,7 @@
 #include <unistd.h>
 #endif
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 
 ProcessManager::~ProcessManager()
 {
@@ -282,4 +282,4 @@ bool ProcessManager::stop(const core::String& key, core::String& error_out)
 	return true;
 }
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

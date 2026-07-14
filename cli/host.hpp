@@ -1,6 +1,6 @@
 #pragma once
 
-#include "metaagent.h"
+#include "droidcli.h"
 #include "net/connector.hpp"
 #include "app/tasks.hpp"
 #include "process_manager.hpp"
@@ -8,7 +8,7 @@
 #include <ctime>
 #include <mutex>
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 
 struct HostConfig {
 	bool enable_ai = true;
@@ -124,4 +124,4 @@ private:
 	mutable std::mutex mutex_;
 };
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

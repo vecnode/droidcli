@@ -1,6 +1,6 @@
 #include "net/router.hpp"
 
-namespace metaagent::net {
+namespace droidcli::net {
 namespace {
 
 core::String normalize_path(core::String path)
@@ -57,4 +57,4 @@ RouteDispatchResult RouteTable::dispatch(
 	return {};
 }
 
-} // namespace metaagent::net
+} // namespace droidcli::net

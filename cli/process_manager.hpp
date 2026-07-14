@@ -1,16 +1,16 @@
 #pragma once
 
-#include "metaagent.h"
+#include "droidcli.h"
 
 #include <map>
 #include <mutex>
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 
 // Tracks external processes launched by the desktop host (media-player build/run,
 // adapter inference server). Each process is keyed by a logical id so the host can
 // launch, query (PID + running state), and stop it. Centralised so the UI always
-// knows the PID of every app metaagent controls.
+// knows the PID of every app droidcli controls.
 struct ProcessInfo {
 	core::String key;
 	core::String label;
@@ -56,4 +56,4 @@ private:
 	std::mutex mutex_;
 };
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

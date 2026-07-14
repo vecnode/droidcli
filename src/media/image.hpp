@@ -2,7 +2,7 @@
 
 #include "core/types.hpp"
 
-namespace metaagent::media {
+namespace droidcli::media {
 
 struct ImageMetadata {
 	core::String source_path;
@@ -22,4 +22,4 @@ struct RgbaImage {
 	bool valid() const { return width > 0 && height > 0 && !pixels.empty(); }
 };
 
-} // namespace metaagent::media
+} // namespace droidcli::media

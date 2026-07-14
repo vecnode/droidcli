@@ -12,7 +12,7 @@ extern "C" {
 #endif
 }
 
-namespace metaagent::media {
+namespace droidcli::media {
 
 bool probe_media_file(const core::String& path, MediaProbeInfo& out_info)
 {
@@ -81,4 +81,4 @@ bool probe_media_file(const core::String& path, MediaProbeInfo& out_info)
 	return true;
 }
 
-} // namespace metaagent::media
+} // namespace droidcli::media

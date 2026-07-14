@@ -22,7 +22,7 @@ extern "C" {
 #endif
 }
 
-namespace metaagent::media {
+namespace droidcli::media {
 namespace {
 
 std::filesystem::path to_native_path(const core::String& path)
@@ -362,4 +362,4 @@ bool decode_image_from_memory(
 	return decoded;
 }
 
-} // namespace metaagent::media
+} // namespace droidcli::media

@@ -14,7 +14,7 @@
 #include <thread>
 #include <vector>
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 namespace {
 
 // Extracts each top-level object of a named JSON array, e.g. {"tasks":[{...}]}.
@@ -378,4 +378,4 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	return 0;
 }
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

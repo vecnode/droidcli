@@ -1,6 +1,6 @@
 #include "notify/parse.hpp"
 
-namespace metaagent::notify {
+namespace droidcli::notify {
 namespace {
 
 core::String trim_ascii(const core::String& input)
@@ -115,4 +115,4 @@ NotifyParseResult parse_notify_body(const core::String& body)
 	return result;
 }
 
-} // namespace metaagent::notify
+} // namespace droidcli::notify

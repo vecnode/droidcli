@@ -1,11 +1,11 @@
 #pragma once
 
-#if defined(_WIN32) && defined(METAAGENT_BUILDING_SHARED)
-#if defined(METAAGENT_BUILDING)
-#define METAAGENT_API __declspec(dllexport)
+#if defined(_WIN32) && defined(DROIDCLI_BUILDING_SHARED)
+#if defined(DROIDCLI_BUILDING)
+#define DROIDCLI_API __declspec(dllexport)
 #else
-#define METAAGENT_API __declspec(dllimport)
+#define DROIDCLI_API __declspec(dllimport)
 #endif
 #else
-#define METAAGENT_API
+#define DROIDCLI_API
 #endif

@@ -1,11 +1,11 @@
-#include "metaagent.h"
+#include "droidcli.h"
 
 #include <cassert>
 
 int main()
 {
-	using namespace metaagent::app;
-	using namespace metaagent::session;
+	using namespace droidcli::app;
+	using namespace droidcli::session;
 
 	RuntimeSession active_session;
 	active_session.active = true;

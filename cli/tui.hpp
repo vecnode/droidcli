@@ -2,7 +2,7 @@
 
 #include "host.hpp"
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 
 // Runs the default interactive FTXUI terminal dashboard for droidcli. Blocks
 // the calling thread until the user quits (q / Ctrl+C), at which point it
@@ -15,4 +15,4 @@ namespace metaagent::cli {
 // HTTP API is reachable while the TUI is up).
 int run_tui(DroidHost& host, int http_port, volatile bool& running_flag);
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

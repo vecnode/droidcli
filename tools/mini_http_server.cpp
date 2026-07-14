@@ -27,7 +27,7 @@ using SocketHandle = int;
 constexpr SocketHandle kInvalidSocket = -1;
 #endif
 
-namespace metaagent::tools {
+namespace droidcli::tools {
 namespace {
 
 bool ensure_socket_library()
@@ -356,4 +356,4 @@ bool MiniHttpServer::poll_once(const int32_t timeout_ms)
 	return true;
 }
 
-} // namespace metaagent::tools
+} // namespace droidcli::tools

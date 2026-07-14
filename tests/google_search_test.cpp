@@ -1,32 +1,32 @@
-#include "metaagent.h"
+#include "droidcli.h"
 
 #include <cassert>
 #include <iostream>
 
 int main()
 {
-	using namespace metaagent::net;
+	using namespace droidcli::net;
 
 	GoogleSearchConfig config;
 	config.api_key = "AIzaTestKey";
 	config.search_engine_id = "017576662512468239146:omuauf_lfve";
-	config.query = "metaagent agent core";
+	config.query = "droidcli agent core";
 	config.result_count = 5;
 
-	const metaagent::core::String url = build_google_search_url(config);
+	const droidcli::core::String url = build_google_search_url(config);
 	assert(url.find("https://www.googleapis.com/customsearch/v1?") == 0);
-	assert(url.find("key=AIzaTestKey") != metaagent::core::String::npos);
-	assert(url.find("cx=017576662512468239146:omuauf_lfve") != metaagent::core::String::npos
-		|| url.find("cx=017576662512468239146%3Aomuauf_lfve") != metaagent::core::String::npos);
-	assert(url.find("q=metaagent%20agent%20core") != metaagent::core::String::npos);
-	assert(url.find("num=5") != metaagent::core::String::npos);
+	assert(url.find("key=AIzaTestKey") != droidcli::core::String::npos);
+	assert(url.find("cx=017576662512468239146:omuauf_lfve") != droidcli::core::String::npos
+		|| url.find("cx=017576662512468239146%3Aomuauf_lfve") != droidcli::core::String::npos);
+	assert(url.find("q=droidcli%20agent%20core") != droidcli::core::String::npos);
+	assert(url.find("num=5") != droidcli::core::String::npos);
 
-	const metaagent::core::String sample_response =
+	const droidcli::core::String sample_response =
 		"{"
 		"\"searchInformation\":{\"totalResults\":\"12300\"},"
 		"\"items\":["
-		"{\"title\":\"MetaAgent - agent core\",\"link\":\"https://example.com/one\","
-		"\"snippet\":\"An overview of the metaagent control core.\"},"
+		"{\"title\":\"Droidcli - agent core\",\"link\":\"https://example.com/one\","
+		"\"snippet\":\"An overview of the droidcli control core.\"},"
 		"{\"title\":\"Second result\",\"link\":\"https://example.com/two\","
 		"\"snippet\":\"Another snippet with \\\"quotes\\\" inside.\"}"
 		"]}";
@@ -35,11 +35,11 @@ int main()
 	assert(ok_response.success);
 	assert(ok_response.total_results == "12300");
 	assert(ok_response.items.size() == 2);
-	assert(ok_response.items[0].title == "MetaAgent - agent core");
+	assert(ok_response.items[0].title == "Droidcli - agent core");
 	assert(ok_response.items[0].link == "https://example.com/one");
-	assert(ok_response.items[1].snippet.find("quotes") != metaagent::core::String::npos);
+	assert(ok_response.items[1].snippet.find("quotes") != droidcli::core::String::npos);
 
-	const metaagent::core::String error_response =
+	const droidcli::core::String error_response =
 		"{\"error\":{\"code\":403,\"message\":\"Daily Limit Exceeded\"}}";
 	const GoogleSearchResponse failed_response = parse_google_search_response(403, error_response);
 	assert(!failed_response.success);
