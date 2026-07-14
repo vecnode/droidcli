@@ -38,8 +38,6 @@ public:
 
 	core::String build_status_json() const;
 	core::String build_network_status_json() const;
-	core::String build_runtime_catalog_json() const;
-	core::String dispatch_command(const core::String& command_name);
 	core::String build_config_json() const;
 	core::String update_config(const core::String& body);
 
@@ -74,17 +72,28 @@ public:
 
 	core::String build_process_status_json();
 
-private:
-	void wire_callbacks();
-	void apply_command_side_effects(app::CommandId command);
+	// One-shot shell command execution (POST /api/run). body is
+	// {"command":"...","work_dir":"...","timeout_ms":...}.
+	core::String run_command(const core::String& body);
 
+	// The tool-calling agent turn (POST /api/agent/turn). body is
+	// {"message":"...","clear":bool}. Drives a bounded Ollama tool-calling
+	// loop against the fixed tool set declared in agent_tool_definitions(),
+	// executing each requested tool against this DroidHost's own methods.
+	core::String agent_turn(const core::String& body);
+
+private:
 	void append_app_log(const core::String& channel, const core::String& direction, const core::String& summary, bool success);
 	static core::String make_log_timestamp();
 	static bool should_emit_periodic_log(std::time_t now_utc, std::time_t& last_emit_utc, int32_t min_interval_seconds);
 
+	core::Array<ai::ToolDefinition> agent_tool_definitions() const;
+	// Executes one tool call by name against this host's own methods. Returns
+	// the JSON result text to feed back to the model as a "tool" message.
+	core::String execute_agent_tool(const core::String& tool_name, const core::String& arguments_json);
+
 	HostConfig config_;
 	session::RuntimeSession session_;
-	runtime::HostServiceCallbacks host_services_;
 	ai::LanguageAiRuntime language_ai_;
 	ai::LanguageAiTransportCallbacks language_ai_transport_;
 	net::RouteTable routes_;
@@ -103,8 +112,13 @@ private:
 	};
 
 	core::Array<AppLogEntry> app_log_;
-	bool recording_active_ = false;
-	bool autopilot_enabled_ = false;
+
+	// Dedicated multi-turn transcript for the agent tool-calling loop, kept
+	// separate from language_ai_ (LanguageAiRuntime is single-shot request/
+	// response and doesn't model a tool_calls -> tool-result -> follow-up
+	// hop cycle).
+	core::Array<ai::ChatMessage> agent_transcript_;
+
 	mutable std::mutex mutex_;
 };
 

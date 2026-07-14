@@ -78,6 +78,49 @@ core::String trim_ascii(core::String value)
 	return value;
 }
 
+// Header lookup is case-insensitive per RFC 7230.
+core::String find_header_value(const net::HttpRequest& request, const core::String& lower_name)
+{
+	for (const net::HttpHeader& header : request.headers)
+	{
+		if (to_lower_ascii(header.name) == lower_name)
+		{
+			return header.value;
+		}
+	}
+	return {};
+}
+
+// A request needs a matching Authorization: Bearer <token> header if it hits
+// any /api/* route, or /ai/chat (Ollama calls have a cost even though they
+// can't execute shell commands - gated for consistency). /health, /echo, and
+// /notify stay open: liveness checks and a trivial log-only notify shouldn't
+// require an operator to carry the token around.
+bool request_requires_auth(const core::String& path)
+{
+	return path.rfind("/api/", 0) == 0 || path == "/ai/chat";
+}
+
+bool is_authorized(const net::HttpRequest& request, const core::String& api_token)
+{
+	if (api_token.empty())
+	{
+		// Should never happen in practice (droidcli.cpp always configures a
+		// token), but fail closed rather than silently allowing unauthenticated
+		// access to a misconfigured server.
+		return false;
+	}
+
+	const core::String header_value = find_header_value(request, "authorization");
+	const core::String prefix = "Bearer ";
+	if (header_value.rfind(prefix, 0) != 0)
+	{
+		return false;
+	}
+
+	return header_value.substr(prefix.size()) == api_token;
+}
+
 bool parse_request_line(const core::String& line, net::HttpRequest& out_request)
 {
 	std::istringstream stream(line);
@@ -186,6 +229,15 @@ bool MiniHttpServer::read_request(const int client_socket, net::HttpRequest& out
 		{
 			line.pop_back();
 		}
+		const size_t colon = line.find(':');
+		if (colon != core::String::npos)
+		{
+			net::HttpHeader header;
+			header.name = trim_ascii(line.substr(0, colon));
+			header.value = trim_ascii(line.substr(colon + 1));
+			out_request.headers.push_back(header);
+		}
+
 		const core::String lower = to_lower_ascii(line);
 		if (lower.rfind("content-length:", 0) == 0)
 		{
@@ -323,6 +375,17 @@ bool MiniHttpServer::poll_once(const int32_t timeout_ms)
 	net::HttpRequest request;
 	if (read_request(static_cast<int>(client_socket), request))
 	{
+		net::HttpResponse response;
+		if (request_requires_auth(request.path) && !is_authorized(request, options_.api_token))
+		{
+			response.status = net::HttpStatus::Unauthorized;
+			response.body = "{\"error\":\"unauthorized\",\"message\":"
+				"\"missing or invalid Authorization: Bearer <token> header\"}";
+			write_response(static_cast<int>(client_socket), response);
+			close_socket(client_socket);
+			return true;
+		}
+
 		net::HandlerContext context;
 		context.session = options_.session;
 		if (options_.enable_language_ai)
@@ -331,7 +394,6 @@ bool MiniHttpServer::poll_once(const int32_t timeout_ms)
 			context.language_ai_transport = &language_ai_transport_;
 		}
 		const net::RouteDispatchResult dispatch = routes_.dispatch(request, context);
-		net::HttpResponse response;
 		if (dispatch.handled)
 		{
 			response = dispatch.response;

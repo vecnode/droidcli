@@ -1,8 +1,11 @@
 #include "host.hpp"
 
+#include "command_runner.hpp"
 #include "tools/sync_http_client.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -73,6 +76,39 @@ core::String join_url(const core::String& base, const core::String& path)
 	return path.front() == '/' ? trimmed_base + path : trimmed_base + "/" + path;
 }
 
+// Minimal integer field extractor, matching net/json.hpp's hand-rolled style
+// (only string/bool extractors exist there). Returns false if the field is
+// absent or not a plain integer literal.
+bool extract_json_int_field(const core::String& json, const core::String& field_name, int32_t& out_value)
+{
+	const core::String needle = "\"" + field_name + "\":";
+	const size_t field_index = json.find(needle);
+	if (field_index == core::String::npos)
+	{
+		return false;
+	}
+	size_t cursor = field_index + needle.size();
+	while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'))
+	{
+		++cursor;
+	}
+	const size_t start = cursor;
+	if (cursor < json.size() && json[cursor] == '-')
+	{
+		++cursor;
+	}
+	while (cursor < json.size() && std::isdigit(static_cast<unsigned char>(json[cursor])))
+	{
+		++cursor;
+	}
+	if (cursor == start)
+	{
+		return false;
+	}
+	out_value = std::atoi(json.substr(start, cursor - start).c_str());
+	return true;
+}
+
 } // namespace
 
 void DroidHost::configure(const HostConfig& config)
@@ -97,8 +133,6 @@ void DroidHost::initialize()
 		session_.features.ui = false;
 		session_.features.ai = config_.enable_ai;
 		session_.features.recording = true;
-
-		wire_callbacks();
 
 		language_ai_transport_.post_json = [](
 			const core::String& url,
@@ -131,35 +165,6 @@ void DroidHost::initialize()
 	append_app_log("host", "event", "droidcli host initialized", true);
 }
 
-void DroidHost::wire_callbacks()
-{
-	host_services_.toggle_recording = [this]()
-	{
-		recording_active_ = !recording_active_;
-		return true;
-	};
-	host_services_.toggle_autopilot = [this]()
-	{
-		autopilot_enabled_ = !autopilot_enabled_;
-		return true;
-	};
-	host_services_.query_recording = [this]()
-	{
-		runtime::RecordingSnapshot snapshot;
-		snapshot.runtime_enabled = session_.features.recording;
-		snapshot.capture_active = recording_active_;
-		snapshot.status_text = recording_active_ ? "Recording: ON" : "Recording: OFF";
-		return snapshot;
-	};
-	host_services_.query_ai = [this]()
-	{
-		runtime::AiSnapshot snapshot;
-		snapshot.runtime_enabled = session_.features.ai;
-		snapshot.autopilot_enabled = autopilot_enabled_;
-		snapshot.status_text = autopilot_enabled_ ? "Autopilot: ON" : "Autopilot: OFF";
-		return snapshot;
-	};
-}
 
 void DroidHost::tick(const float delta_seconds)
 {
@@ -232,8 +237,6 @@ core::String DroidHost::build_notify_log_json() const
 core::String DroidHost::build_status_json() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	const runtime::RecordingSnapshot recording = runtime::invoke_query_recording(host_services_);
-	const runtime::AiSnapshot ai = runtime::invoke_query_ai(host_services_);
 
 	std::ostringstream stream;
 	stream << '{';
@@ -241,8 +244,9 @@ core::String DroidHost::build_status_json() const
 	stream << net::json_string_field("map", session_.map_name) << ',';
 	stream << net::json_string_field("build", session_.build_label) << ',';
 	stream << net::json_bool_field("active", session_.active) << ',';
-	stream << net::json_bool_field("recording", recording.capture_active) << ',';
-	stream << net::json_bool_field("autopilot", ai.autopilot_enabled);
+	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
+	stream << "\"connector_count\":" << connectors_.list_connectors().size() << ',';
+	stream << "\"task_count\":" << tasks_.list().size();
 	stream << '}';
 	return stream.str();
 }
@@ -290,47 +294,6 @@ core::String DroidHost::update_config(const core::String& body)
 	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
 	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
 	stream << net::json_string_field("ollama_model", config_.ollama_model);
-	stream << '}';
-	return stream.str();
-}
-
-void DroidHost::apply_command_side_effects(const app::CommandId command)
-{
-	switch (command)
-	{
-	case app::CommandId::ToggleRecording:
-		runtime::invoke_toggle_recording(host_services_);
-		break;
-	case app::CommandId::ToggleAutopilot:
-		runtime::invoke_toggle_autopilot(host_services_);
-		break;
-	case app::CommandId::ToggleNetworkingRuntime:
-		session_.features.networking = !session_.features.networking;
-		session_.http_enabled = session_.features.networking;
-		break;
-	default:
-		break;
-	}
-}
-
-core::String DroidHost::dispatch_command(const core::String& command_name)
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	const app::CommandId command = app::parse_command_name(command_name);
-	const app::CommandResult validation = app::validate_command(command, session_);
-
-	std::ostringstream stream;
-	stream << '{';
-	stream << net::json_string_field("command", command_name) << ',';
-	stream << net::json_bool_field("handled", validation.handled) << ',';
-	stream << net::json_bool_field("success", validation.success) << ',';
-	stream << net::json_string_field("message", validation.user_message);
-
-	if (validation.success)
-	{
-		apply_command_side_effects(command);
-	}
-
 	stream << '}';
 	return stream.str();
 }
@@ -433,12 +396,6 @@ core::String DroidHost::build_network_status_json() const
 	stream << "\"connector_count\":" << connectors_.list_connectors().size();
 	stream << '}';
 	return stream.str();
-}
-
-core::String DroidHost::build_runtime_catalog_json() const
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	return app::build_runtime_catalog_json(session_);
 }
 
 core::String DroidHost::build_ollama_status_json()
@@ -722,8 +679,20 @@ void DroidHost::tick_tasks()
 	const app::Task task = *claimed;
 	bool success = false;
 	core::String error;
+	core::String result_json;
 
-	if (task.command == "launch" && !task.connector_id.empty())
+	if (task.command == "run")
+	{
+		// No connector_id required: payload_json is {"command":"...","work_dir":"..."}.
+		const core::String run_result = run_command(task.payload_json);
+		result_json = run_result;
+		success = run_result.find("\"launched\":true") != core::String::npos;
+		if (!success)
+		{
+			error = run_result;
+		}
+	}
+	else if (task.command == "launch" && !task.connector_id.empty())
 	{
 		const core::String result = launch_connector(task.connector_id);
 		success = result.find("\"success\":true") != core::String::npos;
@@ -759,7 +728,7 @@ void DroidHost::tick_tasks()
 	std::lock_guard<std::mutex> lock(mutex_);
 	if (success)
 	{
-		tasks_.complete(task.id);
+		tasks_.complete(task.id, result_json);
 	}
 	else
 	{
@@ -790,6 +759,269 @@ core::String DroidHost::build_process_status_json()
 		stream << '}';
 	}
 	stream << "]}";
+	return stream.str();
+}
+
+core::String DroidHost::run_command(const core::String& body)
+{
+	const core::String command = net::extract_json_string_field(body, "command");
+	const core::String work_dir = net::extract_json_string_field(body, "work_dir");
+	int32_t timeout_ms = 30000;
+	extract_json_int_field(body, "timeout_ms", timeout_ms);
+
+	if (command.empty())
+	{
+		return "{" + net::json_bool_field("launched", false) + ","
+			+ "\"exit_code\":0,"
+			+ net::json_string_field("stdout", "") + ","
+			+ net::json_string_field("stderr", "") + ","
+			+ net::json_string_field("error", "missing command") + "}";
+	}
+
+	const CommandRunResult result = run_command_once(command, work_dir, timeout_ms);
+	append_app_log("run", "out", command, result.error_message.empty());
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("launched", result.launched) << ',';
+	stream << "\"exit_code\":" << result.exit_code << ',';
+	stream << net::json_string_field("stdout", result.stdout_text) << ',';
+	stream << net::json_string_field("stderr", result.stderr_text) << ',';
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+}
+
+core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
+{
+	core::Array<ai::ToolDefinition> tools;
+
+	tools.push_back(ai::ToolDefinition{
+		"list_connectors",
+		"List every registered connector (http_peer or launched_process), with kind, base_url/launch_cmd, and enabled state. Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"connector_status",
+		"Get the live status of one connector by id: for a launched_process, its PID and running state; for an http_peer, whether its /health endpoint is reachable.",
+		"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"connector id\"}},\"required\":[\"id\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"launch_connector",
+		"Launch a launched_process connector by id (starts the configured command in its work_dir). No effect on http_peer connectors.",
+		"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"connector id\"}},\"required\":[\"id\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"stop_connector",
+		"Stop a running launched_process connector by id.",
+		"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\",\"description\":\"connector id\"}},\"required\":[\"id\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"call_connector",
+		"Call an HTTP path on an http_peer connector by id, e.g. to invoke one of its endpoints. payload_json is a raw JSON string sent as the request body for POST.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"id\":{\"type\":\"string\",\"description\":\"connector id\"},"
+		"\"path\":{\"type\":\"string\",\"description\":\"request path, e.g. /status\"},"
+		"\"method\":{\"type\":\"string\",\"description\":\"GET or POST, default POST\"},"
+		"\"payload_json\":{\"type\":\"string\",\"description\":\"raw JSON body for POST, optional\"}"
+		"},\"required\":[\"id\",\"path\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"enqueue_task",
+		"Queue a task for droidcli's background task loop to process later: \"launch\"/\"stop\" a connector_id, \"run\" a shell command (payload_json {\"command\":..,\"work_dir\":..}), or any other command string treated as an HTTP path called on connector_id.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"connector_id\":{\"type\":\"string\",\"description\":\"optional, required for launch/stop/http-path commands\"},"
+		"\"command\":{\"type\":\"string\",\"description\":\"launch | stop | run | <http path>\"},"
+		"\"payload_json\":{\"type\":\"string\",\"description\":\"optional raw JSON payload\"}"
+		"},\"required\":[\"command\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"list_tasks",
+		"List all tasks in the task queue with their status (pending/running/done/failed). Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"run_command",
+		"Run a one-shot shell command synchronously and capture its stdout/stderr/exit code. This executes arbitrary shell commands on the host machine - use only for tasks the user actually asked for.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"command\":{\"type\":\"string\",\"description\":\"the shell command to run\"},"
+		"\"work_dir\":{\"type\":\"string\",\"description\":\"optional working directory\"}"
+		"},\"required\":[\"command\"]}"});
+
+	return tools;
+}
+
+core::String DroidHost::execute_agent_tool(const core::String& tool_name, const core::String& arguments_json)
+{
+	if (tool_name == "list_connectors")
+	{
+		return list_connectors_json();
+	}
+	if (tool_name == "connector_status")
+	{
+		return connector_status_json(net::extract_json_string_field(arguments_json, "id"));
+	}
+	if (tool_name == "launch_connector")
+	{
+		return launch_connector(net::extract_json_string_field(arguments_json, "id"));
+	}
+	if (tool_name == "stop_connector")
+	{
+		return stop_connector(net::extract_json_string_field(arguments_json, "id"));
+	}
+	if (tool_name == "call_connector")
+	{
+		const core::String id = net::extract_json_string_field(arguments_json, "id");
+		const core::String path = net::extract_json_string_field(arguments_json, "path");
+		core::String method = net::extract_json_string_field(arguments_json, "method");
+		const core::String payload = net::extract_json_string_field(arguments_json, "payload_json");
+		return call_connector(id, path, method.empty() ? "POST" : method, payload);
+	}
+	if (tool_name == "enqueue_task")
+	{
+		return enqueue_task(arguments_json);
+	}
+	if (tool_name == "list_tasks")
+	{
+		return list_tasks_json();
+	}
+	if (tool_name == "run_command")
+	{
+		return run_command(arguments_json);
+	}
+
+	return "{" + net::json_bool_field("ok", false) + ","
+		+ net::json_string_field("error", "unknown tool: " + tool_name) + "}";
+}
+
+core::String DroidHost::agent_turn(const core::String& body)
+{
+	const core::String user_message = net::extract_json_string_field(body, "message");
+	bool clear = false;
+	net::extract_json_bool_field(body, "clear", clear);
+
+	if (clear)
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		agent_transcript_.clear();
+	}
+
+	if (user_message.empty())
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "missing message") + "}";
+	}
+
+	if (!config_.enable_ai)
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "AI is disabled (--no-ai)") + "}";
+	}
+
+	ai::OllamaConfig ollama_config;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		ollama_config.base_url = config_.ollama_url;
+		ollama_config.model = config_.ollama_model;
+		ollama_config.enabled = true;
+
+		if (agent_transcript_.empty() && !config_.system_prompt.empty())
+		{
+			agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::System, config_.system_prompt});
+		}
+		agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::User, user_message});
+	}
+
+	const core::Array<ai::ToolDefinition> tools = agent_tool_definitions();
+
+	std::ostringstream actions_stream;
+	actions_stream << '[';
+	bool first_action = true;
+
+	core::String final_assistant_text;
+	bool budget_exhausted = false;
+	constexpr int kMaxHops = 5;
+
+	for (int hop = 0; hop < kMaxHops; ++hop)
+	{
+		core::Array<ai::ChatMessage> transcript_copy;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			transcript_copy = agent_transcript_;
+		}
+
+		const ai::OllamaOutboundRequest request = ai::build_ollama_chat_request(ollama_config, transcript_copy, tools);
+		if (!request.valid)
+		{
+			return "{" + net::json_bool_field("ok", false) + ","
+				+ net::json_string_field("error", request.error_message) + "}";
+		}
+
+		int32_t status_code = 0;
+		core::String response_body;
+		const bool transport_ok = language_ai_transport_.post_json
+			? language_ai_transport_.post_json(request.url, request.body, status_code, response_body)
+			: false;
+
+		const ai::OllamaChatResponse response = ai::parse_ollama_chat_response(status_code, response_body, transport_ok);
+		if (!response.transport_ok || !response.http_success)
+		{
+			return "{" + net::json_bool_field("ok", false) + ","
+				+ net::json_string_field("error", response.error_message.empty()
+					? "Ollama request failed" : response.error_message) + "}";
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::Assistant, response.assistant_message});
+		}
+
+		if (response.tool_calls.empty())
+		{
+			final_assistant_text = response.assistant_message;
+			break;
+		}
+
+		for (const ai::ToolCall& call : response.tool_calls)
+		{
+			const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
+
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::Tool, tool_result});
+			}
+
+			if (!first_action)
+			{
+				actions_stream << ',';
+			}
+			first_action = false;
+			actions_stream << '{';
+			actions_stream << net::json_string_field("tool", call.name) << ',';
+			actions_stream << net::json_string_field("arguments_json", call.arguments_json) << ',';
+			actions_stream << net::json_string_field("result_json", tool_result);
+			actions_stream << '}';
+		}
+
+		if (hop == kMaxHops - 1)
+		{
+			budget_exhausted = true;
+			final_assistant_text = response.assistant_message;
+		}
+	}
+
+	actions_stream << ']';
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", true) << ',';
+	stream << net::json_string_field("assistant", final_assistant_text) << ',';
+	if (budget_exhausted)
+	{
+		stream << net::json_bool_field("budget_exhausted", true) << ',';
+	}
+	stream << "\"actions\":" << actions_stream.str();
+	stream << '}';
 	return stream.str();
 }
 

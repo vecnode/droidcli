@@ -1,6 +1,7 @@
 #include "ai/ollama_client.hpp"
 
 #include <cassert>
+#include <iostream>
 
 int main()
 {
@@ -41,6 +42,56 @@ int main()
 	config.enabled = false;
 	const OllamaOutboundRequest disabled = build_ollama_chat_request(config, messages);
 	assert(!disabled.valid);
+	config.enabled = true;
 
+	// Tool-calling: request serialization includes the "tools" array.
+	Array<ToolDefinition> tools;
+	ToolDefinition list_connectors_tool;
+	list_connectors_tool.name = "list_connectors";
+	list_connectors_tool.description = "List all registered connectors.";
+	list_connectors_tool.parameters_json_schema = "{\"type\":\"object\",\"properties\":{}}";
+	tools.push_back(list_connectors_tool);
+
+	const OllamaOutboundRequest tool_request = build_ollama_chat_request(config, messages, tools);
+	assert(tool_request.valid);
+	assert(tool_request.body.find("\"tools\":[") != String::npos);
+	assert(tool_request.body.find("\"type\":\"function\"") != String::npos);
+	assert(tool_request.body.find("\"name\":\"list_connectors\"") != String::npos);
+	assert(tool_request.body.find("\"parameters\":{\"type\":\"object\"") != String::npos);
+
+	// Request with no tools omits the "tools" field entirely.
+	const OllamaOutboundRequest no_tool_request = build_ollama_chat_request(config, messages);
+	assert(no_tool_request.body.find("\"tools\":") == String::npos);
+
+	// Tool-calling: response parsing extracts tool_calls with raw arguments JSON.
+	const OllamaChatResponse tool_call_response = parse_ollama_chat_response(
+		200,
+		R"({"model":"llama3.1","message":{"role":"assistant","content":"",)"
+		R"("tool_calls":[{"id":"call_1","function":{"name":"list_connectors","arguments":{"foo":"bar"}}}]},)"
+		R"("done":true})",
+		true);
+	assert(tool_call_response.http_success);
+	assert(tool_call_response.tool_calls.size() == 1);
+	assert(tool_call_response.tool_calls[0].id == "call_1");
+	assert(tool_call_response.tool_calls[0].name == "list_connectors");
+	assert(tool_call_response.tool_calls[0].arguments_json == "{\"foo\":\"bar\"}");
+
+	// A response with no assistant text but a tool call is not an error.
+	assert(tool_call_response.error_message.empty());
+
+	// Tool-role message round trip: build a follow-up request carrying a tool
+	// result message and confirm the wire format matches Ollama's convention.
+	Array<ChatMessage> follow_up = messages;
+	follow_up.push_back(ChatMessage{ChatRole::Assistant, ""});
+	follow_up.push_back(ChatMessage{ChatRole::Tool, "{\"connectors\":[]}"});
+	assert(chat_role_to_string(ChatRole::Tool) == "tool");
+	assert(chat_role_from_string("tool") == ChatRole::Tool);
+
+	const OllamaOutboundRequest follow_up_request = build_ollama_chat_request(config, follow_up);
+	assert(follow_up_request.valid);
+	assert(follow_up_request.body.find("\"role\":\"tool\"") != String::npos);
+	assert(follow_up_request.body.find("\"connectors\":[]") != String::npos);
+
+	std::cout << "ollama_client_test passed" << std::endl;
 	return 0;
 }
