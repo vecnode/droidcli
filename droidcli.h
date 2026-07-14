@@ -1,13 +1,13 @@
 #pragma once
 
 /**
- * MetaAgent portable library — public entry point.
+ * Droidcli portable library — public entry point.
  *
  * Implementation is compiled from a single translation unit:
- *   metaagent/metaagent.cpp
+ *   droidcli/droidcli.cpp
  *
- * Embed in other applications by adding `metaagent/src` to your include path
- * and compiling `metaagent.cpp` once.
+ * Embed in other applications by adding `droidcli/src` to your include path
+ * and compiling `droidcli.cpp` once.
  */
 
 #include "export.hpp"
