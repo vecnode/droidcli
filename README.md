@@ -1,7 +1,10 @@
-# droidcli — agent core 0.2.0
+# droidcli
 
-Portable C++17 core for the droidcli library, plus **droidcli**, a headless
-CLI agent daemon built on top of it.
+![C++](https://img.shields.io/badge/language-C%2B%2B17-00599C?logo=cplusplus&logoColor=white)
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
+
+Portable C++17 core for the droidcli library, a headless CLI agent daemon
+built on top of it.
 
 droidcli does not render or play media itself: it holds the control logic
 (commands, session, corpus, AI seams) and **coordinates peer applications over
