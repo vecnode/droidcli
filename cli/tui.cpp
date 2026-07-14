@@ -8,7 +8,11 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <exception>
+#include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -216,6 +220,129 @@ std::vector<ChatEntry> parse_agent_turn_response(const std::string& json)
 	return entries;
 }
 
+// Parses a plain JSON array of strings, e.g. {"models":["a","b"]}. Distinct
+// from extract_json_object_array above, which walks an array of {...}
+// objects - DroidHost::ollama_setup_status_json()'s "models" field is an
+// array of bare strings instead.
+std::vector<std::string> parse_json_string_array(const std::string& json, const std::string& key)
+{
+	std::vector<std::string> values;
+	const std::string needle = "\"" + key + "\":";
+	const size_t key_index = json.find(needle);
+	if (key_index == std::string::npos)
+	{
+		return values;
+	}
+	size_t cursor = json.find('[', key_index);
+	if (cursor == std::string::npos)
+	{
+		return values;
+	}
+	++cursor;
+
+	while (cursor < json.size())
+	{
+		while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'
+			|| json[cursor] == '\n' || json[cursor] == '\r' || json[cursor] == ','))
+		{
+			++cursor;
+		}
+		if (cursor >= json.size() || json[cursor] == ']')
+		{
+			break;
+		}
+		if (json[cursor] != '"')
+		{
+			break;
+		}
+		++cursor;
+		std::string value;
+		while (cursor < json.size() && json[cursor] != '"')
+		{
+			if (json[cursor] == '\\' && cursor + 1 < json.size())
+			{
+				value += json[cursor + 1];
+				cursor += 2;
+				continue;
+			}
+			value += json[cursor++];
+		}
+		if (cursor < json.size())
+		{
+			++cursor; // skip closing quote
+		}
+		values.push_back(value);
+	}
+	return values;
+}
+
+// Mirrors DroidHost::ollama_setup_status_json()'s response shape.
+struct OllamaSetupStatus {
+	bool installed = false;
+	bool online = false;
+	std::vector<std::string> models;
+	std::string configured_model;
+	bool configured_model_pulled = false;
+};
+
+OllamaSetupStatus parse_ollama_setup_status(const std::string& json)
+{
+	OllamaSetupStatus status;
+	net::extract_json_bool_field(json, "installed", status.installed);
+	net::extract_json_bool_field(json, "online", status.online);
+	status.models = parse_json_string_array(json, "models");
+	status.configured_model = net::extract_json_string_field(json, "configured_model");
+	net::extract_json_bool_field(json, "configured_model_pulled", status.configured_model_pulled);
+	return status;
+}
+
+// Drives the TUI's hardcoded in-chat Ollama setup flow (install -> start ->
+// pull a model), recomputed fresh from ollama_setup_status_json() on every
+// submitted chat message rather than tracked as persistent state - simplest
+// thing that reflects reality even if the user fixes Ollama out-of-band
+// (e.g. installs it themselves in another window) between messages.
+enum class OllamaSetupState { Ready, NeedsInstall, NeedsStart, NeedsModel };
+
+OllamaSetupState compute_setup_state(const OllamaSetupStatus& status)
+{
+	if (!status.installed)
+	{
+		return OllamaSetupState::NeedsInstall;
+	}
+	if (!status.online)
+	{
+		return OllamaSetupState::NeedsStart;
+	}
+	if (status.models.empty() || !status.configured_model_pulled)
+	{
+		return OllamaSetupState::NeedsModel;
+	}
+	return OllamaSetupState::Ready;
+}
+
+std::string trim(const std::string& value)
+{
+	size_t start = 0;
+	size_t end = value.size();
+	while (start < end && std::isspace(static_cast<unsigned char>(value[start])))
+	{
+		++start;
+	}
+	while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])))
+	{
+		--end;
+	}
+	return value.substr(start, end - start);
+}
+
+std::string to_lower(const std::string& value)
+{
+	std::string result = value;
+	std::transform(result.begin(), result.end(), result.begin(),
+		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return result;
+}
+
 } // namespace
 
 int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
@@ -355,6 +482,19 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// Submit-on-Enter: calls DroidHost::agent_turn() directly (in-process, no
 	// HTTP/token needed) on this event thread only - never from the poller
 	// thread - consistent with how l/s already block briefly below.
+	//
+	// Before routing to agent_turn() (which needs a working, model-loaded
+	// Ollama to decide anything), a small hardcoded state machine checks
+	// Ollama's setup status in-process and, if it isn't ready, walks the user
+	// through install/start/pull instead - this path must work even when
+	// Ollama/the LLM is completely unreachable.
+	//
+	// Everything in this handler runs inside a try/catch: a network failure
+	// calling Ollama (or any other exception raised while handling a chat
+	// submit) must always surface as an "error" chat entry, never propagate
+	// out of this FTXUI event handler - FTXUI's own loop does not catch
+	// exceptions, so an uncaught one here would unwind into std::terminate()
+	// and kill the whole process/terminal, not just fail the one turn.
 	Component chat_input = Input(&chat_input_text, "type a message, Enter to send...");
 	chat_input = CatchEvent(chat_input, [&](Event event) -> bool
 	{
@@ -369,15 +509,140 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			chat_entries.push_back(ChatEntry{"user", message});
 			agent_turn_in_flight = true;
 
-			std::ostringstream request_body;
-			request_body << '{' << net::json_string_field("message", message) << '}';
-			const std::string response_json = host.agent_turn(request_body.str());
-			agent_turn_in_flight = false;
-
-			for (const ChatEntry& entry : parse_agent_turn_response(response_json))
+			try
 			{
-				chat_entries.push_back(entry);
+				const std::string lower_message = to_lower(trim(message));
+				const OllamaSetupStatus setup_status = parse_ollama_setup_status(host.ollama_setup_status_json());
+				const OllamaSetupState setup_state = compute_setup_state(setup_status);
+
+				if (setup_state == OllamaSetupState::NeedsInstall)
+				{
+					if (lower_message == "install ollama" || lower_message == "install")
+					{
+						chat_entries.push_back(ChatEntry{"info", "Installing Ollama, this can take a few minutes..."});
+						const std::string result_json = host.install_ollama();
+						bool ok = false;
+						net::extract_json_bool_field(result_json, "ok", ok);
+						if (ok)
+						{
+							chat_entries.push_back(ChatEntry{"info",
+								"Ollama installed. Type a message to continue - you'll be asked to start it next."});
+						}
+						else
+						{
+							const std::string error = net::extract_json_string_field(result_json, "error");
+							const std::string stderr_text = net::extract_json_string_field(result_json, "stderr");
+							chat_entries.push_back(ChatEntry{"error",
+								"Ollama install failed: " + (error.empty() ? stderr_text : error)});
+						}
+					}
+					else
+					{
+						chat_entries.push_back(ChatEntry{"info",
+							"Ollama isn't installed. Type 'install ollama' to install it automatically "
+							"(via winget), or install it yourself from ollama.com."});
+					}
+				}
+				else if (setup_state == OllamaSetupState::NeedsStart)
+				{
+					if (lower_message == "start ollama" || lower_message == "start")
+					{
+						chat_entries.push_back(ChatEntry{"info", "Starting Ollama..."});
+						const std::string result_json = host.start_ollama();
+						bool ok = false;
+						net::extract_json_bool_field(result_json, "ok", ok);
+						bool online = false;
+						net::extract_json_bool_field(result_json, "online", online);
+						if (ok && online)
+						{
+							chat_entries.push_back(ChatEntry{"info", "Ollama is running. Type a message to continue."});
+						}
+						else if (ok)
+						{
+							chat_entries.push_back(ChatEntry{"error",
+								"Ollama process started but is not yet reachable at its configured URL. "
+								"Try again in a moment."});
+						}
+						else
+						{
+							chat_entries.push_back(ChatEntry{"error",
+								"Failed to start Ollama: " + net::extract_json_string_field(result_json, "error")});
+						}
+					}
+					else
+					{
+						chat_entries.push_back(ChatEntry{"info",
+							"Ollama is installed but not running. Type 'start ollama' to launch it."});
+					}
+				}
+				else if (setup_state == OllamaSetupState::NeedsModel)
+				{
+					if (lower_message == "list")
+					{
+						std::string models_text;
+						for (size_t index = 0; index < setup_status.models.size(); ++index)
+						{
+							if (index > 0)
+							{
+								models_text += ", ";
+							}
+							models_text += setup_status.models[index];
+						}
+						chat_entries.push_back(ChatEntry{"info",
+							"Pulled models: " + (models_text.empty() ? std::string("(none)") : models_text)});
+					}
+					else if (lower_message.empty() || lower_message == "install" || lower_message == "install ollama"
+						|| lower_message == "start" || lower_message == "start ollama")
+					{
+						chat_entries.push_back(ChatEntry{"info",
+							"No usable Ollama model found. Type a model name to download it "
+							"(e.g. 'llama3.2', 'qwen2.5', 'mistral-nemo') or 'list' to see currently pulled models."});
+					}
+					else
+					{
+						chat_entries.push_back(ChatEntry{"info",
+							"Downloading model '" + message + "', this can take a while..."});
+						std::ostringstream pull_body;
+						pull_body << '{' << net::json_string_field("model", message) << '}';
+						const std::string result_json = host.pull_ollama_model(pull_body.str());
+						bool ok = false;
+						net::extract_json_bool_field(result_json, "ok", ok);
+						if (ok)
+						{
+							chat_entries.push_back(ChatEntry{"info",
+								"Model '" + message + "' downloaded and set as the active model. "
+								"Type a message to continue."});
+						}
+						else
+						{
+							chat_entries.push_back(ChatEntry{"error",
+								"Failed to pull model '" + message + "': "
+								+ net::extract_json_string_field(result_json, "error")});
+						}
+					}
+				}
+				else
+				{
+					std::ostringstream request_body;
+					request_body << '{' << net::json_string_field("message", message) << '}';
+					const std::string response_json = host.agent_turn(request_body.str());
+
+					for (const ChatEntry& entry : parse_agent_turn_response(response_json))
+					{
+						chat_entries.push_back(entry);
+					}
+				}
 			}
+			catch (const std::exception& e)
+			{
+				chat_entries.push_back(ChatEntry{"error", std::string("internal error: ") + e.what()});
+			}
+			catch (...)
+			{
+				chat_entries.push_back(ChatEntry{"error", "internal error: unknown exception"});
+			}
+
+			agent_turn_in_flight = false;
 			return true;
 		}
 		return false;
@@ -465,28 +730,44 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return false;
 	});
 
+	// An exception escaping a std::thread's entry function calls
+	// std::terminate() immediately - it does NOT propagate to poller.join()
+	// below, so a try/catch around screen.Loop() would not protect this
+	// thread. Defense in depth: catch here too, log to stderr, and keep
+	// polling rather than letting one bad iteration kill the process.
 	std::thread poller([&]()
 	{
 		while (running_flag)
 		{
-			std::vector<ConnectorRow> next_connectors = parse_connectors(host.list_connectors_json());
-			for (ConnectorRow& row : next_connectors)
+			try
 			{
-				row.live_status = summarize_status(row.kind, host.connector_status_json(row.id));
-			}
-			std::vector<TaskRow> next_tasks = parse_tasks(host.list_tasks_json());
-			std::vector<std::string> next_log = parse_log_lines(host.build_app_log_json());
+				std::vector<ConnectorRow> next_connectors = parse_connectors(host.list_connectors_json());
+				for (ConnectorRow& row : next_connectors)
+				{
+					row.live_status = summarize_status(row.kind, host.connector_status_json(row.id));
+				}
+				std::vector<TaskRow> next_tasks = parse_tasks(host.list_tasks_json());
+				std::vector<std::string> next_log = parse_log_lines(host.build_app_log_json());
 
+				{
+					std::lock_guard<std::mutex> lock(polled.mutex);
+					polled.connectors = std::move(next_connectors);
+					polled.tasks = std::move(next_tasks);
+					polled.log_lines = std::move(next_log);
+				}
+
+				// FTXUI's documented pattern for live-updating dashboards: nudge the
+				// event loop with a Custom event so it redraws even with no keypress.
+				screen.PostEvent(Event::Custom);
+			}
+			catch (const std::exception& e)
 			{
-				std::lock_guard<std::mutex> lock(polled.mutex);
-				polled.connectors = std::move(next_connectors);
-				polled.tasks = std::move(next_tasks);
-				polled.log_lines = std::move(next_log);
+				std::cerr << "droidcli: TUI poller error: " << e.what() << std::endl;
 			}
-
-			// FTXUI's documented pattern for live-updating dashboards: nudge the
-			// event loop with a Custom event so it redraws even with no keypress.
-			screen.PostEvent(Event::Custom);
+			catch (...)
+			{
+				std::cerr << "droidcli: TUI poller error: unknown exception" << std::endl;
+			}
 
 			for (int waited_ms = 0; waited_ms < 500 && running_flag; waited_ms += 100)
 			{
@@ -495,7 +776,23 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		}
 	});
 
-	screen.Loop(full_ui);
+	// Defense in depth, matching the try/catch already wrapped around the
+	// chat-submit handler above: nothing reachable from screen.Loop() is
+	// expected to throw, but if it ever did, an uncaught exception here would
+	// unwind past main() and abort the whole process instead of just this
+	// screen. Catch, log, and fall through to the normal shutdown path.
+	try
+	{
+		screen.Loop(full_ui);
+	}
+	catch (const std::exception& e)
+	{
+		std::cerr << "droidcli: TUI loop error: " << e.what() << std::endl;
+	}
+	catch (...)
+	{
+		std::cerr << "droidcli: TUI loop error: unknown exception" << std::endl;
+	}
 
 	running_flag = false;
 	if (poller.joinable())
