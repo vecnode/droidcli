@@ -5,12 +5,17 @@ REM ----------------------------------------------------------------------------
 REM MetaAgent — build everything and stage a portable distribution folder + zip.
 REM
 REM Produces:  dist\metaagent-<version>\
-REM              metaagent\      metaagent-app.exe (Release) + DLLs + assets
+REM              droidcli\       droidcli.exe (Release) + FFmpeg DLLs
 REM              media-player\   media-player-cpp.exe + DLLs + data\
 REM              adapter\        pre-training deploy code + the trained LoRA
 REM                               adapter (~40 MB; no base/fused model weights)
 REM              datasets\       corpus CSVs
 REM              run_all.bat     launcher (see distribute\run_all.bat)
+REM
+REM media-player\ and adapter\ are staged unconditionally, same as before this
+REM change - droidcli's connectors config (config/connectors.example.json) can
+REM point at them, but the dist layout for the peer apps themselves is
+REM unrelated to the connector/task-queue refactor.
 REM
 REM Usage: build_and_distribute.bat [--skip-media] [--no-zip]
 REM
@@ -70,8 +75,8 @@ echo   adapter weights: %DIST_ADAPTER_WEIGHTS_DIR%
 echo   dataset source: %DIST_DATASET_DIR%
 echo.
 
-REM --- [1/6] Build metaagent (Release, reuse build_and_run.bat) ---
-echo [1/6] Building metaagent (Release)
+REM --- [1/6] Build droidcli (Release, reuse build_and_run.bat) ---
+echo [1/6] Building droidcli (Release)
 call "%ROOT%\build_and_run.bat" Release --no-run
 if errorlevel 1 goto error
 
@@ -102,9 +107,9 @@ if not exist "%DIST_MEDIA_DIR%\bin\media-player-cpp.exe" (
 REM --- [3/6] Stage dist folder ---
 echo [3/6] Staging %DIST_DIR%
 if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
-mkdir "%DIST_DIR%\metaagent" "%DIST_DIR%\media-player" "%DIST_DIR%\adapter" "%DIST_DIR%\datasets"
+mkdir "%DIST_DIR%\droidcli" "%DIST_DIR%\media-player" "%DIST_DIR%\adapter" "%DIST_DIR%\datasets"
 
-robocopy "%ROOT%\build-msvc\app\Release" "%DIST_DIR%\metaagent" /E /XF *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS >nul
+robocopy "%ROOT%\build-msvc\Release" "%DIST_DIR%\droidcli" droidcli.exe *.dll /XF *.pdb *.ilk *.lib *.exp /NFL /NDL /NJH /NJS >nul
 if errorlevel 8 goto error
 
 robocopy "%DIST_MEDIA_DIR%\bin" "%DIST_DIR%\media-player" /E /XF *.pdb *_debug.exe /NFL /NDL /NJH /NJS >nul
