@@ -3,8 +3,7 @@
 ![C++](https://img.shields.io/badge/language-C%2B%2B17-00599C?logo=cplusplus&logoColor=white)  
 ![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-`droidcli` ìs a library to create agents that execute multimodal tasks, a headless CLI agent daemon.
-
+`droidcli` is a library to create agents that execute multimodal tasks, a headless CLI agent daemon.
 
 Core capabilities: 
 - HTTP (inbound + outbound)
@@ -68,9 +67,12 @@ ctest --test-dir build --output-on-failure
 
 ## Distribution
 
-`.\build_and_distribute.bat` builds everything **Release** and stages a portable
-folder + zip under `dist\droidcli-<version>\`:
-
+`.\build_and_distribute.bat` builds droidcli **Release** and stages a portable
+folder + zip under `dist\droidcli-<version>\`: `droidcli.exe` + FFmpeg DLLs,
+`config\connectors.example.json`, and `run_all.bat`. droidcli does not
+auto-discover peer apps — copy the example connector config to
+`connectors.json` next to `run_all.bat` and edit it to point at whatever you
+want droidcli to control.
 
 ### CLI flags
 
@@ -87,10 +89,7 @@ droidcli [--port 30080] [--config path/to/connectors.json] [--no-ai]
 | `--ollama-url` | `http://127.0.0.1:11434` | Ollama base URL |
 | `--ollama-model` | `llama3.2` | Ollama model name |
 | `--headless` | off | Skip the interactive TUI; run the plain foreground daemon+HTTP-API loop only (unchanged scriptable behavior) |
-| `--daemon` | off | Documented no-op: droidcli always runs in the foreground (see "Deviations" in the design notes) — use a process supervisor (nssm, Task Scheduler, systemd) for true background operation |
-
-Google search polling reads `DROIDCLI_GOOGLE_API_KEY` / `DROIDCLI_GOOGLE_CSE_ID`
-/ `DROIDCLI_GOOGLE_SEARCH_QUERY` from the environment at startup (see below).
+| `--daemon` | off | Documented no-op: droidcli always runs in the foreground — use a process supervisor (nssm, Task Scheduler, systemd) for true background operation |
 
 ### Config file format
 
@@ -100,9 +99,9 @@ Google search polling reads `DROIDCLI_GOOGLE_API_KEY` / `DROIDCLI_GOOGLE_CSE_ID`
     {
       "id": "my-http-peer",
       "kind": "http_peer",
-      "base_url": "http://127.0.0.1:8008",
+      "base_url": "http://127.0.0.1:9000",
       "enabled": true,
-      "capabilities": "summarize"
+      "capabilities": "example"
     },
     {
       "id": "my-launched-process",
@@ -115,9 +114,8 @@ Google search polling reads `DROIDCLI_GOOGLE_API_KEY` / `DROIDCLI_GOOGLE_CSE_ID`
 }
 ```
 
-A ready-to-copy example (referencing the LoRA adapter and media-player-cpp as
-*illustrations*, not built-in behavior) lives at
-`[config/connectors.example.json](./config/connectors.example.json)`.
+A ready-to-copy template (generic placeholders, not built-in behavior) lives
+at `[config/connectors.example.json](./config/connectors.example.json)`.
 
 ### HTTP routes
 
@@ -129,7 +127,7 @@ A ready-to-copy example (referencing the LoRA adapter and media-player-cpp as
 | `POST` | `/ai/chat` | Ollama text-gen chat via `LanguageAiRuntime` |
 | `GET` | `/api/status` | Host status: recording / autopilot toggles |
 | `GET` | `/api/network/status` | Networking flag + connector count |
-| `GET` | `/api/config` | Effective host configuration (Ollama + Google search) |
+| `GET` | `/api/config` | Effective host configuration (Ollama) |
 | `POST` | `/api/config` | Update host configuration at runtime |
 | `GET` | `/api/runtimes` | Runtime catalog (all host-local) |
 | `GET` | `/api/notify/log` | Recent notify messages |
@@ -162,25 +160,6 @@ A task with `command: "launch"` or `"stop"` calls `launch_connector`/`stop_conne
 on its `connector_id`; any other command is treated as the HTTP path to call on
 an `http_peer` connector.
 
-
-### Google search (background)
-
-Once `DROIDCLI_GOOGLE_API_KEY` + `DROIDCLI_GOOGLE_CSE_ID` + `DROIDCLI_GOOGLE_SEARCH_QUERY`
-are all set (env vars, read at startup), droidcli runs that search every
-`DROIDCLI_GOOGLE_SEARCH_INTERVAL_SECONDS` (default 10, also `POST /api/config`-settable)
-via Google's official **Programmable Search Engine / Custom Search JSON API** —
-a real HTTP GET to `googleapis.com`, not HTML scraping of a search results
-page. Get a free API key + search engine ID at
-https://programmablesearchengine.google.com/ (free tier: 100 queries/day).
-Results are logged to the `search` channel in `GET /api/app/log`.
-
-This is also why droidcli links `winhttp` (see `tools/sync_http_client.cpp`):
-outbound calls to local peers (Ollama, connectors) are plain HTTP over raw
-sockets, but Google's API is HTTPS-only, so `sync_http_get`/
-`sync_http_post_json` transparently route `https://` URLs through WinHTTP
-(which handles the TLS handshake) while `http://` URLs keep using the original
-raw-socket path unchanged.
-
 ## Shared HTTP API (library handlers)
 
 `/health`, `/echo`, `/notify`, and `/ai/chat` are handled by the portable
@@ -201,7 +180,7 @@ curl http://127.0.0.1:30080/health
 curl "http://127.0.0.1:30080/echo?msg=hello"
 curl -X POST http://127.0.0.1:30080/notify \
   -H "Content-Type: application/json" \
-  -d '{"message":"media ready"}'
+  -d '{"message":"test event"}'
 curl -X POST http://127.0.0.1:30080/ai/chat \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Hello"}'
@@ -238,7 +217,6 @@ flowchart LR
 | `droidcli::ai`       | Ollama chat client, `LanguageAiRuntime`                                                                     |
 | `droidcli::notify`   | Notify body parsing                                                                                         |
 | `droidcli::cli`      | droidcli host wiring: `DroidHost`, `ProcessManager`, HTTP route mount (not portable — links sockets/process control) |
-
 
 # License
 

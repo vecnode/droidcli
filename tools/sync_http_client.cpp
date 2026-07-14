@@ -323,10 +323,10 @@ bool sync_http_request(
 #if defined(_WIN32)
 		return https_request_winhttp(method, parsed, body, status_code_out, response_body_out);
 #else
-		// No TLS transport wired up on this platform yet - every peer this
-		// codebase talks to today (Ollama, media-player-cpp, the LoRA
-		// adapter) is plain HTTP on localhost. Add an OpenSSL (or similar)
-		// path here if a non-Windows host needs outbound HTTPS.
+		// No TLS transport wired up on this platform yet - Ollama and every
+		// connector this codebase talks to today are plain HTTP on
+		// localhost. Add an OpenSSL (or similar) path here if a non-Windows
+		// host needs outbound HTTPS.
 		return false;
 #endif
 	}

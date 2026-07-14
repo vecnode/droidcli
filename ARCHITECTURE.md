@@ -2,8 +2,8 @@
 
 Portable C++17 library for Droidcli **control logic**: HTTP route handlers,
 signal/trigger dispatch, media decode + corpus reading, session snapshots,
-command validation, and the AI seams. A host (the desktop app or the headless
-server) supplies transport, windowing, and process I/O through thin callbacks.
+command validation, and the AI seams. The droidcli host (`cli/`) supplies
+transport and process I/O through thin callbacks.
 
 App version: **agent core 0.2.0** (library version 0.2.0 — hold at 0.2.x).
 
@@ -16,9 +16,7 @@ open-ended set of peer applications. The portable core decides *what* should
 happen; the droidcli host performs the actual transport, process control, and
 dispatch. Peers are **connectors defined in config** (or registered at
 runtime over HTTP) — the core has zero compiled-in knowledge of any specific
-peer app. A LoRA adapter inference service and an openFrameworks media player
-are the two peers this repo has historically talked to, and they're shown
-below as illustrative (dotted) examples, not fixed graph nodes.
+peer app.
 
 ```mermaid
 flowchart LR
@@ -32,11 +30,6 @@ flowchart LR
 
     MA -->|"/api/connectors/{id}/call | launch | stop"| CONN
     MA -->|ai::LanguageAiRuntime → /ai/chat\n--ollama-url| OLLAMA
-
-    ADAPTER[("illustrative: LoRA adapter inference\nOCR→summary, FastAPI :8008")]
-    MEDIA[("illustrative: media-player-cpp\nopenFrameworks :8080")]
-    CONN -.->|example http_peer| ADAPTER
-    CONN -.->|example launched_process| MEDIA
 ```
 
 | Concern | What it owns | Seam in this repo |
@@ -46,8 +39,8 @@ flowchart LR
 
 > **Ollama stays separate.** Ollama is a general **text-generation** endpoint
 > behind `ai::LanguageAiRuntime` / `/ai/chat` — it is not a connector, it's
-> built into the core AI seam. Any purpose-trained inference service (an
-> OCR→summary LoRA adapter, or anything else) is registered as an ordinary
+> built into the core AI seam. Any purpose-trained inference service is
+> registered as an ordinary
 > `http_peer` connector instead, with no special-cased code path. All
 > endpoints/models are **configuration**, never baked into core.
 
@@ -88,7 +81,6 @@ metaagent/                        (repository directory name unchanged)
 ├── tools/                         mini_http_server + sync_http_client (raw-socket HTTP, WinHTTP for https://)
 ├── tests/                         One *_test.cpp per core module
 ├── config/                         Example connector config (connectors.example.json)
-├── external/                      Submodules: pre-training + media-player-cpp
 ├── distribute/                    Dist templates (run_all.bat, README)
 ├── CMakeLists.txt
 ├── README.md
@@ -109,7 +101,6 @@ Public entry point: `#include "droidcli.h"`.
 | `net/router` + `handlers` | `/health`, `/echo`, `/notify`, `/ai/chat`                             |
 | `net/signal_router`       | **Network trigger**: register peer `SignalTarget`s, dispatch `SignalEnvelope`s via `SignalTransportFn`, log delivery |
 | `net/connector`           | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
-| `net/google_search`       | Google Programmable Search Engine (Custom Search JSON API) URL build + hand-rolled JSON response parse |
 | `net/json`                | Escape/build/extract JSON fields (no external JSON dependency)        |
 | `notify/parse`            | Notify body parsing (JSON or text)                                    |
 | `session/types` + `status`| `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
