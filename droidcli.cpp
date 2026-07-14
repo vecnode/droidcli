@@ -10,7 +10,6 @@
 #include "media/decode.cpp"
 #include "media/probe.cpp"
 #include "media/store.cpp"
-#include "media/corpus.cpp"
 
 #include "app/commands.cpp"
 #include "app/runtime_catalog.cpp"

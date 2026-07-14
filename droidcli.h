@@ -22,7 +22,6 @@
 #include "media/image.hpp"
 #include "media/probe.hpp"
 #include "media/store.hpp"
-#include "media/corpus.hpp"
 
 #include "runtime/host_interfaces.hpp"
 #include "ai/language_runtime.hpp"

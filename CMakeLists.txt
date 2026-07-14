@@ -48,10 +48,6 @@ target_link_libraries(droidcli_media_decode_test PRIVATE droidcli_core)
 droidcli_stage_ffmpeg_runtime(droidcli_media_decode_test)
 add_test(NAME media_decode_test COMMAND droidcli_media_decode_test)
 
-add_executable(droidcli_corpus_test tests/corpus_test.cpp)
-target_link_libraries(droidcli_corpus_test PRIVATE droidcli_core)
-add_test(NAME corpus_test COMMAND droidcli_corpus_test)
-
 add_executable(droidcli_net_handler_test tests/net_handler_test.cpp)
 target_link_libraries(droidcli_net_handler_test PRIVATE droidcli_core)
 add_test(NAME net_handler_test COMMAND droidcli_net_handler_test)
