@@ -71,7 +71,7 @@ metaagent/                        (repository directory name unchanged)
 │   ├── initialize.hpp             initialize_defaults()
 │   ├── core/                      Vec3, math, log_sink, value types
 │   ├── media/                     PNG/JPEG decode, probe, MediaStore, corpus
-│   ├── net/                       Route table, handlers, signal_router, json
+│   ├── net/                       Route table, handlers, connector, json
 │   ├── notify/                    Notify body parsing
 │   ├── session/                   RuntimeSession + status strings
 │   ├── app/                       Command registry, runtime catalog
@@ -97,9 +97,7 @@ Public entry point: `#include "droidcli.h"`.
 | ------------------------- | --------------------------------------------------------------------- |
 | `core/types` + `math`     | `String`, `Array`, `Vec3`, color types, math helpers                  |
 | `media/decode` + `probe`  | FFmpeg-backed decode + probe (host stages the DLLs)                   |
-| `media/corpus`            | Load OCR/objects corpora; subtitles, previews, focus rects, masks     |
 | `net/router` + `handlers` | `/health`, `/echo`, `/notify`, `/ai/chat`                             |
-| `net/signal_router`       | **Network trigger**: register peer `SignalTarget`s, dispatch `SignalEnvelope`s via `SignalTransportFn`, log delivery |
 | `net/connector`           | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
 | `net/json`                | Escape/build/extract JSON fields (no external JSON dependency)        |
 | `notify/parse`            | Notify body parsing (JSON or text)                                    |
@@ -117,35 +115,6 @@ for `http_peer`, `launch_connector`/`stop_connector` for `launched_process`,
 `tick_tasks()` draining the queue), and the **ProcessManager** (Job
 Object/process-group launch of any `launched_process` connector with PID
 tracking).
-
----
-
-## Network triggers (`src/net/signal_router`)
-
-The "network trigger" half of droidcli's role: a portable registry + dispatcher
-for sending typed signals to peer applications (the media player or any external
-orchestrator). Core owns the **envelope shape, target registry, and delivery
-log**; the host supplies the actual transport.
-
-| Type | Role |
-| ---- | ---- |
-| `SignalTarget` | Registered peer: `id`, `control_url`, `capabilities`, `enabled` |
-| `SignalEnvelope` | Versioned message: `id`, `type`, `target`, `timestamp_ms`, `payload_json` |
-| `SignalRouter` | Register/unregister targets, `dispatch(envelope, transport)`, ring-buffered log (128 entries) |
-| `SignalTransportFn` | Host-provided `std::function` performing the POST |
-| `SignalDispatchResult` / `SignalLogEntry` | Per-dispatch outcome + auditable history |
-
-Build/parse helpers (`build_signal_envelope_json`, `parse_signal_envelope`,
-`build_targets_json`, `parse_target_from_json`, `build_signal_log_json`) keep all
-JSON in core. Tests: `signal_router_test.cpp`.
-
-```mermaid
-flowchart LR
-    Domain[Core control event] --> Router[net::SignalRouter]
-    Router -->|envelope JSON| Transport[Host SignalTransportFn]
-    Transport --> Peer[(Media player / orchestrator)]
-    Router --> Log[(Signal log — 128 entries)]
-```
 
 ---
 
@@ -182,10 +151,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Tests: `media_decode_test`, `corpus_test`, `net_handler_test`,
-`app_command_test`, `host_interfaces_test`, `ollama_client_test`,
-`language_runtime_test`, `signal_router_test`, `runtime_catalog_test`,
-`google_search_test`, `connector_test`, `task_queue_test`.
+Tests: `media_decode_test`, `net_handler_test`, `app_command_test`,
+`host_interfaces_test`, `ollama_client_test`, `language_runtime_test`,
+`runtime_catalog_test`, `connector_test`, `task_queue_test`.
 
 On Windows the whole tree builds with **one MSVC runtime**
 (`CMAKE_MSVC_RUNTIME_LIBRARY` in the root CMakeLists: dynamic Debug, static
@@ -197,13 +165,9 @@ Release) — never set a per-target runtime that diverges.
 
 1. **New HTTP route** — handler in `net/handlers.cpp`, register in the router,
    mount in the host(s).
-2. **New network trigger / signal type** — extend `net/signal_types`
-   (envelope/target + JSON) and `net/signal_router` (dispatch/log); host supplies
-   the `SignalTransportFn`; add a `signal_router_test` case.
-3. **New validated command** — `CommandId` + `validate_command` in
+2. **New validated command** — `CommandId` + `validate_command` in
    `app/commands`, a host-side handler in `apply_command_side_effects`.
-4. **New corpus field** — extend `media/corpus` parsing + `corpus_test`.
-5. **New connector (peer app)** — usually **config-only**: add an entry to a
+3. **New connector (peer app)** — usually **config-only**: add an entry to a
    `connectors.json` (or `POST /api/connectors`) with `kind: "http_peer"` and a
    `base_url`; droidcli proxies calls to it via `/api/connectors/{id}/call`
    with zero new code. For `kind: "launched_process"`, `ProcessManager`
