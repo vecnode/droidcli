@@ -92,11 +92,30 @@ add_executable(metaagent_task_queue_test tests/task_queue_test.cpp)
 target_link_libraries(metaagent_task_queue_test PRIVATE metaagent)
 add_test(NAME task_queue_test COMMAND metaagent_task_queue_test)
 
+# FTXUI powers droidcli's default interactive terminal dashboard (cli/tui.cpp).
+# Scoped to the droidcli target only via FetchContent + target_link_libraries -
+# it must never leak into the core `metaagent` library or the test targets.
+include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+set(FTXUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(FTXUI_BUILD_MODULES OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(ftxui
+    GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+    GIT_TAG v7.0.1
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(ftxui)
+
 add_executable(droidcli
     cli/droidcli.cpp
     cli/host.cpp
     cli/http_mount.cpp
     cli/process_manager.cpp
+    cli/tui.cpp
     tools/mini_http_server.cpp
     tools/sync_http_client.cpp
 )
@@ -105,7 +124,7 @@ target_include_directories(droidcli
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
         ${CMAKE_CURRENT_SOURCE_DIR}/cli
 )
-target_link_libraries(droidcli PRIVATE metaagent)
+target_link_libraries(droidcli PRIVATE metaagent ftxui::ftxui)
 if(WIN32)
     target_link_libraries(droidcli PRIVATE ws2_32 winhttp)
     target_compile_definitions(droidcli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
