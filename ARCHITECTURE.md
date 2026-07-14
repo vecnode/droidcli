@@ -9,40 +9,47 @@ App version: **agent core 0.2.0** (library version 0.2.0 — hold at 0.2.x).
 
 ---
 
-## System context — three cooperating applications
+## System context — a core plus config-driven connectors
 
-metaagent is the **agent controller and network trigger** in a three-application
-system. The portable core decides *what* should happen; hosts and peers perform
-the actual transport, inference, and rendering.
+metaagent is the **agent controller and network trigger** at the center of an
+open-ended set of peer applications. The portable core decides *what* should
+happen; the droidcli host performs the actual transport, process control, and
+dispatch. Peers are **connectors defined in config** (or registered at
+runtime over HTTP) — the core has zero compiled-in knowledge of any specific
+peer app. A LoRA adapter inference service and an openFrameworks media player
+are the two peers this repo has historically talked to, and they're shown
+below as illustrative (dotted) examples, not fixed graph nodes.
 
 ```mermaid
 flowchart LR
-    subgraph MA["1 — metaagent (this repo)"]
+    subgraph MA["metaagent (this repo)"]
         CORE[Portable core src/]
-        HOSTS[Hosts: app/ desktop, tools/ headless]
-        HOSTS --> CORE
+        HOST[cli/ — droidcli daemon]
+        HOST --> CORE
     end
-    ADAPTER[("2 — LoRA adapter inference\nLLaVA OCR→summary, FastAPI :8008")]
-    MEDIA[("3 — media-player-cpp\nopenFrameworks :8080")]
+    CONN[("connector (config-driven)\nhttp_peer or launched_process")]
     OLLAMA[("Ollama — ancillary text-gen :11434")]
 
-    MA -->|host /api/adapter/* → METAAGENT_ADAPTER_URL| ADAPTER
-    MA -->|signal_router + media proxy /api/media/*\nMETAAGENT_MEDIA_PLAYER_URL| MEDIA
-    MA -->|ai::LanguageAiRuntime → /ai/chat\nMETAAGENT_OLLAMA_URL| OLLAMA
+    MA -->|"/api/connectors/{id}/call | launch | stop"| CONN
+    MA -->|ai::LanguageAiRuntime → /ai/chat\n--ollama-url| OLLAMA
+
+    ADAPTER[("illustrative: LoRA adapter inference\nOCR→summary, FastAPI :8008")]
+    MEDIA[("illustrative: media-player-cpp\nopenFrameworks :8080")]
+    CONN -.->|example http_peer| ADAPTER
+    CONN -.->|example launched_process| MEDIA
 ```
 
-| App | What it owns | Seam in this repo |
-| --- | ------------ | ----------------- |
-| **1. metaagent** | Control logic, command + signal dispatch, HTTP in/out, corpus reading, process control | — |
-| **2. Adapter inference** (LoRA) | Purpose-trained **LLaVA 1.5 LoRA**; OCR-text → summary generation only ([vecnode/pre-training](https://github.com/vecnode/pre-training), FastAPI) | Desktop host `/api/adapter/status` + `/api/adapter/summarize` proxy to `adapter_url` |
-| **3. media-player-cpp** | Playback of clips/subtitles/focus crops | `net::SignalRouter` (triggers) + the desktop host's `/api/media/*` proxy to `media_player_base_url` |
+| Concern | What it owns | Seam in this repo |
+| ------- | ------------ | ----------------- |
+| **metaagent core + droidcli** | Control logic, command + signal + task dispatch, HTTP in/out, corpus reading, process control | — |
+| **A connector** (operator-configured) | Whatever the operator points it at — an inference server, a media player, anything reachable by URL or local command | `net::Connector` (`http_peer` or `launched_process`), registered via `--config` or `POST /api/connectors` |
 
-> **Two distinct AI models.** The **LoRA adapter** (app #2) is the trained model,
-> used *only* for its OCR→summary generation, surfaced as the *Document Adapter*
-> panel. **Ollama** is a separate, ancillary general **text-generation** endpoint
-> behind `ai::LanguageAiRuntime` / `/ai/chat` (the *Agent* panel) and the
-> subtitle condenser — it is not one of the three apps. All endpoints/models are
-> **configuration**, never baked into core.
+> **Ollama stays separate.** Ollama is a general **text-generation** endpoint
+> behind `ai::LanguageAiRuntime` / `/ai/chat` — it is not a connector, it's
+> built into the core AI seam. Any purpose-trained inference service (an
+> OCR→summary LoRA adapter, or anything else) is registered as an ordinary
+> `http_peer` connector instead, with no special-cased code path. All
+> endpoints/models are **configuration**, never baked into core.
 
 ---
 
@@ -77,9 +84,10 @@ metaagent/
 │   ├── app/                       Command registry, runtime catalog
 │   ├── ai/                        Ollama text-gen client + LanguageAiRuntime
 │   └── runtime/                   Host service callbacks (recording/AI)
-├── app/                           Desktop host (WebView + httplib, process manager)
-├── tools/                         Headless metaagent_server CLI + HTTP helpers
+├── cli/                            droidcli host: DroidHost, ProcessManager, HTTP route mount, entrypoint
+├── tools/                         mini_http_server + sync_http_client (raw-socket HTTP, WinHTTP for https://)
 ├── tests/                         One *_test.cpp per core module
+├── config/                         Example connector config (connectors.example.json)
 ├── external/                      Submodules: pre-training + media-player-cpp
 ├── distribute/                    Dist templates (run_all.bat, README)
 ├── CMakeLists.txt
@@ -100,20 +108,24 @@ Public entry point: `#include "metaagent.h"`.
 | `media/corpus`            | Load OCR/objects corpora; subtitles, previews, focus rects, masks     |
 | `net/router` + `handlers` | `/health`, `/echo`, `/notify`, `/ai/chat`                             |
 | `net/signal_router`       | **Network trigger**: register peer `SignalTarget`s, dispatch `SignalEnvelope`s via `SignalTransportFn`, log delivery |
+| `net/connector`           | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
 | `net/google_search`       | Google Programmable Search Engine (Custom Search JSON API) URL build + hand-rolled JSON response parse |
 | `net/json`                | Escape/build/extract JSON fields (no external JSON dependency)        |
 | `notify/parse`            | Notify body parsing (JSON or text)                                    |
 | `session/types` + `status`| `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
 | `app/commands`            | `CommandId`, parse + validate against session features                |
+| `app/tasks`               | **Persistent task queue**: `Task`, `TaskQueue` (enqueue/claim_next/complete/fail/find/list), JSON build/parse |
 | `app/runtime_catalog`     | Host-local runtime descriptors for the UI                             |
 | `ai/ollama_client`        | Ollama request/response shaping                                       |
-| `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from the LoRA adapter, which the desktop host proxies directly |
+| `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from any connector-registered inference peer |
 | `runtime/host_interfaces` | Recording + AI snapshots/toggles (`HostServiceCallbacks`)             |
 
-The desktop host (`app/src/`) additionally owns: the endpoints/config store,
-media-player proxy + subtitle push (with Ollama condensing), adapter proxy,
-dataset CSV reader (`/api/dataset`), and the **ProcessManager** (Job
-Object/process-group launch of the peer apps with PID tracking).
+The droidcli host (`cli/`) additionally owns: the config store, the
+`ConnectorRegistry` + `TaskQueue` instances and their dispatch (`call_connector`
+for `http_peer`, `launch_connector`/`stop_connector` for `launched_process`,
+`tick_tasks()` draining the queue), and the **ProcessManager** (Job
+Object/process-group launch of any `launched_process` connector with PID
+tracking).
 
 ---
 
@@ -151,16 +163,20 @@ flowchart LR
 ```mermaid
 flowchart LR
     Client[External HTTP client]
-    Mount[httplib mount app/ or mini server tools/]
+    Mount[tools::MiniHttpServer + cli::make_droidcli_route_dispatch]
     Router[metaagent::net::Router]
     Handlers[handlers.cpp]
 
     Client --> Mount --> Router --> Handlers
 ```
 
-Inbound: the host binds the socket and converts requests to `net::HttpRequest`;
-core routes and handles. Outbound: the host's `sync_http_client` performs the
-POST/GET; core builds and parses the bodies.
+Inbound: `tools::MiniHttpServer` (raw-socket, no httplib) binds the socket and
+converts requests to `net::HttpRequest`. It first tries the portable
+`net::RouteTable` (`/health`, `/echo`, `/notify`, `/ai/chat`); anything else
+falls through to `cli::make_droidcli_route_dispatch`'s `CustomRouteFn`, which
+covers `/api/*` (status/config/ollama/process/command/connectors/tasks).
+Outbound: `tools::sync_http_client` performs the POST/GET (raw socket for
+`http://`, WinHTTP for `https://`); core builds and parses the bodies.
 
 ---
 
@@ -177,7 +193,8 @@ ctest --test-dir build --output-on-failure
 
 Tests: `media_decode_test`, `corpus_test`, `net_handler_test`,
 `app_command_test`, `host_interfaces_test`, `ollama_client_test`,
-`language_runtime_test`, `signal_router_test`, `runtime_catalog_test`.
+`language_runtime_test`, `signal_router_test`, `runtime_catalog_test`,
+`google_search_test`, `connector_test`, `task_queue_test`.
 
 On Windows the whole tree builds with **one MSVC runtime**
 (`CMAKE_MSVC_RUNTIME_LIBRARY` in the root CMakeLists: dynamic Debug, static
@@ -195,7 +212,13 @@ Release) — never set a per-target runtime that diverges.
 3. **New validated command** — `CommandId` + `validate_command` in
    `app/commands`, a host-side handler in `apply_command_side_effects`.
 4. **New corpus field** — extend `media/corpus` parsing + `corpus_test`.
-5. **New controlled process** — a `ProcessManager` key + host method + route +
-   UI button (see `/api/media/build` as the template).
+5. **New connector (peer app)** — usually **config-only**: add an entry to a
+   `connectors.json` (or `POST /api/connectors`) with `kind: "http_peer"` and a
+   `base_url`; droidcli proxies calls to it via `/api/connectors/{id}/call`
+   with zero new code. For `kind: "launched_process"`, `ProcessManager`
+   already generalizes over any `launch_cmd`/`work_dir` — again no new code
+   needed unless the process has bespoke lifecycle requirements beyond
+   launch/stop, in which case extend `DroidHost::launch_connector`/
+   `stop_connector` in `cli/host.cpp`.
 
 Product usage, HTTP tables, and env vars: repository root `[README.md](./README.md)`.

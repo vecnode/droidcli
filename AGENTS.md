@@ -6,28 +6,40 @@ guide; `CLAUDE.md` defers to it.
 
 ## What this repository is
 
-`metaagent` is the **C++ agent controller and network trigger** for a
-three-application system. It is a portable C++17 control library plus a desktop
-host (`app/`, window title **agent core 0.2.0**) and a headless server
-(`tools/`). It does not render or play media itself — it coordinates the other
-two applications over HTTP.
+`metaagent` is the **C++ agent controller and network trigger**, built as a
+portable C++17 control library (`src/`) plus **droidcli**, a headless CLI
+agent daemon (`cli/`, entrypoint `cli/droidcli.cpp`). There is no windowed
+desktop app anymore — `app/` (WebView2/GTK) was deleted entirely. droidcli is
+a process you start once; it keeps a persistent task queue and dispatches
+queued tasks to whatever peers are registered as **connectors**.
 
-Versioning: the library/app are at **0.2.0** — release 0.2.x builds freely, but
+> **Not a namespace rename.** "droidcli" is the CLI binary/product name only.
+> The C++ namespace (`metaagent::`) and the repo/library name stay `metaagent`
+> — do not attempt a full rename.
+
+Versioning: the library is at **0.2.0** — release 0.2.x builds freely, but
 do **not** bump to 0.3 without the owner's say-so.
 
-| # | Application | Role | This repo's link to it |
-| - | ----------- | ---- | ---------------------- |
-| 1 | **metaagent** (this repo) | Agent controller + network trigger: command + signal dispatch, corpus reading, HTTP in/out, process control | — |
-| 2 | **Adapter inference** (LoRA) | The trained **LLaVA 1.5 LoRA** adapter — OCR-text → summary generation *only*. Already working; FastAPI service in its own repo ([vecnode/pre-training](https://github.com/vecnode/pre-training), local at `C:\Users\luisarandas\Desktop\UFO_FILES`) | Desktop host proxy: `/api/adapter/status`, `/api/adapter/summarize` → `METAAGENT_ADAPTER_URL` (default `http://127.0.0.1:8008`, `POST /api/summarize`) |
-| 3 | **media-player-cpp** (openFrameworks) | Plays the media that metaagent coordinates (clips, subtitles, focus crops) | Reached via the host media proxy (`/api/media/*` → `METAAGENT_MEDIA_PLAYER_URL`, default `http://127.0.0.1:8080`) |
+**No more hardcoded peers.** Where 0.2.0 hardcoded two specific peer apps (a
+LoRA adapter inference service and an openFrameworks media player) behind
+`/api/adapter/*` and `/api/media/*`, droidcli instead has a generic
+**connector** concept (`src/net/connector.hpp`, `net::Connector` /
+`net::ConnectorRegistry`): a connector is either an `http_peer` (reached by
+URL, proxied via `/api/connectors/{id}/call`) or a `launched_process` (a
+local command droidcli can launch/stop and PID-track via `ProcessManager`,
+through `/api/connectors/{id}/launch|stop`). Connectors are registered from a
+`--config connectors.json` file or at runtime via `POST /api/connectors` —
+core has zero compiled-in knowledge of any specific peer. Work for a
+connector can be queued as a `Task` (`src/app/tasks.hpp`,
+`app::TaskQueue`) and droidcli's daemon loop drains it via
+`DroidHost::tick_tasks()`.
 
-> **Two separate AI models — keep them apart.** **Ollama** (`METAAGENT_OLLAMA_URL`,
-> `:11434`) is an *ancillary* general **text-generation** endpoint behind
-> `ai::LanguageAiRuntime` / `/ai/chat` (the *Agent* panel + subtitle condenser) —
-> it is **not** one of the three apps. The **LoRA adapter** (app #2, `:8008`) is
-> the purpose-trained model used only for its OCR→summary generation (the
-> *Document Adapter* panel). They have different endpoints, different host code
-> paths, and different UI panels. Never route adapter work through the Ollama seam.
+> **Ollama stays separate.** `ai::LanguageAiRuntime` / `/ai/chat` is an
+> ancillary general **text-generation** endpoint (`--ollama-url`, default
+> `:11434`) — it is not a connector, it's built into the core AI seam. Any
+> purpose-trained inference service (the old LoRA adapter, or anything else)
+> is registered as an ordinary `http_peer` connector instead, with no
+> special-cased code path.
 
 > **No engine code.** Unreal Engine / particle / camera support was removed from
 > this repo entirely (0.2.0). Do not reintroduce engine-scoped modules, UE
@@ -53,31 +65,39 @@ metaagent.h / metaagent.cpp   Umbrella public API; single TU includes all module
 src/
   core/        Vec3, math, log_sink, value types
   media/       PNG/JPEG decode, probe, MediaStore, corpus (OCR/objects/summaries)
-  net/         Router + handlers (inbound), signal_router (triggers), json
+  net/         Router + handlers (inbound), signal_router (triggers), connector
+               (generic peer registry), json
   notify/      Notify body parsing
   session/     RuntimeSession + status strings
-  app/         Command registry, runtime catalog
-  ai/          Ollama text-gen client + LanguageAiRuntime (not the LoRA adapter)
+  app/         Command registry, runtime catalog, tasks (persistent task queue)
+  ai/          Ollama text-gen client + LanguageAiRuntime
   runtime/     Host service callbacks (recording/AI)
-app/           Desktop host: WebView + embedded httplib server (MetaAgentHost),
-               endpoints/config store, media/adapter proxies, dataset reader,
-               ProcessManager (PID-tracked launch of the peer apps)
-tools/         Headless metaagent_server CLI + mini_http_server
+cli/           droidcli host: DroidHost (config store, ConnectorRegistry +
+               TaskQueue, Ollama/Google-search wiring), ProcessManager
+               (PID-tracked launch of any launched_process connector), HTTP
+               route mount (CustomRouteFn), droidcli.cpp entrypoint
+tools/         mini_http_server (raw-socket HTTP server, custom-route
+               fallback hook) + sync_http_client (outbound HTTP/HTTPS)
 tests/         One *_test.cpp per core module (no engine, no network)
+config/        connectors.example.json (illustrative connector config)
 cmake/         FFmpeg.cmake (auto-download helper)
 third_party/   Vendored deps (FFmpeg is local-only, git-ignored)
-external/      Submodules: pre-training (app #2) + media-player-cpp (app #3)
+external/      Submodules: pre-training + media-player-cpp (illustrative
+               peers, not built-in — see config/connectors.example.json)
 distribute/    Templates staged into the dist (run_all.bat, README_DIST.txt)
 ```
 
 Public include is `#include "metaagent.h"`. Everything compiles through the
 single `metaagent.cpp` translation unit — **a new `src/<module>/foo.cpp` must be
 `#include`d from `metaagent.cpp`** or it will not be built into the library.
+`cli/*.cpp` and `tools/*.cpp` are NOT part of that TU — they're separate
+translation units linked into the `droidcli` executable target.
 
 ## Build, run, test
 
-All commands from the repo root. CMake 3.20+. Internet on first configure when
-building the app (FetchContent + FFmpeg auto-download).
+All commands from the repo root. CMake 3.20+. Internet on first configure
+(FFmpeg auto-download). There is no windowed app anymore, so no WebView2/GTK
+runtime is required to build or run anything in this repo.
 
 ```sh
 # Library + tests only (fast inner loop; same on Windows/Linux)
@@ -85,12 +105,12 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 
-# Desktop app (Windows, MSVC x64, needs WebView2 Runtime)
+# droidcli (Windows, MSVC x64)
 build_and_run.bat            # Debug/Release, --configure, --clean, --no-run
 
-# Desktop app (Linux, needs GTK3 + WebKit2GTK dev packages)
-cmake -B build -DMETAAGENT_BUILD_APP=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j && ./build/metaagent-app  # or ./app/build_and_run.sh
+# droidcli (Linux)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j && ./build/droidcli
 
 # Portable distribution (Release build of everything + dist/ folder + zip)
 build_and_distribute.bat   # see README "Distribution"; needs MSYS2 for the media player
@@ -99,11 +119,13 @@ build_and_distribute.bat   # see README "Distribution"; needs MSYS2 for the medi
 **Distribution rules:** the whole tree builds with **one MSVC runtime**
 (`CMAKE_MSVC_RUNTIME_LIBRARY` in the root CMakeLists: dynamic Debug, static
 Release) — never set a per-target runtime that diverges, the Release link breaks.
-The app auto-discovers the dist layout (sibling `media-player/`, `adapter/deploy/`,
-`datasets/` next to the exe — `apply_dist_layout_defaults` in `app/src/main.cpp`);
-keep that in sync with `build_and_distribute.bat` staging. Weights and media are
-git-ignored in the submodules — the distribute script copies them from configured
-working copies, never from `external/`. `.bat` files must be **CRLF**.
+Unlike the old windowed app, droidcli does **not** auto-discover a dist layout
+by path convention — connectors are explicit config
+(`connectors.json`/`--config`); keep `build_and_distribute.bat` staging and
+`distribute/run_all.bat` in sync if you change that contract. Weights and
+media are git-ignored in the submodules — the distribute script copies them
+from configured working copies, never from `external/`. `.bat` files must be
+**CRLF**.
 
 **Always run `ctest` after touching anything in `src/`.** Tests are
 engine-free and network-free by design; if a change makes a core module require a
@@ -116,7 +138,7 @@ real socket, GPU, or file, the change is in the wrong layer.
 - **No framework-type leak in core public types.** Use `core::String`,
   `core::Array<T>`, `core::Vec3` — never raw `std::vector` in a public core header.
 - **Namespaces** mirror folders: `metaagent::net`, `metaagent::ai`,
-  `metaagent::app`, `metaagent::app_host` (desktop host only).
+  `metaagent::app`, `metaagent::cli` (droidcli host only, not portable).
 - **Export macro:** annotate public free functions with `METAAGENT_API` (see
   `export.hpp`); inline class methods don't need it.
 - **Host I/O via `std::function` callbacks**, never direct calls into a
@@ -130,8 +152,7 @@ These mirror `ARCHITECTURE.md` → "Extension points". Touch all the listed site
 in one change so the core/host/test trio stays in sync:
 
 1. **HTTP route (inbound)** — handler in `net/handlers.cpp`, register in the
-   router; mount it in the host (`app/src/metaagent_http_mount.cpp` and/or
-   `tools/metaagent_server.cpp`).
+   router; mount it in `cli/http_mount.cpp`'s `CustomRouteFn`.
 2. **Signal/trigger (the "network trigger" path)** — extend
    `net/signal_types` (envelope/target shape + JSON) and `net/signal_router`
    (dispatch/log); the host supplies the `SignalTransportFn`. Add a
@@ -141,13 +162,19 @@ in one change so the core/host/test trio stays in sync:
 4. **Ollama text-gen** — change request/response shaping in `ai/ollama_client` +
    `ai/language_runtime`; the host owns the actual POST via
    `LanguageAiTransportCallbacks`. Do not bake a specific model/endpoint into core.
-5. **LoRA adapter integration** — this is a *separate* seam from Ollama. The
-   desktop host proxies it directly (`MetaAgentHost::build_adapter_status_json` /
-   `proxy_adapter_summarize` in `app/src/metaagent_host.cpp`, mounted at
-   `/api/adapter/*`). Keep it out of the `ai/` text-gen path; add fields to
-   `HostConfig::adapter_url` + `update_config` + the Settings Endpoints table.
-6. **New controlled process** — a `ProcessManager` key + host method + route +
-   UI button (see `/api/media/build` as the template).
+5. **New connector (peer app)** — usually **config-only**, not a code change.
+   For an `http_peer`, add an entry to `connectors.json` (or
+   `POST /api/connectors`) with a `base_url`; `DroidHost::call_connector`
+   proxies to it generically via `/api/connectors/{id}/call`. For a
+   `launched_process`, `ProcessManager` already generalizes over any
+   `launch_cmd`/`work_dir` (see `cli/process_manager.{hpp,cpp}`) — only touch
+   `DroidHost::launch_connector`/`stop_connector` in `cli/host.cpp` if the
+   process needs bespoke lifecycle behavior beyond launch/stop.
+6. **New task command** — `app::Task.command` is dispatched in
+   `DroidHost::tick_tasks()` (`cli/host.cpp`): `"launch"`/`"stop"` map to
+   `launch_connector`/`stop_connector`, anything else is treated as an HTTP
+   path called on the task's `connector_id` via `call_connector`. Extend that
+   `if`/`else if` chain for a new dispatch kind.
 7. **Outbound HTTPS to an external (non-localhost) API** — `tools/sync_http_client`
    only did plain HTTP over raw sockets until the Google search feature needed
    real TLS; `https://` URLs now route through WinHTTP (Windows-native, no new
@@ -163,75 +190,64 @@ in one change so the core/host/test trio stays in sync:
 - Don't commit build trees or vendored binaries: `build/`, `build-msvc/`, `dist/`,
   `third_party/ffmpeg/`, `*.exe`, `*.dll`, `*.lib` are all git-ignored — keep it
   that way.
-- Don't hardcode secrets, ports, or peer URLs/paths in core. Ports/URLs/dirs for
-  the media player and the adapter are host configuration (env vars below).
+- Don't hardcode secrets, ports, or peer URLs/paths in core. Peer endpoints are
+  connector config (`connectors.json` / `POST /api/connectors`), never baked
+  into `src/`.
 - Don't add a parallel command table or JSON schema in a host — the core is the
   single source of truth; hosts only bridge I/O.
 - Don't reintroduce engine/UE modules or scoping (removed at 0.2.0).
+- Don't reintroduce a windowed app (WebView2/GTK) or hardcode a specific peer
+  (adapter/media-player) back into core or the connector dispatch path —
+  peers are config, not code.
 - Don't break the host seams (`HostServiceCallbacks`, `RouteTable`,
-  `SignalTransportFn`) without updating `ARCHITECTURE.md`.
+  `SignalTransportFn`, `ConnectorRegistry`, `TaskQueue`) without updating
+  `ARCHITECTURE.md`.
 
 ## Host configuration
 
-The **desktop app** (`app/src/main.cpp`) reads env vars:
+**droidcli** (`cli/droidcli.cpp`) is configured by CLI flags: `--port`
+(default `30080`), `--config <path>` (connectors JSON file, loaded via
+`net::parse_connector_from_json` per array entry), `--no-ai`, `--ollama-url`,
+`--ollama-model`, `--daemon` (documented no-op — always runs in the
+foreground; see README "Deviations"). Google search polling is configured via
+env vars, read once at startup:
 
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
-| `METAAGENT_NO_AI` | off | `1` disables `/ai/chat` (Ollama text-gen) |
-| `METAAGENT_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama **text-gen** base URL (ancillary, not app #2) |
-| `METAAGENT_OLLAMA_MODEL` | `llama3.2` | Ollama text-gen model name |
-| `METAAGENT_SYSTEM_PROMPT` | built-in | System prompt for Ollama text-gen turns |
-| `METAAGENT_ADAPTER_URL` | `http://127.0.0.1:8008` | **LoRA adapter** inference base URL (app #2) |
-| `METAAGENT_MEDIA_PLAYER_URL` | `http://127.0.0.1:8080` | media-player-cpp base URL (app #3) |
-| `METAAGENT_MEDIA_DATA_DIR` | empty | Local media dataset dir (corpus + clip mirror fallback) |
-| `METAAGENT_MEDIA_PLAYER_DIR` | empty | media-player-cpp project dir (build/run) |
-| `METAAGENT_MEDIA_BUILD_CMD` | `make Release` | Media player build command (MSYS2 MinGW64) |
-| `METAAGENT_MEDIA_RUN_CMD` | `media-player-cpp.exe` | Media player run binary (launched in project `bin/`) |
-| `METAAGENT_ADAPTER_DIR` | empty | pre-training `deploy/` dir (uv server) |
-| `METAAGENT_ADAPTER_LAUNCH_CMD` | `deploy.bat` | Adapter server launch command |
-| `METAAGENT_DATASET_DIR` | empty | pre-training `output/` dir; corpus CSVs read by `GET /api/dataset` |
-| `METAAGENT_AUTOSTART_MEDIA_PLAYER` | on (default-on flag) | `0` disables auto-launching the media player on host init |
-| `METAAGENT_AUTOSTART_ADAPTER` | on (default-on flag) | `0` disables auto-launching the adapter server on host init |
 | `METAAGENT_GOOGLE_API_KEY` | empty | Google Programmable Search Engine API key |
 | `METAAGENT_GOOGLE_CSE_ID` | empty | Google Programmable Search Engine ID ("cx") |
 | `METAAGENT_GOOGLE_SEARCH_QUERY` | empty | Query re-run periodically (search is a no-op until all three Google vars are set) |
-| `METAAGENT_GOOGLE_SEARCH_INTERVAL_SECONDS` | `10` | Re-run interval |
+
+`google_search_interval_seconds` (default `10`) and the Ollama URL/model are
+also runtime-editable via `POST /api/config` / `POST /api/ollama/config`.
 
 **Google search** lives in `src/net/google_search.{hpp,cpp}` (core: URL build +
-hand-rolled JSON parse, no JSON library) + `MetaAgentHost::run_google_search()`
+hand-rolled JSON parse, no JSON library) + `DroidHost::run_google_search()`
 (host: the actual HTTPS call via `tools::sync_http_get`, logged to the `search`
-app-log channel). `MetaAgentHost::tick()` accumulates `delta_seconds` and fires
-it on a detached background thread every `google_search_interval_seconds` -
-never on the io_context tick thread, since the HTTP call blocks. The API key is
-never echoed back by `GET /api/config` (only `google_api_key_configured: bool`)
-- keep that asymmetry if you touch `build_config_json`/`update_config`.
+app-log channel). `DroidHost::tick()` accumulates `delta_seconds` (called from
+the droidcli poll loop) and fires the search on a detached background thread
+every `google_search_interval_seconds` - never on the poll thread, since the
+HTTP call blocks. The API key is never echoed back by `GET /api/config` (only
+`google_api_key_configured: bool`) - keep that asymmetry if you touch
+`build_config_json`/`update_config`.
 
-**Centralised process control** lives in `app/src/process_manager.{hpp,cpp}`
+**Centralised process control** lives in `cli/process_manager.{hpp,cpp}`
 (Windows Job Object / POSIX process group, so stop kills the whole tree; bare
 command names are made `.\`-relative when they exist in the working dir because
-of `NoDefaultCurrentDirectoryInExePath`). The host
-(`MetaAgentHost::build_media_player` / `run_media_player` /
-`launch_adapter_server` / `stop_*`, mounted at `/api/media/build|run`,
-`/api/media/process/stop`, `/api/adapter/launch`, `/api/adapter/process/stop`,
-`/api/process/status`) launches the peer apps and reports their PIDs. Commands
-and project dirs are configuration — never hardcode a user's paths in core.
+of `NoDefaultCurrentDirectoryInExePath`). `DroidHost::launch_connector` /
+`stop_connector` (mounted at `/api/connectors/{id}/launch|stop`,
+`/api/process/status`) launch `launched_process` connectors and report their
+PIDs, keyed by connector id (not a hardcoded process name). Commands and work
+dirs come from the connector's `launch_cmd`/`work_dir` fields — never
+hardcode a user's paths in core.
 
-**Auto-start on host init:** `MetaAgentHost::initialize()` calls `run_media_player()`
-and `launch_adapter_server()` (launch only, never build) right after setup,
-gated by `HostConfig::auto_start_media_player` / `auto_start_adapter` (both
-default `true`, read via `env_flag_enabled_default_on()` in `main.cpp` — note
-this is the inverse-default sibling of `env_flag_enabled()`: unset/`1` = on,
-only `0`/`false`/`no` turns it off). Silently no-ops if the matching
-`*_project_dir` is empty. Runs after `initialize()`'s lock scope releases,
-since `run_media_player`/`launch_adapter_server` take the lock themselves.
-
-All URLs/model/paths are also editable live in the app's **Settings → Endpoints**
-table, which `POST`s to `/api/config` (`MetaAgentHost::update_config`) and
-overrides the env var for the running session.
-
-The **headless server** (`tools/metaagent_server.cpp`) is configured by CLI
-flags instead: `--port` (default `30080`), `--ollama-url`, `--ollama-model`,
-`--no-ai`.
+There is no auto-start-on-init anymore: droidcli only launches a
+`launched_process` connector when told to, via `POST
+/api/connectors/{id}/launch` or a queued `{"command":"launch"}` task. (The
+old windowed app auto-launched both hardcoded peers on startup; that
+behavior was peer-specific and did not generalize, so it was dropped rather
+than ported — an operator who wants auto-start can queue a launch task from
+their own startup script instead.)
 
 Product/UI controls and HTTP route tables live in `README.md`; deep design and
 layer model live in `ARCHITECTURE.md`. Keep those two in sync when you change
