@@ -12,6 +12,8 @@ core::String chat_role_to_string(const ChatRole role)
 		return "user";
 	case ChatRole::Assistant:
 		return "assistant";
+	case ChatRole::Tool:
+		return "tool";
 	default:
 		return "user";
 	}
@@ -26,6 +28,10 @@ ChatRole chat_role_from_string(const core::String& role)
 	if (role == "assistant")
 	{
 		return ChatRole::Assistant;
+	}
+	if (role == "tool")
+	{
+		return ChatRole::Tool;
 	}
 	return ChatRole::User;
 }

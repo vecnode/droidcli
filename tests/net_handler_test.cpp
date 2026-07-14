@@ -40,11 +40,6 @@ int main()
 		droidcli::notify::parse_notify_body("{\"message\":\"from_core\"}");
 	assert(parsed.message.text == "from_core");
 
-	const droidcli::app::CommandResult validation = droidcli::app::validate_command(
-		droidcli::app::CommandId::ToggleNetworkingRuntime,
-		context.session);
-	assert(validation.success);
-
 	droidcli::ai::LanguageAiRuntime runtime;
 	runtime.set_system_prompt("test");
 	droidcli::ai::LanguageAiTransportCallbacks transport;

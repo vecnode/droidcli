@@ -27,6 +27,14 @@ struct MiniHttpServerOptions {
 	droidcli::ai::OllamaConfig ollama_config;
 	droidcli::core::String system_prompt;
 	CustomRouteFn custom_dispatch;
+
+	// Bearer token required on every /api/* route and on /ai/chat (Ollama calls
+	// cost money/time, so they're gated for consistency even though they can't
+	// execute shell commands). /health, /echo, /notify stay open - see
+	// README.md's Security section for the full rationale. Never left empty in
+	// practice: droidcli.cpp always supplies a configured, env, or generated
+	// token before starting the server.
+	droidcli::core::String api_token;
 };
 
 class MiniHttpServer {

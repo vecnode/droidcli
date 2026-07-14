@@ -39,16 +39,6 @@ bool split_id_and_rest(
 	return !out_id.empty();
 }
 
-core::String extract_command_name(const core::String& body)
-{
-	core::String command = net::extract_json_string_field(body, "command");
-	if (command.empty())
-	{
-		command = net::extract_json_string_field(body, "name");
-	}
-	return command;
-}
-
 } // namespace
 
 tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
@@ -67,11 +57,6 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 		if (is_get && path == "/api/network/status")
 		{
 			set_json(response, host.build_network_status_json());
-			return true;
-		}
-		if (is_get && path == "/api/runtimes")
-		{
-			set_json(response, host.build_runtime_catalog_json());
 			return true;
 		}
 		if (is_get && path == "/api/config")
@@ -109,15 +94,14 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.build_process_status_json());
 			return true;
 		}
-		if (is_post && path == "/api/command")
+		if (is_post && path == "/api/run")
 		{
-			const core::String command_name = extract_command_name(request.body);
-			if (command_name.empty())
-			{
-				set_json(response, "{\"error\":\"missing command\"}", net::HttpStatus::BadRequest);
-				return true;
-			}
-			set_json(response, host.dispatch_command(command_name));
+			set_json(response, host.run_command(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/agent/turn")
+		{
+			set_json(response, host.agent_turn(request.body));
 			return true;
 		}
 

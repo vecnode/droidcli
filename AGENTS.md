@@ -56,10 +56,9 @@ connector can be queued as a `Task` (`src/app/tasks.hpp`,
 
 Core never links httplib, FFmpeg transport, WebView2, or GTK directly — hosts
 inject those through callbacks (`LanguageAiTransportCallbacks`,
-`SignalTransportFn`, `HostServiceCallbacks`, `HandlerContext`). When you add a
-feature, decide which side of this line it falls on **before** writing code. A
-new transport is a host concern; a new message shape or validation rule is a
-core concern.
+`HandlerContext`). When you add a feature, decide which side of this line it
+falls on **before** writing code. A new transport is a host concern; a new
+message shape or validation rule is a core concern.
 
 ## Repository map
 
@@ -71,15 +70,16 @@ src/
   net/         Router + handlers (inbound), connector (generic peer registry), json
   notify/      Notify body parsing
   session/     RuntimeSession + status strings
-  app/         Command registry, runtime catalog, tasks (persistent task queue)
-  ai/          Ollama text-gen client + LanguageAiRuntime
-  runtime/     Host service callbacks (recording/AI)
+  app/         tasks (persistent task queue)
+  ai/          Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime
 cli/           droidcli host: DroidHost (config store, ConnectorRegistry +
-               TaskQueue, Ollama wiring), ProcessManager (PID-tracked launch
-               of any launched_process connector), HTTP route mount
-               (CustomRouteFn), droidcli.cpp entrypoint
-tools/         mini_http_server (raw-socket HTTP server, custom-route
-               fallback hook) + sync_http_client (outbound HTTP/HTTPS)
+               TaskQueue, Ollama wiring, agent_turn tool-calling loop),
+               ProcessManager (PID-tracked launch of any launched_process
+               connector), command_runner (one-shot shell exec), HTTP route
+               mount (CustomRouteFn), droidcli.cpp entrypoint (incl. bearer
+               token resolution)
+tools/         mini_http_server (raw-socket HTTP server, bearer-token check,
+               custom-route fallback hook) + sync_http_client (outbound HTTP/HTTPS)
 tests/         One *_test.cpp per core module (no engine, no network)
 config/        connectors.example.json (generic, illustrative connector config)
 cmake/         FFmpeg.cmake (auto-download helper)
@@ -149,13 +149,19 @@ These mirror `ARCHITECTURE.md` → "Extension points". Touch all the listed site
 in one change so the core/host/test trio stays in sync:
 
 1. **HTTP route (inbound)** — handler in `net/handlers.cpp`, register in the
-   router; mount it in `cli/http_mount.cpp`'s `CustomRouteFn`.
-2. **Validated command** — `CommandId` + `validate_command` in `app/commands`,
-   a host-side handler in `apply_command_side_effects`.
-3. **Ollama text-gen** — change request/response shaping in `ai/ollama_client` +
+   router; mount it in `cli/http_mount.cpp`'s `CustomRouteFn`. Every `/api/*`
+   route (and `/ai/chat`) is gated by the bearer-token check in
+   `tools::MiniHttpServer::poll_once` before any dispatch runs — no per-route
+   auth code needed.
+2. **Ollama text-gen** — change request/response shaping in `ai/ollama_client` +
    `ai/language_runtime`; the host owns the actual POST via
    `LanguageAiTransportCallbacks`. Do not bake a specific model/endpoint into core.
-4. **New connector (peer app)** — usually **config-only**, not a code change.
+   Tool-calling (`ToolDefinition`/`ToolCall`, `"tools"` request field,
+   `message.tool_calls` response parsing) lives in `ai/ollama_client` too, but
+   the multi-hop loop that executes tool calls is host-side
+   (`DroidHost::agent_turn` in `cli/host.cpp`) since it calls back into
+   connector/task/process methods that aren't portable.
+3. **New connector (peer app)** — usually **config-only**, not a code change.
    For an `http_peer`, add an entry to `connectors.json` (or
    `POST /api/connectors`) with a `base_url`; `DroidHost::call_connector`
    proxies to it generically via `/api/connectors/{id}/call`. For a
@@ -163,16 +169,24 @@ in one change so the core/host/test trio stays in sync:
    `launch_cmd`/`work_dir` (see `cli/process_manager.{hpp,cpp}`) — only touch
    `DroidHost::launch_connector`/`stop_connector` in `cli/host.cpp` if the
    process needs bespoke lifecycle behavior beyond launch/stop.
-5. **New task command** — `app::Task.command` is dispatched in
+4. **New task command** — `app::Task.command` is dispatched in
    `DroidHost::tick_tasks()` (`cli/host.cpp`): `"launch"`/`"stop"` map to
-   `launch_connector`/`stop_connector`, anything else is treated as an HTTP
-   path called on the task's `connector_id` via `call_connector`. Extend that
-   `if`/`else if` chain for a new dispatch kind.
-6. **Outbound HTTPS to an external (non-localhost) API** — `tools/sync_http_client`
+   `launch_connector`/`stop_connector`, `"run"` maps to
+   `cli::run_command_once` (see `cli/command_runner.{hpp,cpp}`), anything else
+   is treated as an HTTP path called on the task's `connector_id` via
+   `call_connector`. Extend that `if`/`else if` chain for a new dispatch kind,
+   and set `Task::result_json` if the new command produces more than a bare
+   success flag.
+5. **Outbound HTTPS to an external (non-localhost) API** — `tools/sync_http_client`
    routes `https://` URLs through WinHTTP (Windows-native, no new dependency)
    while `http://` keeps the original raw-socket path. Any `https://` connector
    or external integration gets this transport for free — just build the URL.
    Don't add a second, parallel HTTPS implementation.
+6. **New agent tool** — add to `DroidHost::agent_tool_definitions()` (name,
+   description, JSON Schema parameters) and a matching branch in
+   `DroidHost::execute_agent_tool()` (`cli/host.cpp`). Tools call back into
+   `DroidHost`'s own methods (connectors/tasks/run_command) — never a second,
+   parallel command dispatch table.
 
 **Every new core `src/<module>/*_test.cpp` must be registered in
 `CMakeLists.txt`** and pass under `ctest`.
@@ -191,18 +205,27 @@ in one change so the core/host/test trio stays in sync:
 - Don't reintroduce a windowed app (WebView2/GTK) or hardcode a specific peer
   (adapter/media-player) back into core or the connector dispatch path —
   peers are config, not code.
-- Don't break the host seams (`HostServiceCallbacks`, `RouteTable`,
-  `SignalTransportFn`, `ConnectorRegistry`, `TaskQueue`) without updating
-  `ARCHITECTURE.md`.
+- Don't break the host seams (`RouteTable`, `ConnectorRegistry`, `TaskQueue`)
+  without updating `ARCHITECTURE.md`.
+- Don't add a new `/api/*` (or `/ai/chat`) route that bypasses the bearer-token
+  check — it's centralized in `tools::MiniHttpServer::poll_once`
+  (`request_requires_auth`/`is_authorized` in `tools/mini_http_server.cpp`);
+  every route under those paths gets it automatically, so there should never
+  be a reason to add a second, route-local auth check.
+- Don't let `DroidHost::agent_turn`'s tool loop call into anything that isn't
+  already a `DroidHost` method with its own validation — tools are a second
+  entry point into the same surface `/api/*` exposes, not a way around it.
 
 ## Host configuration
 
 **droidcli** (`cli/droidcli.cpp`) is configured by CLI flags: `--port`
 (default `30080`), `--config <path>` (connectors JSON file, loaded via
 `net::parse_connector_from_json` per array entry), `--no-ai`, `--ollama-url`,
-`--ollama-model`, `--daemon` (documented no-op — always runs in the
-foreground; use a process supervisor for true background operation), and
-`--headless` (skip the default FTXUI TUI, run the plain foreground
+`--ollama-model`, `--token <value>` (bearer token for `/api/*` + `/ai/chat`;
+falls back to `DROIDCLI_API_TOKEN`, then a generated-and-printed random
+token — see README.md "Security"), `--daemon` (documented no-op — always runs
+in the foreground; use a process supervisor for true background operation),
+and `--headless` (skip the default FTXUI TUI, run the plain foreground
 daemon+HTTP-API loop only). The Ollama URL/model are runtime-editable via
 `POST /api/config` / `POST /api/ollama/config`.
 

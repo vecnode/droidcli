@@ -6,6 +6,7 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/color.hpp>
 
 #include <chrono>
 #include <mutex>
@@ -181,6 +182,40 @@ struct PolledState {
 	std::vector<std::string> log_lines;
 };
 
+// One line of the chat panel: who said it (drives color/weight) and the text.
+struct ChatEntry {
+	std::string role; // "user" | "assistant" | "tool" | "error" | "info"
+	std::string text;
+};
+
+// Extracts DroidHost::agent_turn()'s response ({"ok":bool,"assistant":"...",
+// "actions":[{"tool":"...","arguments_json":"...","result_json":"..."}],
+// "error":"..."}) into chat lines: the assistant's reply plus one line per
+// tool call made along the way.
+std::vector<ChatEntry> parse_agent_turn_response(const std::string& json)
+{
+	std::vector<ChatEntry> entries;
+	bool ok = false;
+	net::extract_json_bool_field(json, "ok", ok);
+	if (!ok)
+	{
+		const std::string error = net::extract_json_string_field(json, "error");
+		entries.push_back(ChatEntry{"error", error.empty() ? "agent turn failed" : error});
+		return entries;
+	}
+
+	for (const std::string& action : extract_json_object_array(json, "actions"))
+	{
+		const std::string tool = net::extract_json_string_field(action, "tool");
+		const std::string args = net::extract_json_string_field(action, "arguments_json");
+		entries.push_back(ChatEntry{"tool", "called " + tool + "(" + args + ")"});
+	}
+
+	const std::string assistant = net::extract_json_string_field(json, "assistant");
+	entries.push_back(ChatEntry{"assistant", assistant.empty() ? "(no reply)" : assistant});
+	return entries;
+}
+
 } // namespace
 
 int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
@@ -198,6 +233,9 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	int selected_connector = 0;
 	std::vector<TaskRow> tasks;
 	std::vector<std::string> log_lines;
+	std::vector<ChatEntry> chat_entries;
+	std::string chat_input_text;
+	bool agent_turn_in_flight = false;
 	const std::string status_line =
 		"droidcli TUI  -  HTTP API on http://127.0.0.1:" + std::to_string(http_port);
 
@@ -277,21 +315,94 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return vbox(lines) | yframe | flex;
 	});
 
-	Component left_column = Container::Vertical({ connector_menu, tasks_view });
-	Component root_container = Container::Horizontal({ left_column, log_view });
+	Component chat_log_view = Renderer([&]() -> Element
+	{
+		Elements lines;
+		for (const ChatEntry& entry : chat_entries)
+		{
+			if (entry.role == "user")
+			{
+				lines.push_back(text("you: " + entry.text) | bold | color(Color::Cyan));
+			}
+			else if (entry.role == "assistant")
+			{
+				lines.push_back(text("agent: " + entry.text) | color(Color::Green));
+			}
+			else if (entry.role == "tool")
+			{
+				lines.push_back(text("  " + entry.text) | dim | color(Color::Yellow));
+			}
+			else if (entry.role == "error")
+			{
+				lines.push_back(text("error: " + entry.text) | color(Color::Red));
+			}
+			else
+			{
+				lines.push_back(text(entry.text) | dim);
+			}
+		}
+		if (agent_turn_in_flight)
+		{
+			lines.push_back(text("agent: (thinking...)") | dim);
+		}
+		if (lines.empty())
+		{
+			lines.push_back(text("(no messages yet - type below and press Enter)") | dim);
+		}
+		return vbox(lines) | yframe | flex;
+	});
+
+	// Submit-on-Enter: calls DroidHost::agent_turn() directly (in-process, no
+	// HTTP/token needed) on this event thread only - never from the poller
+	// thread - consistent with how l/s already block briefly below.
+	Component chat_input = Input(&chat_input_text, "type a message, Enter to send...");
+	chat_input = CatchEvent(chat_input, [&](Event event) -> bool
+	{
+		if (event == Event::Return)
+		{
+			if (chat_input_text.empty() || agent_turn_in_flight)
+			{
+				return true;
+			}
+			const std::string message = chat_input_text;
+			chat_input_text.clear();
+			chat_entries.push_back(ChatEntry{"user", message});
+			agent_turn_in_flight = true;
+
+			std::ostringstream request_body;
+			request_body << '{' << net::json_string_field("message", message) << '}';
+			const std::string response_json = host.agent_turn(request_body.str());
+			agent_turn_in_flight = false;
+
+			for (const ChatEntry& entry : parse_agent_turn_response(response_json))
+			{
+				chat_entries.push_back(entry);
+			}
+			return true;
+		}
+		return false;
+	});
+
+	// Only connector_menu and chat_input are focusable (Menu/Input); Tab
+	// cycles between them. Renderer-only panels (tasks/log/chat_log) never
+	// take focus, so they're rendered but not part of this container.
+	Component interactive = Container::Vertical({ connector_menu, chat_input });
+	Component root_container = interactive;
 
 	Component full_ui = Renderer(root_container, [&]() -> Element
 	{
 		Element connectors_panel = window(text(" Connectors  (l=launch, s=stop) "), connector_menu->Render()) | flex;
 		Element tasks_panel = window(text(" Tasks "), tasks_view->Render()) | flex;
 		Element log_panel = window(text(" App Log "), log_view->Render()) | flex;
+		Element chat_panel = window(text(" Agent Chat  (Tab to focus, Enter to send) "),
+			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() })) | flex;
 		return vbox({
 			text(status_line) | bold,
 			hbox({
 				vbox({ connectors_panel, tasks_panel }) | flex,
-				log_panel | flex,
+				vbox({ log_panel, chat_panel }) | flex,
 			}) | flex,
-			text("q: quit   l: launch selected   s: stop selected   j/k or arrows: move") | dim,
+			text("Tab: switch focus   (connectors focused) q: quit   l: launch   s: stop   j/k/arrows: move   Ctrl+C: quit anytime") | dim,
 		});
 	});
 
@@ -307,7 +418,24 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			return true;
 		}
 
-		if (event == Event::q || event == Event::CtrlC)
+		if (event == Event::CtrlC)
+		{
+			running_flag = false;
+			screen.Exit();
+			return true;
+		}
+
+		// Single-letter connector shortcuts (q/l/s/j/k) must never fire while
+		// the chat input has focus, or typing a message like "please" would
+		// launch/stop/move the connector selection on every matching letter.
+		// FTXUI tracks per-component focus as events flow through the tree;
+		// chat_input->Focused() reflects whether Tab last landed there.
+		if (chat_input->Focused())
+		{
+			return false;
+		}
+
+		if (event == Event::q)
 		{
 			running_flag = false;
 			screen.Exit();

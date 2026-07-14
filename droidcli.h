@@ -23,12 +23,10 @@
 #include "media/probe.hpp"
 #include "media/store.hpp"
 
-#include "runtime/host_interfaces.hpp"
 #include "ai/language_runtime.hpp"
 #include "ai/ollama_client.hpp"
 #include "ai/types.hpp"
-#include "app/commands.hpp"
-#include "app/runtime_catalog.hpp"
+#include "app/tasks.hpp"
 #include "net/handlers.hpp"
 #include "net/json.hpp"
 #include "net/router.hpp"

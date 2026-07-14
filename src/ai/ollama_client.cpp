@@ -106,6 +106,180 @@ bool extract_json_bool_field(const core::String& json, const core::String& field
 	return false;
 }
 
+// Extracts the raw JSON text of a field's value (object, array, string,
+// number, bool, or null) rather than assuming it's a quoted string - needed
+// for "arguments", which Ollama sends as a JSON object, not a JSON-encoded
+// string like OpenAI's tool-calling wire format.
+core::String extract_json_raw_value(const core::String& json, const core::String& field_name, const size_t search_from = 0)
+{
+	const core::String needle = "\"" + field_name + "\":";
+	const size_t field_index = json.find(needle, search_from);
+	if (field_index == core::String::npos)
+	{
+		return {};
+	}
+
+	size_t cursor = field_index + needle.size();
+	while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'
+		|| json[cursor] == '\n' || json[cursor] == '\r'))
+	{
+		++cursor;
+	}
+	if (cursor >= json.size())
+	{
+		return {};
+	}
+
+	const char start_char = json[cursor];
+	if (start_char == '{' || start_char == '[')
+	{
+		const char open = start_char;
+		const char close = (open == '{') ? '}' : ']';
+		size_t depth = 0;
+		bool in_string = false;
+		const size_t start = cursor;
+		for (; cursor < json.size(); ++cursor)
+		{
+			const char character = json[cursor];
+			if (in_string)
+			{
+				if (character == '\\')
+				{
+					++cursor;
+					continue;
+				}
+				if (character == '"')
+				{
+					in_string = false;
+				}
+				continue;
+			}
+			if (character == '"')
+			{
+				in_string = true;
+				continue;
+			}
+			if (character == open)
+			{
+				++depth;
+			}
+			else if (character == close)
+			{
+				--depth;
+				if (depth == 0)
+				{
+					++cursor;
+					break;
+				}
+			}
+		}
+		return json.substr(start, cursor - start);
+	}
+
+	if (start_char == '"')
+	{
+		// Return the raw quoted-and-escaped text, not the decoded string.
+		size_t end = cursor + 1;
+		while (end < json.size())
+		{
+			if (json[end] == '\\')
+			{
+				end += 2;
+				continue;
+			}
+			if (json[end] == '"')
+			{
+				++end;
+				break;
+			}
+			++end;
+		}
+		return json.substr(cursor, end - cursor);
+	}
+
+	size_t end = cursor;
+	while (end < json.size() && json[end] != ',' && json[end] != '}' && json[end] != ']')
+	{
+		++end;
+	}
+	return json.substr(cursor, end - cursor);
+}
+
+// Splits a JSON array (cursor at the opening '[') into its top-level object
+// elements, matching the brace-depth-walk convention used elsewhere in this
+// codebase (e.g. cli/droidcli.cpp's extract_connector_objects).
+core::Array<core::String> extract_json_object_array_at(const core::String& json, size_t cursor)
+{
+	core::Array<core::String> objects;
+	if (cursor >= json.size() || json[cursor] != '[')
+	{
+		return objects;
+	}
+	++cursor;
+
+	while (cursor < json.size())
+	{
+		while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'
+			|| json[cursor] == '\n' || json[cursor] == '\r' || json[cursor] == ','))
+		{
+			++cursor;
+		}
+		if (cursor >= json.size() || json[cursor] == ']')
+		{
+			break;
+		}
+		if (json[cursor] != '{')
+		{
+			break;
+		}
+
+		size_t depth = 0;
+		const size_t start = cursor;
+		for (; cursor < json.size(); ++cursor)
+		{
+			if (json[cursor] == '{')
+			{
+				++depth;
+			}
+			else if (json[cursor] == '}')
+			{
+				--depth;
+				if (depth == 0)
+				{
+					++cursor;
+					break;
+				}
+			}
+		}
+		objects.push_back(json.substr(start, cursor - start));
+	}
+
+	return objects;
+}
+
+core::String serialize_tools(const core::Array<ToolDefinition>& tools)
+{
+	core::String body = "[";
+	for (size_t index = 0; index < tools.size(); ++index)
+	{
+		if (index > 0)
+		{
+			body += ",";
+		}
+		const ToolDefinition& tool = tools[index];
+		const core::String parameters = tool.parameters_json_schema.empty()
+			? core::String("{}")
+			: tool.parameters_json_schema;
+		body += "{\"type\":\"function\",\"function\":{"
+			+ droidcli::net::json_string_field("name", tool.name) + ","
+			+ droidcli::net::json_string_field("description", tool.description) + ","
+			+ "\"parameters\":" + parameters
+			+ "}}";
+	}
+	body += "]";
+	return body;
+}
+
 core::String serialize_chat_messages(const core::Array<ChatMessage>& messages)
 {
 	core::String body = "[";
@@ -140,7 +314,8 @@ core::String build_ollama_chat_url(const OllamaConfig& config)
 
 OllamaOutboundRequest build_ollama_chat_request(
 	const OllamaConfig& config,
-	const core::Array<ChatMessage>& messages)
+	const core::Array<ChatMessage>& messages,
+	const core::Array<ToolDefinition>& tools)
 {
 	OllamaOutboundRequest request;
 	if (!config.enabled)
@@ -176,6 +351,11 @@ OllamaOutboundRequest build_ollama_chat_request(
 	if (config.temperature >= 0.0f)
 	{
 		request.body += ",\"options\":{\"temperature\":" + std::to_string(config.temperature) + "}";
+	}
+
+	if (!tools.empty())
+	{
+		request.body += ",\"tools\":" + serialize_tools(tools);
 	}
 
 	request.body += "}";
@@ -220,6 +400,32 @@ OllamaChatResponse parse_ollama_chat_response(
 		result.assistant_message = extract_json_string_field(response_body, "response");
 	}
 
+	if (message_index != core::String::npos)
+	{
+		const size_t tool_calls_key = response_body.find("\"tool_calls\":", message_index);
+		if (tool_calls_key != core::String::npos)
+		{
+			const size_t bracket = response_body.find('[', tool_calls_key);
+			if (bracket != core::String::npos)
+			{
+				for (const core::String& call_object : extract_json_object_array_at(response_body, bracket))
+				{
+					const size_t function_index = call_object.find("\"function\":");
+					const size_t name_search_from = function_index == core::String::npos ? 0 : function_index;
+
+					ToolCall call;
+					call.id = extract_json_string_field(call_object, "id");
+					call.name = extract_json_string_field(call_object, "name", name_search_from);
+					call.arguments_json = extract_json_raw_value(call_object, "arguments", name_search_from);
+					if (!call.name.empty())
+					{
+						result.tool_calls.push_back(call);
+					}
+				}
+			}
+		}
+	}
+
 	bool done = false;
 	if (extract_json_bool_field(response_body, "done", done))
 	{
@@ -227,12 +433,12 @@ OllamaChatResponse parse_ollama_chat_response(
 	}
 	else
 	{
-		result.done = !result.assistant_message.empty();
+		result.done = !result.assistant_message.empty() || !result.tool_calls.empty();
 	}
 
-	if (result.assistant_message.empty())
+	if (result.assistant_message.empty() && result.tool_calls.empty())
 	{
-		result.error_message = "Ollama response did not contain assistant text.";
+		result.error_message = "Ollama response did not contain assistant text or tool calls.";
 	}
 
 	return result;

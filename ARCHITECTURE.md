@@ -102,19 +102,21 @@ Public entry point: `#include "droidcli.h"`.
 | `net/json`                | Escape/build/extract JSON fields (no external JSON dependency)        |
 | `notify/parse`            | Notify body parsing (JSON or text)                                    |
 | `session/types` + `status`| `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
-| `app/commands`            | `CommandId`, parse + validate against session features                |
-| `app/tasks`               | **Persistent task queue**: `Task`, `TaskQueue` (enqueue/claim_next/complete/fail/find/list), JSON build/parse |
-| `app/runtime_catalog`     | Host-local runtime descriptors for the UI                             |
-| `ai/ollama_client`        | Ollama request/response shaping                                       |
-| `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from any connector-registered inference peer |
-| `runtime/host_interfaces` | Recording + AI snapshots/toggles (`HostServiceCallbacks`)             |
+| `app/tasks`               | **Persistent task queue**: `Task` (incl. `result_json`), `TaskQueue` (enqueue/claim_next/complete/fail/find/list), JSON build/parse |
+| `ai/ollama_client`        | Ollama request/response shaping, incl. **tool-calling**: `ToolDefinition`/`ToolCall`, `"tools"` request field, `message.tool_calls` response parsing, `ChatRole::Tool` |
+| `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from any connector-registered inference peer. Single-shot (no tool-calling) - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
 
 The droidcli host (`cli/`) additionally owns: the config store, the
 `ConnectorRegistry` + `TaskQueue` instances and their dispatch (`call_connector`
 for `http_peer`, `launch_connector`/`stop_connector` for `launched_process`,
-`tick_tasks()` draining the queue), and the **ProcessManager** (Job
-Object/process-group launch of any `launched_process` connector with PID
-tracking).
+`tick_tasks()` draining the queue, including a `"run"` command dispatched to
+`command_runner`), the **ProcessManager** (Job Object/process-group launch of
+any `launched_process` connector with PID tracking), **`command_runner`**
+(one-shot, synchronous, timeout-bounded shell command execution with captured
+stdout/stderr - `POST /api/run` and the `"run"` task command), and
+**`DroidHost::agent_turn`** (a bounded Ollama tool-calling loop over a fixed
+tool set, each tool implemented by calling back into `DroidHost`'s own
+methods - `POST /api/agent/turn`).
 
 ---
 
@@ -130,11 +132,14 @@ flowchart LR
     Client --> Mount --> Router --> Handlers
 ```
 
-Inbound: `tools::MiniHttpServer` (raw-socket, no httplib) binds the socket and
-converts requests to `net::HttpRequest`. It first tries the portable
-`net::RouteTable` (`/health`, `/echo`, `/notify`, `/ai/chat`); anything else
-falls through to `cli::make_droidcli_route_dispatch`'s `CustomRouteFn`, which
-covers `/api/*` (status/config/ollama/process/command/connectors/tasks).
+Inbound: `tools::MiniHttpServer` (raw-socket, no httplib) binds the socket,
+parses headers into `net::HttpRequest`, and - before any route is dispatched -
+checks the bearer token for every `/api/*` path and `/ai/chat` (see README.md
+"Security"), returning `401` on failure. Requests that pass the check are
+tried against the portable `net::RouteTable` (`/health`, `/echo`, `/notify`,
+`/ai/chat`); anything else falls through to
+`cli::make_droidcli_route_dispatch`'s `CustomRouteFn`, which covers `/api/*`
+(status/config/ollama/process/run/agent/connectors/tasks).
 Outbound: `tools::sync_http_client` performs the POST/GET (raw socket for
 `http://`, WinHTTP for `https://`); core builds and parses the bodies.
 
@@ -151,9 +156,8 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Tests: `media_decode_test`, `net_handler_test`, `app_command_test`,
-`host_interfaces_test`, `ollama_client_test`, `language_runtime_test`,
-`runtime_catalog_test`, `connector_test`, `task_queue_test`.
+Tests: `media_decode_test`, `net_handler_test`, `ollama_client_test`,
+`language_runtime_test`, `connector_test`, `task_queue_test`.
 
 On Windows the whole tree builds with **one MSVC runtime**
 (`CMAKE_MSVC_RUNTIME_LIBRARY` in the root CMakeLists: dynamic Debug, static
@@ -164,10 +168,11 @@ Release) — never set a per-target runtime that diverges.
 ## Extension points
 
 1. **New HTTP route** — handler in `net/handlers.cpp`, register in the router,
-   mount in the host(s).
-2. **New validated command** — `CommandId` + `validate_command` in
-   `app/commands`, a host-side handler in `apply_command_side_effects`.
-3. **New connector (peer app)** — usually **config-only**: add an entry to a
+   mount in the host(s). If it's a `cli::`-only route (not a portable
+   `net::RouteTable` handler), it lands under `/api/*` in
+   `cli/http_mount.cpp` and is automatically covered by the bearer-token
+   check in `tools::MiniHttpServer::poll_once`.
+2. **New connector (peer app)** — usually **config-only**: add an entry to a
    `connectors.json` (or `POST /api/connectors`) with `kind: "http_peer"` and a
    `base_url`; droidcli proxies calls to it via `/api/connectors/{id}/call`
    with zero new code. For `kind: "launched_process"`, `ProcessManager`

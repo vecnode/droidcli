@@ -36,8 +36,9 @@ int main()
 	auto after_claim = queue.find(id_one);
 	assert(after_claim->status == "running");
 
-	assert(queue.complete(id_one));
+	assert(queue.complete(id_one, "{\"exit_code\":0}"));
 	assert(queue.find(id_one)->status == "done");
+	assert(queue.find(id_one)->result_json == "{\"exit_code\":0}");
 
 	auto claimed_two = queue.claim_next();
 	assert(claimed_two.has_value());
@@ -55,6 +56,7 @@ int main()
 	const droidcli::core::String json = build_tasks_json(queue.list());
 	assert(json.find("\"status\":\"done\"") != droidcli::core::String::npos);
 	assert(json.find("\"status\":\"failed\"") != droidcli::core::String::npos);
+	assert(json.find("\"result_json\":\"{\\\"exit_code\\\":0}\"") != droidcli::core::String::npos);
 
 	Task parsed;
 	droidcli::core::String error;

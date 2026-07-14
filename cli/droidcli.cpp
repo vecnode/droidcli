@@ -9,7 +9,9 @@
 #include <cstdlib>
 #include <csignal>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -60,6 +62,45 @@ bool has_flag(int argc, char** argv, const char* flag)
 		}
 	}
 	return false;
+}
+
+// 32 random bytes, hex-encoded, from std::random_device (a non-deterministic
+// OS entropy source on Windows/Linux). Used as the API bearer token when the
+// operator doesn't supply --token / DROIDCLI_API_TOKEN, so droidcli never
+// runs its shell-execution-capable HTTP API with zero authentication.
+std::string generate_random_token()
+{
+	std::random_device entropy;
+	std::uniform_int_distribution<int> byte_distribution(0, 255);
+	std::ostringstream stream;
+	stream << std::hex << std::setfill('0');
+	for (int i = 0; i < 32; ++i)
+	{
+		stream << std::setw(2) << byte_distribution(entropy);
+	}
+	return stream.str();
+}
+
+std::string resolve_api_token(int argc, char** argv)
+{
+	const std::string flag_value = parse_string_arg(argc, argv, "--token", "");
+	if (!flag_value.empty())
+	{
+		return flag_value;
+	}
+
+	const char* env_value = std::getenv("DROIDCLI_API_TOKEN");
+	if (env_value != nullptr && env_value[0] != '\0')
+	{
+		return env_value;
+	}
+
+	const std::string generated = generate_random_token();
+	std::cout << "droidcli: generated API token (save this): " << generated << std::endl;
+	std::cout << "droidcli: pass it as \"Authorization: Bearer " << generated
+		<< "\" on every /api/* and /ai/chat request, or set --token/DROIDCLI_API_TOKEN "
+		"next time to reuse a token across restarts." << std::endl;
+	return generated;
 }
 
 std::string read_text_file(const std::string& path)
@@ -169,6 +210,7 @@ int main(int argc, char** argv)
 	const std::string ollama_url = parse_string_arg(argc, argv, "--ollama-url", "http://127.0.0.1:11434");
 	const std::string ollama_model = parse_string_arg(argc, argv, "--ollama-model", "llama3.2");
 	const std::string config_path = parse_string_arg(argc, argv, "--config", "");
+	const std::string api_token = resolve_api_token(argc, argv);
 
 	if (has_flag(argc, argv, "--daemon"))
 	{
@@ -208,6 +250,7 @@ int main(int argc, char** argv)
 		std::cout << "[notify] " << message << std::endl;
 	};
 	options.custom_dispatch = droidcli::cli::make_droidcli_route_dispatch(host);
+	options.api_token = api_token;
 
 	if (!server.start(options))
 	{
@@ -221,14 +264,17 @@ int main(int argc, char** argv)
 #endif
 
 	std::cout << "droidcli listening on http://127.0.0.1:" << port << std::endl;
-	std::cout << "  GET  /health" << std::endl;
-	std::cout << "  GET  /api/status" << std::endl;
-	std::cout << "  GET  /api/connectors   POST /api/connectors" << std::endl;
-	std::cout << "  GET  /api/connectors/{id}/status   POST .../launch  .../stop  .../call" << std::endl;
-	std::cout << "  GET  /api/tasks   POST /api/tasks   GET /api/tasks/{id}" << std::endl;
+	std::cout << "  GET  /health                          (no auth required)" << std::endl;
+	std::cout << "  GET  /api/status                       [Bearer token required]" << std::endl;
+	std::cout << "  GET  /api/connectors   POST /api/connectors                     [Bearer token required]" << std::endl;
+	std::cout << "  GET  /api/connectors/{id}/status   POST .../launch  .../stop  .../call   [Bearer token required]" << std::endl;
+	std::cout << "  GET  /api/tasks   POST /api/tasks   GET /api/tasks/{id}          [Bearer token required]" << std::endl;
+	std::cout << "  POST /api/run                          [Bearer token required]" << std::endl;
+	std::cout << "  POST /api/agent/turn                   [Bearer token required]" << std::endl;
 	if (enable_ai)
 	{
-		std::cout << "  POST /ai/chat  (Ollama: " << ollama_url << ", model: " << ollama_model << ")" << std::endl;
+		std::cout << "  POST /ai/chat  (Ollama: " << ollama_url << ", model: " << ollama_model
+			<< ")   [Bearer token required]" << std::endl;
 	}
 
 	const bool headless = has_flag(argc, argv, "--headless");
