@@ -271,6 +271,8 @@ int main(int argc, char** argv)
 	std::cout << "  GET  /api/tasks   POST /api/tasks   GET /api/tasks/{id}          [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/run                          [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/agent/turn                   [Bearer token required]" << std::endl;
+	std::cout << "  GET  /api/ollama/setup-status          [Bearer token required]" << std::endl;
+	std::cout << "  POST /api/ollama/install   POST /api/ollama/start   POST /api/ollama/pull   [Bearer token required]" << std::endl;
 	if (enable_ai)
 	{
 		std::cout << "  POST /ai/chat  (Ollama: " << ollama_url << ", model: " << ollama_model
@@ -283,13 +285,28 @@ int main(int argc, char** argv)
 	{
 		// Unchanged from before the TUI existed: foreground daemon loop only,
 		// no terminal UI. Keeps droidcli scriptable for CI/systemd use.
+		//
+		// Defense in depth (mirrors the TUI's own try/catch, see cli/tui.cpp):
+		// an uncaught exception from a poll_once/tick iteration should never
+		// abort the whole daemon - log it and keep looping.
 		while (g_running)
 		{
-			if (!server.poll_once(200))
+			try
 			{
-				break;
+				if (!server.poll_once(200))
+				{
+					break;
+				}
+				host.tick(0.2f);
 			}
-			host.tick(0.2f);
+			catch (const std::exception& e)
+			{
+				std::cerr << "droidcli: headless loop error: " << e.what() << std::endl;
+			}
+			catch (...)
+			{
+				std::cerr << "droidcli: headless loop error: unknown exception" << std::endl;
+			}
 		}
 	}
 	else
@@ -301,15 +318,42 @@ int main(int argc, char** argv)
 		{
 			while (g_running)
 			{
-				if (!server.poll_once(200))
+				try
 				{
-					break;
+					if (!server.poll_once(200))
+					{
+						break;
+					}
+					host.tick(0.2f);
 				}
-				host.tick(0.2f);
+				catch (const std::exception& e)
+				{
+					std::cerr << "droidcli: HTTP server loop error: " << e.what() << std::endl;
+				}
+				catch (...)
+				{
+					std::cerr << "droidcli: HTTP server loop error: unknown exception" << std::endl;
+				}
 			}
 		});
 
-		droidcli::cli::run_tui(host, port, g_running);
+		// run_tui() already wraps its own event loop and chat-submit handler in
+		// try/catch (see cli/tui.cpp) - this is one more layer of defense in
+		// depth per the "network failure calling Ollama quits the terminal"
+		// investigation, so a crash anywhere in the TUI path can never take the
+		// whole process down without at least a chance to log why first.
+		try
+		{
+			droidcli::cli::run_tui(host, port, g_running);
+		}
+		catch (const std::exception& e)
+		{
+			std::cerr << "droidcli: TUI terminated with an exception: " << e.what() << std::endl;
+		}
+		catch (...)
+		{
+			std::cerr << "droidcli: TUI terminated with an unknown exception." << std::endl;
+		}
 
 		g_running = false;
 		if (server_thread.joinable())

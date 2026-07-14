@@ -48,6 +48,26 @@ public:
 	core::String build_ollama_status_json();
 	core::String update_ollama_config(const core::String& body);
 
+	// Ollama install/start/model-pull setup flow (used by the TUI's in-chat
+	// setup state machine when Ollama isn't ready for agent_turn()'s
+	// tool-calling loop). All are blocking - call only from a context that
+	// already tolerates a blocking call (HTTP route handler thread, or the
+	// TUI's chat-submit handler on the FTXUI event thread).
+	//
+	// {"installed":bool,"online":bool,"models":[...],"configured_model":"...",
+	//  "configured_model_pulled":bool}
+	core::String ollama_setup_status_json();
+	// Runs `winget install --id Ollama.Ollama ...`. {"ok":bool,"exit_code":...,
+	// "stdout":"...","stderr":"...","error":"..."}
+	core::String install_ollama();
+	// Launches `ollama serve` via ProcessManager (key "__ollama__") and polls
+	// /api/tags for a few seconds. {"ok":bool,"pid":...,"online":bool,"error":"..."}
+	core::String start_ollama();
+	// body is {"model":"..."}. Runs `ollama pull <model>` and, on success, makes
+	// it the active model (same effect as update_ollama_config). {"ok":bool,
+	// "model":"...","exit_code":...,"error":"..."}
+	core::String pull_ollama_model(const core::String& body);
+
 	// Connector registry (generic peer config: http_peer or launched_process).
 	core::String register_connector(const core::String& body);
 	bool unregister_connector(const core::String& connector_id);
