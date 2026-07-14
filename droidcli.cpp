@@ -11,10 +11,7 @@
 #include "media/probe.cpp"
 #include "media/store.cpp"
 
-#include "app/commands.cpp"
-#include "app/runtime_catalog.cpp"
 #include "app/tasks.cpp"
-#include "runtime/host_interfaces.cpp"
 #include "ai/types.cpp"
 #include "ai/ollama_client.cpp"
 #include "ai/language_runtime.cpp"

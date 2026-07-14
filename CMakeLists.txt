@@ -52,14 +52,6 @@ add_executable(droidcli_net_handler_test tests/net_handler_test.cpp)
 target_link_libraries(droidcli_net_handler_test PRIVATE droidcli_core)
 add_test(NAME net_handler_test COMMAND droidcli_net_handler_test)
 
-add_executable(droidcli_app_command_test tests/app_command_test.cpp)
-target_link_libraries(droidcli_app_command_test PRIVATE droidcli_core)
-add_test(NAME app_command_test COMMAND droidcli_app_command_test)
-
-add_executable(droidcli_host_interfaces_test tests/host_interfaces_test.cpp)
-target_link_libraries(droidcli_host_interfaces_test PRIVATE droidcli_core)
-add_test(NAME host_interfaces_test COMMAND droidcli_host_interfaces_test)
-
 add_executable(droidcli_ollama_client_test tests/ollama_client_test.cpp)
 target_link_libraries(droidcli_ollama_client_test PRIVATE droidcli_core)
 add_test(NAME ollama_client_test COMMAND droidcli_ollama_client_test)
@@ -67,10 +59,6 @@ add_test(NAME ollama_client_test COMMAND droidcli_ollama_client_test)
 add_executable(droidcli_language_runtime_test tests/language_runtime_test.cpp)
 target_link_libraries(droidcli_language_runtime_test PRIVATE droidcli_core)
 add_test(NAME language_runtime_test COMMAND droidcli_language_runtime_test)
-
-add_executable(droidcli_runtime_catalog_test tests/runtime_catalog_test.cpp)
-target_link_libraries(droidcli_runtime_catalog_test PRIVATE droidcli_core)
-add_test(NAME runtime_catalog_test COMMAND droidcli_runtime_catalog_test)
 
 add_executable(droidcli_connector_test tests/connector_test.cpp)
 target_link_libraries(droidcli_connector_test PRIVATE droidcli_core)
@@ -99,6 +87,7 @@ FetchContent_Declare(ftxui
 FetchContent_MakeAvailable(ftxui)
 
 add_executable(droidcli
+    cli/command_runner.cpp
     cli/droidcli.cpp
     cli/host.cpp
     cli/http_mount.cpp
