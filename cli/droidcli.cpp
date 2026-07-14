@@ -3,6 +3,7 @@
 #include "metaagent.h"
 #include "net/connector.hpp"
 #include "tools/mini_http_server.hpp"
+#include "tui.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -236,13 +238,45 @@ int main(int argc, char** argv)
 		std::cout << "  POST /ai/chat  (Ollama: " << ollama_url << ", model: " << ollama_model << ")" << std::endl;
 	}
 
-	while (g_running)
+	const bool headless = has_flag(argc, argv, "--headless");
+
+	if (headless)
 	{
-		if (!server.poll_once(200))
+		// Unchanged from before the TUI existed: foreground daemon loop only,
+		// no terminal UI. Keeps droidcli scriptable for CI/systemd use.
+		while (g_running)
 		{
-			break;
+			if (!server.poll_once(200))
+			{
+				break;
+			}
+			host.tick(0.2f);
 		}
-		host.tick(0.2f);
+	}
+	else
+	{
+		// Default mode: keep serving the HTTP API on a background thread while
+		// the FTXUI dashboard drives the terminal on the main thread.
+		std::cout << "droidcli: starting interactive TUI (pass --headless to skip it)" << std::endl;
+		std::thread server_thread([&]()
+		{
+			while (g_running)
+			{
+				if (!server.poll_once(200))
+				{
+					break;
+				}
+				host.tick(0.2f);
+			}
+		});
+
+		metaagent::cli::run_tui(host, port, g_running);
+
+		g_running = false;
+		if (server_thread.joinable())
+		{
+			server_thread.join();
+		}
 	}
 
 	server.stop();
