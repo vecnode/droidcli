@@ -42,29 +42,29 @@ Sample OCR body
 ```
 )");
 
-	metaagent::media::MediaCorpus corpus;
+	droidcli::media::MediaCorpus corpus;
 	assert(corpus.load_pair("corpus_pdf_fixture.md", "corpus_objs_fixture.md"));
 
-	const metaagent::media::ImageCorpusEntry* entry = corpus.find_by_file_key("059UAP00011-1.png");
+	const droidcli::media::ImageCorpusEntry* entry = corpus.find_by_file_key("059UAP00011-1.png");
 	assert(entry != nullptr);
-	assert(entry->ocr_text.find("CONFIDENTIAL") != metaagent::core::String::npos);
+	assert(entry->ocr_text.find("CONFIDENTIAL") != droidcli::core::String::npos);
 	assert(entry->text_regions.size() == 1);
 	assert(entry->image_width == 1275);
 
-	metaagent::media::IntRect focus {};
+	droidcli::media::IntRect focus {};
 	assert(corpus.focus_rect_pixels(*entry, focus));
 
 	const std::size_t region_index = corpus.pick_focus_region_index(*entry, 0);
 	assert(region_index < entry->text_regions.size());
 
-	metaagent::media::IntRect region_crop {};
+	droidcli::media::IntRect region_crop {};
 	assert(corpus.region_focus_crop_16x9(*entry, region_index, region_crop));
 	assert(region_crop.width > 0);
 	assert(region_crop.height > 0);
 
-	if (const char* integration_dir = std::getenv("METAAGENT_CORPUS_TEST_DATA"))
+	if (const char* integration_dir = std::getenv("DROIDCLI_CORPUS_TEST_DATA"))
 	{
-		metaagent::media::MediaCorpus integration;
+		droidcli::media::MediaCorpus integration;
 		if (integration.load_from_directory(integration_dir))
 		{
 			assert(integration.size() > 1);

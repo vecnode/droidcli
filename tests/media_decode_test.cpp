@@ -1,4 +1,4 @@
-#include "metaagent.h"
+#include "droidcli.h"
 
 #include <cstdint>
 #include <iostream>
@@ -28,8 +28,8 @@ bool expect_true(const bool value, const char* label)
 
 int main()
 {
-	metaagent::media::RgbaImage image;
-	const bool decoded = metaagent::media::decode_image_from_memory(
+	droidcli::media::RgbaImage image;
+	const bool decoded = droidcli::media::decode_image_from_memory(
 		k_one_by_one_png,
 		sizeof(k_one_by_one_png),
 		image,
@@ -50,7 +50,7 @@ int main()
 		return 1;
 	}
 
-	const metaagent::core::ColorRGBA& pixel = image.pixels.front();
+	const droidcli::core::ColorRGBA& pixel = image.pixels.front();
 	if (!expect_true(pixel.r == 255 && pixel.g == 0 && pixel.b == 0 && pixel.a == 255, "pixel rgba"))
 	{
 		return 1;

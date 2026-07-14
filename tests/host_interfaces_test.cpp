@@ -1,10 +1,10 @@
-#include "metaagent.h"
+#include "droidcli.h"
 
 #include <cassert>
 
 int main()
 {
-	using namespace metaagent::runtime;
+	using namespace droidcli::runtime;
 
 	assert(!default_recording_snapshot().capture_active);
 	assert(!default_ai_snapshot().autopilot_enabled);

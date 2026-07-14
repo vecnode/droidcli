@@ -4,7 +4,7 @@
 
 #include <sstream>
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 void SignalRouter::register_target(const SignalTarget& target)
 {
@@ -217,4 +217,4 @@ bool parse_target_from_json(
 	return true;
 }
 
-} // namespace metaagent::net
+} // namespace droidcli::net

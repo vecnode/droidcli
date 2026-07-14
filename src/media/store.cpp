@@ -2,7 +2,7 @@
 
 #include "media/decode.hpp"
 
-namespace metaagent::media {
+namespace droidcli::media {
 
 MediaStore& MediaStore::instance()
 {
@@ -106,4 +106,4 @@ void MediaStore::invalidate_all()
 	cache_entries_.clear();
 }
 
-} // namespace metaagent::media
+} // namespace droidcli::media

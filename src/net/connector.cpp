@@ -4,7 +4,7 @@
 
 #include <sstream>
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 void ConnectorRegistry::register_connector(const Connector& connector)
 {
@@ -130,4 +130,4 @@ bool parse_connector_from_json(
 	return true;
 }
 
-} // namespace metaagent::net
+} // namespace droidcli::net

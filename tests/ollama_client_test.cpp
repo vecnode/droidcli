@@ -4,9 +4,9 @@
 
 int main()
 {
-	using namespace metaagent::ai;
-	using metaagent::core::Array;
-	using metaagent::core::String;
+	using namespace droidcli::ai;
+	using droidcli::core::Array;
+	using droidcli::core::String;
 
 	OllamaConfig config;
 	config.enabled = true;

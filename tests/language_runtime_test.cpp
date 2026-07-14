@@ -4,8 +4,8 @@
 
 int main()
 {
-	using namespace metaagent::ai;
-	using metaagent::core::String;
+	using namespace droidcli::ai;
+	using droidcli::core::String;
 
 	LanguageAiRuntime runtime;
 	runtime.set_system_prompt("You are a concise assistant.");

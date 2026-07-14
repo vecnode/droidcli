@@ -3,7 +3,7 @@
 #include "export.hpp"
 #include "session/types.hpp"
 
-namespace metaagent::app {
+namespace droidcli::app {
 
 struct RuntimeDescriptor {
 	core::String id;
@@ -13,10 +13,10 @@ struct RuntimeDescriptor {
 	bool active_in_session = false;
 };
 
-METAAGENT_API core::Array<RuntimeDescriptor> build_runtime_catalog(
+DROIDCLI_API core::Array<RuntimeDescriptor> build_runtime_catalog(
 	const session::RuntimeSession& session);
 
-METAAGENT_API core::String build_runtime_catalog_json(
+DROIDCLI_API core::String build_runtime_catalog_json(
 	const session::RuntimeSession& session);
 
-} // namespace metaagent::app
+} // namespace droidcli::app

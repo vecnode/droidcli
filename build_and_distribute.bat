@@ -2,9 +2,9 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 REM -----------------------------------------------------------------------------
-REM MetaAgent — build everything and stage a portable distribution folder + zip.
+REM Droidcli — build everything and stage a portable distribution folder + zip.
 REM
-REM Produces:  dist\metaagent-<version>\
+REM Produces:  dist\droidcli-<version>\
 REM              droidcli\       droidcli.exe (Release) + FFmpeg DLLs
 REM              media-player\   media-player-cpp.exe + DLLs + data\
 REM              adapter\        pre-training deploy code + the trained LoRA
@@ -62,13 +62,13 @@ if not defined DIST_DATASET_DIR set "DIST_DATASET_DIR=%DIST_ADAPTER_DIR%\output"
 
 REM --- Version from src\version.hpp ---
 set "VER_MAJOR=0" & set "VER_MINOR=0" & set "VER_PATCH=0"
-for /f "tokens=3" %%v in ('findstr /C:"#define METAAGENT_VERSION_MAJOR" src\version.hpp') do set "VER_MAJOR=%%v"
-for /f "tokens=3" %%v in ('findstr /C:"#define METAAGENT_VERSION_MINOR" src\version.hpp') do set "VER_MINOR=%%v"
-for /f "tokens=3" %%v in ('findstr /C:"#define METAAGENT_VERSION_PATCH" src\version.hpp') do set "VER_PATCH=%%v"
-set "DIST_NAME=metaagent-%VER_MAJOR%.%VER_MINOR%.%VER_PATCH%"
+for /f "tokens=3" %%v in ('findstr /C:"#define DROIDCLI_VERSION_MAJOR" src\version.hpp') do set "VER_MAJOR=%%v"
+for /f "tokens=3" %%v in ('findstr /C:"#define DROIDCLI_VERSION_MINOR" src\version.hpp') do set "VER_MINOR=%%v"
+for /f "tokens=3" %%v in ('findstr /C:"#define DROIDCLI_VERSION_PATCH" src\version.hpp') do set "VER_PATCH=%%v"
+set "DIST_NAME=droidcli-%VER_MAJOR%.%VER_MINOR%.%VER_PATCH%"
 set "DIST_DIR=%ROOT%\dist\%DIST_NAME%"
 
-echo === MetaAgent distribute: %DIST_NAME% ===
+echo === Droidcli distribute: %DIST_NAME% ===
 echo   media source:   %DIST_MEDIA_DIR%
 echo   adapter source: %DIST_ADAPTER_DIR%
 echo   adapter weights: %DIST_ADAPTER_WEIGHTS_DIR%

@@ -3,7 +3,7 @@
 #include "core/types.hpp"
 #include "export.hpp"
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 struct GoogleSearchConfig {
 	core::String api_key;
@@ -30,13 +30,13 @@ struct GoogleSearchResponse {
 /// scraping of a search results page. Requires a free API key + search engine
 /// ID from https://programmablesearchengine.google.com/ (free tier: 100
 /// queries/day). Percent-encodes the query.
-METAAGENT_API core::String build_google_search_url(const GoogleSearchConfig& config);
+DROIDCLI_API core::String build_google_search_url(const GoogleSearchConfig& config);
 
 /// Parses the JSON response body from the Custom Search API into a portable
 /// result list. Hand-rolled (brace-depth) JSON array walk, consistent with the
 /// rest of net/json.hpp - no JSON library dependency.
-METAAGENT_API GoogleSearchResponse parse_google_search_response(
+DROIDCLI_API GoogleSearchResponse parse_google_search_response(
 	int32_t status_code,
 	const core::String& response_body);
 
-} // namespace metaagent::net
+} // namespace droidcli::net

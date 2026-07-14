@@ -3,7 +3,7 @@
 #include "export.hpp"
 #include "session/types.hpp"
 
-namespace metaagent::app {
+namespace droidcli::app {
 
 enum class CommandId {
 	Unknown = 0,
@@ -23,10 +23,10 @@ struct CommandResult {
 	core::String user_message;
 };
 
-METAAGENT_API CommandId parse_command_name(const core::String& name);
+DROIDCLI_API CommandId parse_command_name(const core::String& name);
 
-METAAGENT_API core::String command_display_name(CommandId command);
+DROIDCLI_API core::String command_display_name(CommandId command);
 
-METAAGENT_API CommandResult validate_command(CommandId command, const session::RuntimeSession& session);
+DROIDCLI_API CommandResult validate_command(CommandId command, const session::RuntimeSession& session);
 
-} // namespace metaagent::app
+} // namespace droidcli::app

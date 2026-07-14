@@ -32,7 +32,7 @@ using NativeSocket = int;
 constexpr NativeSocket kInvalidNativeSocket = -1;
 #endif
 
-namespace metaagent::tools {
+namespace droidcli::tools {
 namespace {
 
 struct ParsedHttpUrl {
@@ -112,7 +112,7 @@ bool https_request_winhttp(
 	bool ok = false;
 
 	const HINTERNET session = WinHttpOpen(
-		L"metaagent/1.0",
+		L"droidcli/1.0",
 		WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
 		WINHTTP_NO_PROXY_NAME,
 		WINHTTP_NO_PROXY_BYPASS,
@@ -416,4 +416,4 @@ bool sync_http_get(
 	return sync_http_request("GET", url, {}, status_code_out, response_body_out);
 }
 
-} // namespace metaagent::tools
+} // namespace droidcli::tools

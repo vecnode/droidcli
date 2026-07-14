@@ -10,14 +10,14 @@ namespace {
 bool g_transport_called = false;
 
 bool test_transport(
-	const metaagent::core::String& url,
-	const metaagent::core::String& body,
+	const droidcli::core::String& url,
+	const droidcli::core::String& body,
 	int32_t& status_code_out,
-	metaagent::core::String& response_body_out)
+	droidcli::core::String& response_body_out)
 {
 	g_transport_called = true;
 	assert(url == "http://127.0.0.1:9001/signal");
-	assert(body.find("\"type\":\"trigger\"") != metaagent::core::String::npos);
+	assert(body.find("\"type\":\"trigger\"") != droidcli::core::String::npos);
 	status_code_out = 200;
 	response_body_out = "{\"ok\":true}";
 	return true;
@@ -27,7 +27,7 @@ bool test_transport(
 
 int main()
 {
-	using namespace metaagent::net;
+	using namespace droidcli::net;
 
 	SignalRouter router;
 	SignalTarget target;
@@ -57,8 +57,8 @@ int main()
 	router.append_log(entry);
 	assert(router.log_entries().size() == 1);
 
-	const metaagent::core::String envelope_json = build_signal_envelope_json(envelope);
-	assert(envelope_json.find("\"payload\":") != metaagent::core::String::npos);
+	const droidcli::core::String envelope_json = build_signal_envelope_json(envelope);
+	assert(envelope_json.find("\"payload\":") != droidcli::core::String::npos);
 
 	std::cout << "signal_router_test passed" << std::endl;
 	return 0;

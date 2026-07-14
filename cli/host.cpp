@@ -7,7 +7,7 @@
 #include <sstream>
 #include <thread>
 
-namespace metaagent::cli {
+namespace droidcli::cli {
 namespace {
 
 core::Array<core::String> parse_ollama_model_names(const core::String& tags_json)
@@ -86,7 +86,7 @@ void DroidHost::initialize()
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 
-		metaagent::initialize_defaults();
+		droidcli::initialize_defaults();
 
 		session_.active = true;
 		session_.map_name = "droidcli";
@@ -901,4 +901,4 @@ core::String DroidHost::build_process_status_json()
 	return stream.str();
 }
 
-} // namespace metaagent::cli
+} // namespace droidcli::cli

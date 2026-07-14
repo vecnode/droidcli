@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <optional>
 
-namespace metaagent::app {
+namespace droidcli::app {
 
 struct Task {
 	core::String id;
@@ -35,13 +35,13 @@ private:
 	void trim_history();
 };
 
-METAAGENT_API core::String build_task_json(const Task& task);
+DROIDCLI_API core::String build_task_json(const Task& task);
 
-METAAGENT_API core::String build_tasks_json(const core::Array<Task>& tasks);
+DROIDCLI_API core::String build_tasks_json(const core::Array<Task>& tasks);
 
-METAAGENT_API bool parse_task_request_from_json(
+DROIDCLI_API bool parse_task_request_from_json(
 	const core::String& json,
 	Task& out_task,
 	core::String& out_error);
 
-} // namespace metaagent::app
+} // namespace droidcli::app

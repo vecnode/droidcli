@@ -2,7 +2,7 @@
 
 #include "core/types.hpp"
 
-namespace metaagent::tools {
+namespace droidcli::tools {
 
 /** Synchronous HTTP POST with JSON body. Returns false on socket/transport failure. */
 bool sync_http_post_json(
@@ -17,4 +17,4 @@ bool sync_http_get(
 	int32_t& status_code_out,
 	core::String& response_body_out);
 
-} // namespace metaagent::tools
+} // namespace droidcli::tools

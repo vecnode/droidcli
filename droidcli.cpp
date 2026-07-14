@@ -1,5 +1,5 @@
 /**
- * MetaAgent amalgamated implementation.
+ * Droidcli amalgamated implementation.
  * All library .cpp units live under src/ and are compiled here.
  */
 

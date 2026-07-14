@@ -3,7 +3,7 @@
 #include "core/types.hpp"
 #include "export.hpp"
 
-namespace metaagent::session {
+namespace droidcli::session {
 
 struct FeatureFlags {
 	bool ai = true;
@@ -22,4 +22,4 @@ struct RuntimeSession {
 	bool http_router_bound = false;
 };
 
-} // namespace metaagent::session
+} // namespace droidcli::session

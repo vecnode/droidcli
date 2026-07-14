@@ -3,7 +3,7 @@
 #include "core/types.hpp"
 #include "export.hpp"
 
-namespace metaagent::notify {
+namespace droidcli::notify {
 
 struct NotifyMessage {
 	core::String text;
@@ -16,4 +16,4 @@ struct NotifyParseResult {
 	NotifyMessage message;
 };
 
-} // namespace metaagent::notify
+} // namespace droidcli::notify

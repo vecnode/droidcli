@@ -6,7 +6,7 @@
 #include <cctype>
 #include <sstream>
 
-namespace metaagent::net {
+namespace droidcli::net {
 namespace {
 
 core::String url_encode(const core::String& value)
@@ -204,4 +204,4 @@ GoogleSearchResponse parse_google_search_response(
 	return response;
 }
 
-} // namespace metaagent::net
+} // namespace droidcli::net

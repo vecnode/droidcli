@@ -2,8 +2,8 @@
 
 #include "export.hpp"
 
-namespace metaagent {
+namespace droidcli {
 
-METAAGENT_API void initialize_defaults();
+DROIDCLI_API void initialize_defaults();
 
-} // namespace metaagent
+} // namespace droidcli

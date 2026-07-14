@@ -7,17 +7,21 @@ in `AGENTS.md` — read it first.
 
 ## Claude-specific quick reference
 
-- **`metaagent` is the C++ agent controller / network trigger** (library
+- **`droidcli` is the C++ agent controller / network trigger** (library
   version **0.2.0** — hold at 0.2.x, do not bump to 0.3). The portable core
-  (`src/`) is used by **droidcli** (`cli/`, entrypoint `cli/droidcli.cpp`), a
-  headless CLI agent daemon — no windowed app exists anymore (`app/` was
-  deleted). droidcli talks to peers through a generic **connector** concept
-  (`net::Connector`: `http_peer` or `launched_process`), config-driven via
-  `--config connectors.json` or `POST /api/connectors` — there is no
-  compiled-in knowledge of any specific peer app.
-- **"droidcli" is a product/binary rename only** — the C++ namespace
-  (`metaagent::`) and repo/library name are unchanged; do not attempt a full
-  namespace rename.
+  (`src/`, namespace `droidcli::`) is used by **droidcli** (`cli/`, entrypoint
+  `cli/droidcli.cpp`), a headless CLI agent daemon — no windowed app exists
+  anymore (`app/` was deleted). droidcli talks to peers through a generic
+  **connector** concept (`net::Connector`: `http_peer` or `launched_process`),
+  config-driven via `--config connectors.json` or `POST /api/connectors` —
+  there is no compiled-in knowledge of any specific peer app.
+- **Full internal rename to droidcli** — the C++ namespace (`droidcli::`),
+  umbrella library files (`droidcli.h`/`droidcli.cpp`), export macro
+  (`DROIDCLI_API`), CMake targets, test binaries, and `DROIDCLI_*` env vars
+  all match the product name now. The CMake **library target** is
+  `droidcli_core` (the `droidcli` name is taken by the CLI executable
+  target). The repository directory/GitHub repo name (`metaagent`) is
+  unchanged.
 - **Ollama stays separate from connectors.** `ai::LanguageAiRuntime`/`/ai/chat`
   (`--ollama-url`, default `:11434`) is the ancillary text-gen seam, built into
   core — it is not a connector. Any inference service (the old LoRA adapter
@@ -50,7 +54,7 @@ in `AGENTS.md` — read it first.
   breaks `winhttp.h` resolution for `droidcli`/`tools/sync_http_client.cpp` -
   build with the MSVC generator, e.g. `cmake -B build -G "Visual Studio 17
   2022" -A x64`, not a MinGW toolchain).
-- **A new `src/<module>/foo.cpp` must be `#include`d from `metaagent.cpp`**, and
+- **A new `src/<module>/foo.cpp` must be `#include`d from `droidcli.cpp`**, and
   a new `*_test.cpp` must be registered in `CMakeLists.txt`. `cli/*.cpp` is
   separate — those are droidcli host translation units, not part of the core
   library TU.

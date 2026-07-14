@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-namespace metaagent::core {
+namespace droidcli::core {
 
 Vec3& Vec3::operator+=(const Vec3& other)
 {
@@ -79,4 +79,4 @@ Vec3 Rotator::rotate_vector(const Vec3& local) const
 		local.x * m20 + local.y * m21 + local.z * m22};
 }
 
-} // namespace metaagent::core
+} // namespace droidcli::core

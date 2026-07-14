@@ -1,6 +1,6 @@
-# metaagent - Architecture
+# droidcli - Architecture
 
-Portable C++17 library for MetaAgent **control logic**: HTTP route handlers,
+Portable C++17 library for Droidcli **control logic**: HTTP route handlers,
 signal/trigger dispatch, media decode + corpus reading, session snapshots,
 command validation, and the AI seams. A host (the desktop app or the headless
 server) supplies transport, windowing, and process I/O through thin callbacks.
@@ -11,7 +11,7 @@ App version: **agent core 0.2.0** (library version 0.2.0 — hold at 0.2.x).
 
 ## System context — a core plus config-driven connectors
 
-metaagent is the **agent controller and network trigger** at the center of an
+droidcli is the **agent controller and network trigger** at the center of an
 open-ended set of peer applications. The portable core decides *what* should
 happen; the droidcli host performs the actual transport, process control, and
 dispatch. Peers are **connectors defined in config** (or registered at
@@ -22,7 +22,7 @@ below as illustrative (dotted) examples, not fixed graph nodes.
 
 ```mermaid
 flowchart LR
-    subgraph MA["metaagent (this repo)"]
+    subgraph MA["droidcli (this repo)"]
         CORE[Portable core src/]
         HOST[cli/ — droidcli daemon]
         HOST --> CORE
@@ -41,7 +41,7 @@ flowchart LR
 
 | Concern | What it owns | Seam in this repo |
 | ------- | ------------ | ----------------- |
-| **metaagent core + droidcli** | Control logic, command + signal + task dispatch, HTTP in/out, corpus reading, process control | — |
+| **droidcli core + host** | Control logic, command + signal + task dispatch, HTTP in/out, corpus reading, process control | — |
 | **A connector** (operator-configured) | Whatever the operator points it at — an inference server, a media player, anything reachable by URL or local command | `net::Connector` (`http_peer` or `launched_process`), registered via `--config` or `POST /api/connectors` |
 
 > **Ollama stays separate.** Ollama is a general **text-generation** endpoint
@@ -57,7 +57,7 @@ flowchart LR
 
 | Goal                   | How                                                                     |
 | ---------------------- | ----------------------------------------------------------------------- |
-| Portability            | C++17, `metaagent::core::`* value types, no engine/framework types      |
+| Portability            | C++17, `droidcli::core::`* value types, no engine/framework types      |
 | Single source of truth | Command validation, JSON shapes, signal envelopes, corpus parsing       |
 | Testability            | CMake + unit tests without network, GPU, or GUI                         |
 | Host bridge            | Hosts inject transport/process I/O via `std::function` callbacks        |
@@ -71,9 +71,9 @@ validation + JSON, it belongs in core.
 ## Repository layout
 
 ```
-metaagent/
-├── metaagent.h                    Umbrella public API
-├── metaagent.cpp                  Single TU — #includes all module .cpp files
+metaagent/                        (repository directory name unchanged)
+├── droidcli.h                     Umbrella public API
+├── droidcli.cpp                   Single TU — #includes all module .cpp files
 ├── src/
 │   ├── initialize.hpp             initialize_defaults()
 │   ├── core/                      Vec3, math, log_sink, value types
@@ -95,7 +95,7 @@ metaagent/
 └── ARCHITECTURE.md
 ```
 
-Public entry point: `#include "metaagent.h"`.
+Public entry point: `#include "droidcli.h"`.
 
 ---
 
@@ -129,9 +129,9 @@ tracking).
 
 ---
 
-## Network triggers (`metaagent/net/signal_router`)
+## Network triggers (`src/net/signal_router`)
 
-The "network trigger" half of metaagent's role: a portable registry + dispatcher
+The "network trigger" half of droidcli's role: a portable registry + dispatcher
 for sending typed signals to peer applications (the media player or any external
 orchestrator). Core owns the **envelope shape, target registry, and delivery
 log**; the host supplies the actual transport.
@@ -164,7 +164,7 @@ flowchart LR
 flowchart LR
     Client[External HTTP client]
     Mount[tools::MiniHttpServer + cli::make_droidcli_route_dispatch]
-    Router[metaagent::net::Router]
+    Router[droidcli::net::Router]
     Handlers[handlers.cpp]
 
     Client --> Mount --> Router --> Handlers

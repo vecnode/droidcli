@@ -5,12 +5,12 @@
 #include "notify/types.hpp"
 #include "session/types.hpp"
 
-namespace metaagent::ai {
+namespace droidcli::ai {
 class LanguageAiRuntime;
 struct LanguageAiTransportCallbacks;
-} // namespace metaagent::ai
+} // namespace droidcli::ai
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 struct HandlerContext {
 	session::RuntimeSession session;
@@ -29,12 +29,12 @@ struct AiChatHandleResult {
 	bool completed_turn = false;
 };
 
-METAAGENT_API HttpResponse handle_health(const HandlerContext& context);
+DROIDCLI_API HttpResponse handle_health(const HandlerContext& context);
 
-METAAGENT_API HttpResponse handle_echo(const HttpRequest& request);
+DROIDCLI_API HttpResponse handle_echo(const HttpRequest& request);
 
-METAAGENT_API NotifyHandleResult handle_notify(const HttpRequest& request);
+DROIDCLI_API NotifyHandleResult handle_notify(const HttpRequest& request);
 
-METAAGENT_API AiChatHandleResult handle_ai_chat(const HttpRequest& request, const HandlerContext& context);
+DROIDCLI_API AiChatHandleResult handle_ai_chat(const HttpRequest& request, const HandlerContext& context);
 
-} // namespace metaagent::net
+} // namespace droidcli::net

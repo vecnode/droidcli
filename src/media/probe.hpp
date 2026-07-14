@@ -3,7 +3,7 @@
 #include "export.hpp"
 #include "core/types.hpp"
 
-namespace metaagent::media {
+namespace droidcli::media {
 
 struct MediaProbeInfo {
 	bool valid = false;
@@ -16,6 +16,6 @@ struct MediaProbeInfo {
 	double frame_rate = 0.0;
 };
 
-METAAGENT_API bool probe_media_file(const core::String& path, MediaProbeInfo& out_info);
+DROIDCLI_API bool probe_media_file(const core::String& path, MediaProbeInfo& out_info);
 
-} // namespace metaagent::media
+} // namespace droidcli::media

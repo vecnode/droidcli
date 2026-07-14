@@ -1,9 +1,12 @@
-# metaagent — agent core 0.2.0
+# droidcli
 
-Portable C++17 core for the metaagent library, plus **droidcli**, a headless
-CLI agent daemon built on top of it.
+![C++](https://img.shields.io/badge/language-C%2B%2B17-00599C?logo=cplusplus&logoColor=white)
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-metaagent does not render or play media itself: it holds the control logic
+Portable C++17 core for the droidcli library, a headless CLI agent daemon
+built on top of it.
+
+droidcli does not render or play media itself: it holds the control logic
 (commands, session, corpus, AI seams) and **coordinates peer applications over
 HTTP through a generic connector system** — droidcli has no compiled-in
 knowledge of any specific peer app. Connectors are either an `http_peer`
@@ -11,9 +14,13 @@ knowledge of any specific peer app. Connectors are either an `http_peer`
 (a local command droidcli can start/stop and track by PID), registered via
 config file or at runtime over HTTP.
 
-> **Not a namespace rename.** "droidcli" is the CLI **binary/product** name
-> only. The C++ namespace (`metaagent::`) and the repository/library name stay
-> `metaagent` — do not attempt a full rename.
+> **Full internal rename.** The C++ namespace (`droidcli::`), the umbrella
+> library files (`droidcli.h`/`droidcli.cpp`), the export macro
+> (`DROIDCLI_API`), and env var prefixes (`DROIDCLI_*`) all match the
+> `droidcli` product name now. The CMake **library target** is named
+> `droidcli_core` (distinct from the `droidcli` **executable** target, since a
+> CMake project can't have two targets with the same name) — the repository
+> directory and GitHub repo name are unchanged.
 
 > **Two separate AI seams, do not conflate them.** **Ollama**
 > (`--ollama-url`, default `:11434`) is an ancillary, general **text-generation**
@@ -38,7 +45,7 @@ an agent: `[AGENTS.md](./AGENTS.md)`.
 
 ## Build
 
-All commands from the repository root (`metaagent/`). Requires CMake 3.20+ and Git.
+All commands from the repository root (`metaagent/`, unchanged directory name). Requires CMake 3.20+ and Git.
 
 **Windows** — VS 2022 **MSVC** x64
 
@@ -54,13 +61,13 @@ Optional FFmpeg overrides:
 
 ```powershell
 # Disable auto-download and use an existing local FFmpeg prefix
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_FFMPEG_AUTO_DOWNLOAD=OFF -DMETAAGENT_FFMPEG_ROOT="C:/path/to/ffmpeg"
+cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DDROIDCLI_FFMPEG_AUTO_DOWNLOAD=OFF -DDROIDCLI_FFMPEG_ROOT="C:/path/to/ffmpeg"
 
 # Keep auto-download enabled but use a custom archive URL
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_FFMPEG_URL="https://.../ffmpeg-win64-shared.zip"
+cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DDROIDCLI_FFMPEG_URL="https://.../ffmpeg-win64-shared.zip"
 
 # Disable insecure TLS retry fallback (default is ON)
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_FFMPEG_ALLOW_INSECURE_DOWNLOAD=OFF
+cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DDROIDCLI_FFMPEG_ALLOW_INSECURE_DOWNLOAD=OFF
 ```
 
 Shortcut: `.\build_and_run.bat` (configures only when needed; accepts `Debug`/`Release`, `--configure`, `--clean`, `--no-run`).
@@ -88,7 +95,7 @@ ctest --test-dir build --output-on-failure
 ## Distribution
 
 `.\build_and_distribute.bat` builds everything **Release** and stages a portable
-folder + zip under `dist\metaagent-<version>\`:
+folder + zip under `dist\droidcli-<version>\`:
 
 | Folder | Contents |
 | ------ | -------- |
@@ -128,7 +135,7 @@ peer config — no compiled-in adapter/media-player knowledge), and a
 ### Interactive TUI (default) vs `--headless`
 
 By default, running `droidcli` opens an **FTXUI terminal dashboard**
-(`cli/tui.{hpp,cpp}`, `metaagent::cli::run_tui`) on the main thread while the
+(`cli/tui.{hpp,cpp}`, `droidcli::cli::run_tui`) on the main thread while the
 HTTP API keeps serving on a background thread underneath it — `curl`/scripts
 work exactly the same whether the TUI is up or not. Pass `--headless` to skip
 the TUI entirely and get the old plain-log foreground daemon loop unchanged
@@ -169,8 +176,8 @@ droidcli [--port 30080] [--config path/to/connectors.json] [--no-ai]
 | `--headless` | off | Skip the interactive TUI; run the plain foreground daemon+HTTP-API loop only (unchanged scriptable behavior) |
 | `--daemon` | off | Documented no-op: droidcli always runs in the foreground (see "Deviations" in the design notes) — use a process supervisor (nssm, Task Scheduler, systemd) for true background operation |
 
-Google search polling reads `METAAGENT_GOOGLE_API_KEY` / `METAAGENT_GOOGLE_CSE_ID`
-/ `METAAGENT_GOOGLE_SEARCH_QUERY` from the environment at startup (see below).
+Google search polling reads `DROIDCLI_GOOGLE_API_KEY` / `DROIDCLI_GOOGLE_CSE_ID`
+/ `DROIDCLI_GOOGLE_SEARCH_QUERY` from the environment at startup (see below).
 
 ### Config file format
 
@@ -266,9 +273,9 @@ curl http://127.0.0.1:30080/api/tasks
 
 ### Google search (background)
 
-Once `METAAGENT_GOOGLE_API_KEY` + `METAAGENT_GOOGLE_CSE_ID` + `METAAGENT_GOOGLE_SEARCH_QUERY`
+Once `DROIDCLI_GOOGLE_API_KEY` + `DROIDCLI_GOOGLE_CSE_ID` + `DROIDCLI_GOOGLE_SEARCH_QUERY`
 are all set (env vars, read at startup), droidcli runs that search every
-`METAAGENT_GOOGLE_SEARCH_INTERVAL_SECONDS` (default 10, also `POST /api/config`-settable)
+`DROIDCLI_GOOGLE_SEARCH_INTERVAL_SECONDS` (default 10, also `POST /api/config`-settable)
 via Google's official **Programmable Search Engine / Custom Search JSON API** —
 a real HTTP GET to `googleapis.com`, not HTML scraping of a search results
 page. Get a free API key + search engine ID at
@@ -312,9 +319,9 @@ Use `--no-ai` to disable `/ai/chat`.
 
 ```mermaid
 flowchart LR
-    subgraph metaagent["metaagent — agent controller / network trigger"]
+    subgraph droidcli["droidcli — agent controller / network trigger"]
         CLI[droidcli.exe headless daemon]
-        LIB[metaagent core library]
+        LIB[droidcli core library]
         CLI --> LIB
     end
 
@@ -331,22 +338,22 @@ flowchart LR
 
 | Namespace             | Responsibility                                                                                              |
 | --------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `metaagent::media`    | PNG/JPEG decode, probe, store, **corpus** (OCR/objects/summaries → subtitles, focus data)                   |
-| `metaagent::net`      | Router, inbound handlers, **`signal_router`** (network triggers to peers), **`connector`** (generic peer registry) |
-| `metaagent::session`  | `RuntimeSession`, feature flags, status text                                                                |
-| `metaagent::app`      | Command parse/validate, runtime catalog, **`tasks`** (persistent task queue)                                |
-| `metaagent::runtime`  | Host service callbacks (recording + AI snapshots/toggles)                                                   |
-| `metaagent::ai`       | Ollama chat client, `LanguageAiRuntime`                                                                     |
-| `metaagent::notify`   | Notify body parsing                                                                                         |
-| `metaagent::cli`      | droidcli host wiring: `DroidHost`, `ProcessManager`, HTTP route mount (not portable — links sockets/process control) |
+| `droidcli::media`    | PNG/JPEG decode, probe, store, **corpus** (OCR/objects/summaries → subtitles, focus data)                   |
+| `droidcli::net`      | Router, inbound handlers, **`signal_router`** (network triggers to peers), **`connector`** (generic peer registry) |
+| `droidcli::session`  | `RuntimeSession`, feature flags, status text                                                                |
+| `droidcli::app`      | Command parse/validate, runtime catalog, **`tasks`** (persistent task queue)                                |
+| `droidcli::runtime`  | Host service callbacks (recording + AI snapshots/toggles)                                                   |
+| `droidcli::ai`       | Ollama chat client, `LanguageAiRuntime`                                                                     |
+| `droidcli::notify`   | Notify body parsing                                                                                         |
+| `droidcli::cli`      | droidcli host wiring: `DroidHost`, `ProcessManager`, HTTP route mount (not portable — links sockets/process control) |
 
 ## Embed elsewhere
 
 ```cpp
-#include "metaagent.h"
+#include "droidcli.h"
 
 int main() {
-    metaagent::initialize_defaults();
+    droidcli::initialize_defaults();
     // Use RouteTable, SignalRouter, ConnectorRegistry, TaskQueue, MediaCorpus,
     // LanguageAiRuntime, etc.
     return 0;

@@ -2,7 +2,7 @@
 
 #include "net/json.hpp"
 
-namespace metaagent::ai {
+namespace droidcli::ai {
 namespace {
 
 core::String trim_trailing_slash(core::String value)
@@ -118,8 +118,8 @@ core::String serialize_chat_messages(const core::Array<ChatMessage>& messages)
 
 		const ChatMessage& message = messages[index];
 		body += "{"
-			+ metaagent::net::json_string_field("role", chat_role_to_string(message.role)) + ","
-			+ metaagent::net::json_string_field("content", message.content)
+			+ droidcli::net::json_string_field("role", chat_role_to_string(message.role)) + ","
+			+ droidcli::net::json_string_field("content", message.content)
 			+ "}";
 	}
 	body += "]";
@@ -169,9 +169,9 @@ OllamaOutboundRequest build_ollama_chat_request(
 	}
 
 	request.body = "{"
-		+ metaagent::net::json_string_field("model", config.model) + ","
+		+ droidcli::net::json_string_field("model", config.model) + ","
 		+ "\"messages\":" + serialize_chat_messages(messages) + ","
-		+ metaagent::net::json_bool_field("stream", config.stream);
+		+ droidcli::net::json_bool_field("stream", config.stream);
 
 	if (config.temperature >= 0.0f)
 	{
@@ -238,4 +238,4 @@ OllamaChatResponse parse_ollama_chat_response(
 	return result;
 }
 
-} // namespace metaagent::ai
+} // namespace droidcli::ai

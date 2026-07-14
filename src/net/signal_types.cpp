@@ -4,7 +4,7 @@
 
 #include <chrono>
 
-namespace metaagent::net {
+namespace droidcli::net {
 namespace {
 
 int64_t current_timestamp_ms()
@@ -147,4 +147,4 @@ bool parse_signal_envelope(
 	return true;
 }
 
-} // namespace metaagent::net
+} // namespace droidcli::net

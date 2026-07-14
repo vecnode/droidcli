@@ -6,7 +6,7 @@
 
 int main()
 {
-	using namespace metaagent::app;
+	using namespace droidcli::app;
 
 	TaskQueue queue;
 
@@ -14,12 +14,12 @@ int main()
 	task_one.connector_id = "adapter-example";
 	task_one.command = "summarize";
 	task_one.payload_json = "{\"text\":\"hello\"}";
-	const metaagent::core::String id_one = queue.enqueue(task_one);
+	const droidcli::core::String id_one = queue.enqueue(task_one);
 	assert(!id_one.empty());
 
 	Task task_two;
 	task_two.command = "launch";
-	const metaagent::core::String id_two = queue.enqueue(task_two);
+	const droidcli::core::String id_two = queue.enqueue(task_two);
 	assert(id_two != id_one);
 
 	assert(queue.list().size() == 2);
@@ -52,13 +52,13 @@ int main()
 	assert(!queue.complete("does-not-exist"));
 	assert(!queue.fail("does-not-exist", "err"));
 
-	const metaagent::core::String json = build_tasks_json(queue.list());
-	assert(json.find("\"status\":\"done\"") != metaagent::core::String::npos);
-	assert(json.find("\"status\":\"failed\"") != metaagent::core::String::npos);
+	const droidcli::core::String json = build_tasks_json(queue.list());
+	assert(json.find("\"status\":\"done\"") != droidcli::core::String::npos);
+	assert(json.find("\"status\":\"failed\"") != droidcli::core::String::npos);
 
 	Task parsed;
-	metaagent::core::String error;
-	const metaagent::core::String request_json =
+	droidcli::core::String error;
+	const droidcli::core::String request_json =
 		"{\"connector_id\":\"adapter-example\",\"command\":\"summarize\",\"payload_json\":\"{}\"}";
 	assert(parse_task_request_from_json(request_json, parsed, error));
 	assert(error.empty());
@@ -66,7 +66,7 @@ int main()
 	assert(parsed.command == "summarize");
 
 	Task invalid;
-	metaagent::core::String invalid_error;
+	droidcli::core::String invalid_error;
 	assert(!parse_task_request_from_json("{}", invalid, invalid_error));
 	assert(!invalid_error.empty());
 

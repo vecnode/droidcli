@@ -1,6 +1,6 @@
 #include "ai/types.hpp"
 
-namespace metaagent::ai {
+namespace droidcli::ai {
 
 core::String chat_role_to_string(const ChatRole role)
 {
@@ -30,4 +30,4 @@ ChatRole chat_role_from_string(const core::String& role)
 	return ChatRole::User;
 }
 
-} // namespace metaagent::ai
+} // namespace droidcli::ai

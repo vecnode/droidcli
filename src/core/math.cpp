@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-namespace metaagent::core::math {
+namespace droidcli::core::math {
 
 float smooth_step01(float alpha)
 {
@@ -63,4 +63,4 @@ float evaluate_curve01(float normalized_time, const float* samples, int sample_c
 	return clamp(lerp(samples[lower_index], samples[upper_index], fraction), 0.0f, 1.0f);
 }
 
-} // namespace metaagent::core::math
+} // namespace droidcli::core::math

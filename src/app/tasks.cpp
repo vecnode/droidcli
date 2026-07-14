@@ -6,7 +6,7 @@
 #include <chrono>
 #include <sstream>
 
-namespace metaagent::app {
+namespace droidcli::app {
 namespace {
 
 int64_t current_timestamp_ms()
@@ -183,4 +183,4 @@ bool parse_task_request_from_json(
 	return true;
 }
 
-} // namespace metaagent::app
+} // namespace droidcli::app

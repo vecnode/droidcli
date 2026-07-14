@@ -1,6 +1,6 @@
 #include "core/log_sink.hpp"
 
-namespace metaagent::core {
+namespace droidcli::core {
 
 namespace {
 LogSink* g_log_sink = nullptr;
@@ -16,4 +16,4 @@ LogSink* get_log_sink()
 	return g_log_sink;
 }
 
-} // namespace metaagent::core
+} // namespace droidcli::core

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
-namespace metaagent::app {
+namespace droidcli::app {
 namespace {
 
 core::String to_lower_ascii(core::String value)
@@ -114,7 +114,7 @@ CommandResult validate_command(const CommandId command, const session::RuntimeSe
 	if (!session.active)
 	{
 		result.success = false;
-		result.user_message = "MetaAgent runtime is inactive.";
+		result.user_message = "Droidcli runtime is inactive.";
 		return result;
 	}
 
@@ -159,4 +159,4 @@ CommandResult validate_command(const CommandId command, const session::RuntimeSe
 	}
 }
 
-} // namespace metaagent::app
+} // namespace droidcli::app

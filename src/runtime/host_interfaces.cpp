@@ -1,6 +1,6 @@
 #include "runtime/host_interfaces.hpp"
 
-namespace metaagent::runtime {
+namespace droidcli::runtime {
 
 RecordingSnapshot default_recording_snapshot()
 {
@@ -52,4 +52,4 @@ AiSnapshot invoke_query_ai(const HostServiceCallbacks& callbacks)
 	return default_ai_snapshot();
 }
 
-} // namespace metaagent::runtime
+} // namespace droidcli::runtime

@@ -5,7 +5,7 @@
 
 #include <functional>
 
-namespace metaagent::runtime {
+namespace droidcli::runtime {
 
 struct RecordingSnapshot {
 	bool runtime_enabled = false;
@@ -27,16 +27,16 @@ struct HostServiceCallbacks {
 	std::function<AiSnapshot()> query_ai;
 };
 
-METAAGENT_API RecordingSnapshot default_recording_snapshot();
+DROIDCLI_API RecordingSnapshot default_recording_snapshot();
 
-METAAGENT_API AiSnapshot default_ai_snapshot();
+DROIDCLI_API AiSnapshot default_ai_snapshot();
 
-METAAGENT_API bool invoke_toggle_recording(const HostServiceCallbacks& callbacks);
+DROIDCLI_API bool invoke_toggle_recording(const HostServiceCallbacks& callbacks);
 
-METAAGENT_API bool invoke_toggle_autopilot(const HostServiceCallbacks& callbacks);
+DROIDCLI_API bool invoke_toggle_autopilot(const HostServiceCallbacks& callbacks);
 
-METAAGENT_API RecordingSnapshot invoke_query_recording(const HostServiceCallbacks& callbacks);
+DROIDCLI_API RecordingSnapshot invoke_query_recording(const HostServiceCallbacks& callbacks);
 
-METAAGENT_API AiSnapshot invoke_query_ai(const HostServiceCallbacks& callbacks);
+DROIDCLI_API AiSnapshot invoke_query_ai(const HostServiceCallbacks& callbacks);
 
-} // namespace metaagent::runtime
+} // namespace droidcli::runtime

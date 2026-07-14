@@ -3,7 +3,7 @@
 #include "core/types.hpp"
 #include "export.hpp"
 
-namespace metaagent::ai {
+namespace droidcli::ai {
 
 enum class ChatRole {
 	System,
@@ -53,8 +53,8 @@ struct LanguageAiSnapshot {
 	int32_t transcript_length = 0;
 };
 
-METAAGENT_API core::String chat_role_to_string(ChatRole role);
+DROIDCLI_API core::String chat_role_to_string(ChatRole role);
 
-METAAGENT_API ChatRole chat_role_from_string(const core::String& role);
+DROIDCLI_API ChatRole chat_role_from_string(const core::String& role);
 
-} // namespace metaagent::ai
+} // namespace droidcli::ai

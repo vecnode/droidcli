@@ -3,7 +3,7 @@
 #include "net/signal_types.hpp"
 #include "export.hpp"
 
-namespace metaagent::net {
+namespace droidcli::net {
 
 class SignalRouter {
 public:
@@ -26,13 +26,13 @@ private:
 	static constexpr size_t kMaxLogEntries = 128;
 };
 
-METAAGENT_API core::String build_targets_json(const core::Array<SignalTarget>& targets);
+DROIDCLI_API core::String build_targets_json(const core::Array<SignalTarget>& targets);
 
-METAAGENT_API core::String build_signal_log_json(const core::Array<SignalLogEntry>& entries);
+DROIDCLI_API core::String build_signal_log_json(const core::Array<SignalLogEntry>& entries);
 
-METAAGENT_API bool parse_target_from_json(
+DROIDCLI_API bool parse_target_from_json(
 	const core::String& json,
 	SignalTarget& out_target,
 	core::String& out_error);
 
-} // namespace metaagent::net
+} // namespace droidcli::net
