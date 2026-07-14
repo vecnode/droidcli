@@ -210,7 +210,7 @@ flowchart LR
 | Namespace             | Responsibility                                                                                              |
 | --------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `droidcli::media`    | PNG/JPEG decode, probe, store, **corpus** (OCR/objects/summaries → subtitles, focus data)                   |
-| `droidcli::net`      | Router, inbound handlers, **`signal_router`** (network triggers to peers), **`connector`** (generic peer registry) |
+| `droidcli::net`      | Router, inbound handlers, **`connector`** (generic peer registry)                                            |
 | `droidcli::session`  | `RuntimeSession`, feature flags, status text                                                                |
 | `droidcli::app`      | Command parse/validate, runtime catalog, **`tasks`** (persistent task queue)                                |
 | `droidcli::runtime`  | Host service callbacks (recording + AI snapshots/toggles)                                                   |

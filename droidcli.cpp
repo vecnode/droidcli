@@ -10,7 +10,6 @@
 #include "media/decode.cpp"
 #include "media/probe.cpp"
 #include "media/store.cpp"
-#include "media/corpus.cpp"
 
 #include "app/commands.cpp"
 #include "app/runtime_catalog.cpp"
@@ -22,8 +21,6 @@
 #include "net/json.cpp"
 #include "net/handlers.cpp"
 #include "net/router.cpp"
-#include "net/signal_types.cpp"
-#include "net/signal_router.cpp"
 #include "net/connector.cpp"
 #include "notify/parse.cpp"
 #include "session/status.cpp"

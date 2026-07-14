@@ -48,10 +48,6 @@ target_link_libraries(droidcli_media_decode_test PRIVATE droidcli_core)
 droidcli_stage_ffmpeg_runtime(droidcli_media_decode_test)
 add_test(NAME media_decode_test COMMAND droidcli_media_decode_test)
 
-add_executable(droidcli_corpus_test tests/corpus_test.cpp)
-target_link_libraries(droidcli_corpus_test PRIVATE droidcli_core)
-add_test(NAME corpus_test COMMAND droidcli_corpus_test)
-
 add_executable(droidcli_net_handler_test tests/net_handler_test.cpp)
 target_link_libraries(droidcli_net_handler_test PRIVATE droidcli_core)
 add_test(NAME net_handler_test COMMAND droidcli_net_handler_test)
@@ -71,10 +67,6 @@ add_test(NAME ollama_client_test COMMAND droidcli_ollama_client_test)
 add_executable(droidcli_language_runtime_test tests/language_runtime_test.cpp)
 target_link_libraries(droidcli_language_runtime_test PRIVATE droidcli_core)
 add_test(NAME language_runtime_test COMMAND droidcli_language_runtime_test)
-
-add_executable(droidcli_signal_router_test tests/signal_router_test.cpp)
-target_link_libraries(droidcli_signal_router_test PRIVATE droidcli_core)
-add_test(NAME signal_router_test COMMAND droidcli_signal_router_test)
 
 add_executable(droidcli_runtime_catalog_test tests/runtime_catalog_test.cpp)
 target_link_libraries(droidcli_runtime_catalog_test PRIVATE droidcli_core)

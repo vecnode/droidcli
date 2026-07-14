@@ -67,9 +67,8 @@ core concern.
 droidcli.h / droidcli.cpp   Umbrella public API; single TU includes all module .cpp
 src/
   core/        Vec3, math, log_sink, value types
-  media/       PNG/JPEG decode, probe, MediaStore, corpus (OCR/objects/summaries)
-  net/         Router + handlers (inbound), signal_router (triggers), connector
-               (generic peer registry), json
+  media/       PNG/JPEG decode, probe, MediaStore
+  net/         Router + handlers (inbound), connector (generic peer registry), json
   notify/      Notify body parsing
   session/     RuntimeSession + status strings
   app/         Command registry, runtime catalog, tasks (persistent task queue)
@@ -151,16 +150,12 @@ in one change so the core/host/test trio stays in sync:
 
 1. **HTTP route (inbound)** — handler in `net/handlers.cpp`, register in the
    router; mount it in `cli/http_mount.cpp`'s `CustomRouteFn`.
-2. **Signal/trigger (the "network trigger" path)** — extend
-   `net/signal_types` (envelope/target shape + JSON) and `net/signal_router`
-   (dispatch/log); the host supplies the `SignalTransportFn`. Add a
-   `signal_router_test` case.
-3. **Validated command** — `CommandId` + `validate_command` in `app/commands`,
+2. **Validated command** — `CommandId` + `validate_command` in `app/commands`,
    a host-side handler in `apply_command_side_effects`.
-4. **Ollama text-gen** — change request/response shaping in `ai/ollama_client` +
+3. **Ollama text-gen** — change request/response shaping in `ai/ollama_client` +
    `ai/language_runtime`; the host owns the actual POST via
    `LanguageAiTransportCallbacks`. Do not bake a specific model/endpoint into core.
-5. **New connector (peer app)** — usually **config-only**, not a code change.
+4. **New connector (peer app)** — usually **config-only**, not a code change.
    For an `http_peer`, add an entry to `connectors.json` (or
    `POST /api/connectors`) with a `base_url`; `DroidHost::call_connector`
    proxies to it generically via `/api/connectors/{id}/call`. For a
@@ -168,17 +163,16 @@ in one change so the core/host/test trio stays in sync:
    `launch_cmd`/`work_dir` (see `cli/process_manager.{hpp,cpp}`) — only touch
    `DroidHost::launch_connector`/`stop_connector` in `cli/host.cpp` if the
    process needs bespoke lifecycle behavior beyond launch/stop.
-6. **New task command** — `app::Task.command` is dispatched in
+5. **New task command** — `app::Task.command` is dispatched in
    `DroidHost::tick_tasks()` (`cli/host.cpp`): `"launch"`/`"stop"` map to
    `launch_connector`/`stop_connector`, anything else is treated as an HTTP
    path called on the task's `connector_id` via `call_connector`. Extend that
    `if`/`else if` chain for a new dispatch kind.
-7. **Outbound HTTPS to an external (non-localhost) API** — `tools/sync_http_client`
-   only did plain HTTP over raw sockets until the Google search feature needed
-   real TLS; `https://` URLs now route through WinHTTP (Windows-native, no new
-   dependency) while `http://` keeps the original raw-socket path. If you add
-   another external HTTPS integration, it gets this transport for free — just
-   build an `https://` URL. Don't add a second, parallel HTTPS implementation.
+6. **Outbound HTTPS to an external (non-localhost) API** — `tools/sync_http_client`
+   routes `https://` URLs through WinHTTP (Windows-native, no new dependency)
+   while `http://` keeps the original raw-socket path. Any `https://` connector
+   or external integration gets this transport for free — just build the URL.
+   Don't add a second, parallel HTTPS implementation.
 
 **Every new core `src/<module>/*_test.cpp` must be registered in
 `CMakeLists.txt`** and pass under `ctest`.
