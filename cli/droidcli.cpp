@@ -187,13 +187,6 @@ int main(int argc, char** argv)
 	host_config.ollama_url = ollama_url;
 	host_config.ollama_model = ollama_model;
 
-	const char* env_google_key = std::getenv("DROIDCLI_GOOGLE_API_KEY");
-	const char* env_google_cse = std::getenv("DROIDCLI_GOOGLE_CSE_ID");
-	const char* env_google_query = std::getenv("DROIDCLI_GOOGLE_SEARCH_QUERY");
-	if (env_google_key != nullptr) host_config.google_api_key = env_google_key;
-	if (env_google_cse != nullptr) host_config.google_search_engine_id = env_google_cse;
-	if (env_google_query != nullptr) host_config.google_search_query = env_google_query;
-
 	host.configure(host_config);
 	host.initialize();
 

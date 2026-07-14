@@ -99,9 +99,9 @@ std::wstring widen_ascii(const core::String& value)
 
 // HTTPS transport via WinHTTP (handles the TLS handshake natively - no
 // OpenSSL/Schannel code of our own). The plain-HTTP path below (raw sockets)
-// is untouched and still used for the local Ollama/media-player/adapter
-// peers; this path exists for external HTTPS-only APIs (e.g. Google's Custom
-// Search JSON API), which have no plain-HTTP fallback.
+// is untouched and still used for local peers (Ollama, connectors on
+// 127.0.0.1); this path exists for any https:// connector or external API
+// with no plain-HTTP fallback.
 bool https_request_winhttp(
 	const core::String& method,
 	const ParsedHttpUrl& parsed,
@@ -323,10 +323,10 @@ bool sync_http_request(
 #if defined(_WIN32)
 		return https_request_winhttp(method, parsed, body, status_code_out, response_body_out);
 #else
-		// No TLS transport wired up on this platform yet - every peer this
-		// codebase talks to today (Ollama, media-player-cpp, the LoRA
-		// adapter) is plain HTTP on localhost. Add an OpenSSL (or similar)
-		// path here if a non-Windows host needs outbound HTTPS.
+		// No TLS transport wired up on this platform yet - Ollama and every
+		// connector this codebase talks to today are plain HTTP on
+		// localhost. Add an OpenSSL (or similar) path here if a non-Windows
+		// host needs outbound HTTPS.
 		return false;
 #endif
 	}

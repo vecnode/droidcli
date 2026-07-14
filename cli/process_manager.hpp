@@ -7,10 +7,10 @@
 
 namespace droidcli::cli {
 
-// Tracks external processes launched by the desktop host (media-player build/run,
-// adapter inference server). Each process is keyed by a logical id so the host can
-// launch, query (PID + running state), and stop it. Centralised so the UI always
-// knows the PID of every app droidcli controls.
+// Tracks external processes launched for launched_process connectors. Each
+// process is keyed by a logical id (the connector id) so the host can launch,
+// query (PID + running state), and stop it. Centralised so droidcli always
+// knows the PID of every process it controls.
 struct ProcessInfo {
 	core::String key;
 	core::String label;

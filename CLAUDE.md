@@ -35,11 +35,10 @@ in `AGENTS.md` — read it first.
 - **No engine code.** Unreal Engine / particle / camera support was removed at
   0.2.0 — do not reintroduce engine modules, UE callbacks, or "ue5" scoping.
 - **HTTPS exists now, but only for external APIs.** `tools/sync_http_client`
-  routes `https://` URLs through WinHTTP (added for Google's Custom Search JSON
-  API in `src/net/google_search.*`) while `http://` still uses the original
-  raw-socket path for the local peers. Don't add a second HTTPS implementation.
-  Never echo the Google API key back via `GET /api/config` — only a
-  `*_configured: bool`.
+  routes `https://` URLs through WinHTTP while `http://` still uses the
+  original raw-socket path for local peers. Don't add a second HTTPS
+  implementation. If a connector or feature needs a secret (API key, token),
+  never echo it back via `GET /api/config` — only a `*_configured: bool`.
 - **Before editing, decide core vs host.** Pure state/parsing/JSON/validation →
   `src/`. Any real transport, process, window, or filesystem I/O → a host via a
   callback. See the "Golden rule" in `AGENTS.md`.

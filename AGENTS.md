@@ -76,17 +76,15 @@ src/
   ai/          Ollama text-gen client + LanguageAiRuntime
   runtime/     Host service callbacks (recording/AI)
 cli/           droidcli host: DroidHost (config store, ConnectorRegistry +
-               TaskQueue, Ollama/Google-search wiring), ProcessManager
-               (PID-tracked launch of any launched_process connector), HTTP
-               route mount (CustomRouteFn), droidcli.cpp entrypoint
+               TaskQueue, Ollama wiring), ProcessManager (PID-tracked launch
+               of any launched_process connector), HTTP route mount
+               (CustomRouteFn), droidcli.cpp entrypoint
 tools/         mini_http_server (raw-socket HTTP server, custom-route
                fallback hook) + sync_http_client (outbound HTTP/HTTPS)
 tests/         One *_test.cpp per core module (no engine, no network)
-config/        connectors.example.json (illustrative connector config)
+config/        connectors.example.json (generic, illustrative connector config)
 cmake/         FFmpeg.cmake (auto-download helper)
 third_party/   Vendored deps (FFmpeg is local-only, git-ignored)
-external/      Submodules: pre-training + media-player-cpp (illustrative
-               peers, not built-in — see config/connectors.example.json)
 distribute/    Templates staged into the dist (run_all.bat, README_DIST.txt)
 ```
 
@@ -115,20 +113,17 @@ build_and_run.bat            # Debug/Release, --configure, --clean, --no-run
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j && ./build/droidcli
 
-# Portable distribution (Release build of everything + dist/ folder + zip)
-build_and_distribute.bat   # see README "Distribution"; needs MSYS2 for the media player
+# Portable distribution (droidcli.exe + FFmpeg DLLs, dist/ folder + zip)
+build_and_distribute.bat   # see README "Distribution"
 ```
 
 **Distribution rules:** the whole tree builds with **one MSVC runtime**
 (`CMAKE_MSVC_RUNTIME_LIBRARY` in the root CMakeLists: dynamic Debug, static
 Release) — never set a per-target runtime that diverges, the Release link breaks.
-Unlike the old windowed app, droidcli does **not** auto-discover a dist layout
-by path convention — connectors are explicit config
-(`connectors.json`/`--config`); keep `build_and_distribute.bat` staging and
-`distribute/run_all.bat` in sync if you change that contract. Weights and
-media are git-ignored in the submodules — the distribute script copies them
-from configured working copies, never from `external/`. `.bat` files must be
-**CRLF**.
+droidcli does **not** auto-discover peer apps by path convention — connectors
+are explicit config (`connectors.json`/`--config`); keep
+`build_and_distribute.bat` staging and `distribute/run_all.bat` in sync if you
+change that contract. `.bat` files must be **CRLF**.
 
 **Always run `ctest` after touching anything in `src/`.** Tests are
 engine-free and network-free by design; if a change makes a core module require a
@@ -212,27 +207,10 @@ in one change so the core/host/test trio stays in sync:
 (default `30080`), `--config <path>` (connectors JSON file, loaded via
 `net::parse_connector_from_json` per array entry), `--no-ai`, `--ollama-url`,
 `--ollama-model`, `--daemon` (documented no-op — always runs in the
-foreground; see README "Deviations"). Google search polling is configured via
-env vars, read once at startup:
-
-| Variable | Default | Purpose |
-| -------- | ------- | ------- |
-| `DROIDCLI_GOOGLE_API_KEY` | empty | Google Programmable Search Engine API key |
-| `DROIDCLI_GOOGLE_CSE_ID` | empty | Google Programmable Search Engine ID ("cx") |
-| `DROIDCLI_GOOGLE_SEARCH_QUERY` | empty | Query re-run periodically (search is a no-op until all three Google vars are set) |
-
-`google_search_interval_seconds` (default `10`) and the Ollama URL/model are
-also runtime-editable via `POST /api/config` / `POST /api/ollama/config`.
-
-**Google search** lives in `src/net/google_search.{hpp,cpp}` (core: URL build +
-hand-rolled JSON parse, no JSON library) + `DroidHost::run_google_search()`
-(host: the actual HTTPS call via `tools::sync_http_get`, logged to the `search`
-app-log channel). `DroidHost::tick()` accumulates `delta_seconds` (called from
-the droidcli poll loop) and fires the search on a detached background thread
-every `google_search_interval_seconds` - never on the poll thread, since the
-HTTP call blocks. The API key is never echoed back by `GET /api/config` (only
-`google_api_key_configured: bool`) - keep that asymmetry if you touch
-`build_config_json`/`update_config`.
+foreground; use a process supervisor for true background operation), and
+`--headless` (skip the default FTXUI TUI, run the plain foreground
+daemon+HTTP-API loop only). The Ollama URL/model are runtime-editable via
+`POST /api/config` / `POST /api/ollama/config`.
 
 **Centralised process control** lives in `cli/process_manager.{hpp,cpp}`
 (Windows Job Object / POSIX process group, so stop kills the whole tree; bare

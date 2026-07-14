@@ -80,10 +80,6 @@ add_executable(droidcli_runtime_catalog_test tests/runtime_catalog_test.cpp)
 target_link_libraries(droidcli_runtime_catalog_test PRIVATE droidcli_core)
 add_test(NAME runtime_catalog_test COMMAND droidcli_runtime_catalog_test)
 
-add_executable(droidcli_google_search_test tests/google_search_test.cpp)
-target_link_libraries(droidcli_google_search_test PRIVATE droidcli_core)
-add_test(NAME google_search_test COMMAND droidcli_google_search_test)
-
 add_executable(droidcli_connector_test tests/connector_test.cpp)
 target_link_libraries(droidcli_connector_test PRIVATE droidcli_core)
 add_test(NAME connector_test COMMAND droidcli_connector_test)

@@ -163,43 +163,8 @@ void DroidHost::wire_callbacks()
 
 void DroidHost::tick(const float delta_seconds)
 {
+	(void)delta_seconds;
 	tick_tasks();
-
-	core::String api_key;
-	core::String search_engine_id;
-	core::String query;
-	int32_t interval_seconds = 10;
-	bool already_in_flight = false;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		api_key = config_.google_api_key;
-		search_engine_id = config_.google_search_engine_id;
-		query = config_.google_search_query;
-		interval_seconds = config_.google_search_interval_seconds;
-		already_in_flight = google_search_in_flight_;
-
-		if (api_key.empty() || search_engine_id.empty() || query.empty())
-		{
-			return;
-		}
-
-		google_search_elapsed_seconds_ += delta_seconds;
-		if (google_search_elapsed_seconds_ < static_cast<float>(std::max(1, interval_seconds)) || already_in_flight)
-		{
-			return;
-		}
-		google_search_elapsed_seconds_ = 0.0f;
-		google_search_in_flight_ = true;
-	}
-
-	// Fire-and-forget: the actual HTTP call blocks, so it must not run on the
-	// daemon's poll thread.
-	std::thread([this]()
-	{
-		run_google_search();
-		std::lock_guard<std::mutex> lock(mutex_);
-		google_search_in_flight_ = false;
-	}).detach();
 }
 
 session::RuntimeSession& DroidHost::session()
@@ -289,12 +254,7 @@ core::String DroidHost::build_config_json() const
 	stream << '{';
 	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
 	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
-	stream << net::json_string_field("ollama_model", config_.ollama_model) << ',';
-	// The key itself is never echoed back (secret hygiene) - only whether one is set.
-	stream << net::json_bool_field("google_api_key_configured", !config_.google_api_key.empty()) << ',';
-	stream << net::json_string_field("google_search_engine_id", config_.google_search_engine_id) << ',';
-	stream << net::json_string_field("google_search_query", config_.google_search_query) << ',';
-	stream << "\"google_search_interval_seconds\":" << config_.google_search_interval_seconds;
+	stream << net::json_string_field("ollama_model", config_.ollama_model);
 	stream << '}';
 	return stream.str();
 }
@@ -315,24 +275,6 @@ core::String DroidHost::update_config(const core::String& body)
 		config_.ollama_model = ollama_model;
 	}
 
-	const core::String google_api_key = net::extract_json_string_field(body, "google_api_key");
-	if (!google_api_key.empty())
-	{
-		config_.google_api_key = google_api_key;
-	}
-
-	const core::String google_search_engine_id = net::extract_json_string_field(body, "google_search_engine_id");
-	if (!google_search_engine_id.empty())
-	{
-		config_.google_search_engine_id = google_search_engine_id;
-	}
-
-	const core::String google_search_query = net::extract_json_string_field(body, "google_search_query");
-	if (!google_search_query.empty())
-	{
-		config_.google_search_query = google_search_query;
-	}
-
 	if (config_.enable_ai)
 	{
 		ai::OllamaConfig ollama_config;
@@ -347,10 +289,7 @@ core::String DroidHost::update_config(const core::String& body)
 	stream << net::json_bool_field("success", true) << ',';
 	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
 	stream << net::json_string_field("ollama_url", config_.ollama_url) << ',';
-	stream << net::json_string_field("ollama_model", config_.ollama_model) << ',';
-	stream << net::json_bool_field("google_api_key_configured", !config_.google_api_key.empty()) << ',';
-	stream << net::json_string_field("google_search_engine_id", config_.google_search_engine_id) << ',';
-	stream << net::json_string_field("google_search_query", config_.google_search_query);
+	stream << net::json_string_field("ollama_model", config_.ollama_model);
 	stream << '}';
 	return stream.str();
 }
@@ -561,53 +500,6 @@ core::String DroidHost::update_ollama_config(const core::String& body)
 		+ net::json_bool_field("success", true) + ","
 		+ net::json_string_field("model", config_.ollama_model)
 		+ "}";
-}
-
-void DroidHost::run_google_search()
-{
-	net::GoogleSearchConfig search_config;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		search_config.api_key = config_.google_api_key;
-		search_config.search_engine_id = config_.google_search_engine_id;
-		search_config.query = config_.google_search_query;
-	}
-
-	if (search_config.api_key.empty() || search_config.search_engine_id.empty()
-		|| search_config.query.empty())
-	{
-		return;
-	}
-
-	const core::String url = net::build_google_search_url(search_config);
-	int32_t status_code = 0;
-	core::String response_body;
-	const bool transport_ok = tools::sync_http_get(url, status_code, response_body);
-
-	if (!transport_ok)
-	{
-		append_app_log("search", "in", "Google search unreachable (network error)", false);
-		return;
-	}
-
-	const net::GoogleSearchResponse response =
-		net::parse_google_search_response(status_code, response_body);
-
-	if (!response.success)
-	{
-		append_app_log("search", "in",
-			"Google search failed: " + response.error_message, false);
-		return;
-	}
-
-	append_app_log("search", "out",
-		"query=\"" + search_config.query + "\" -> " + std::to_string(response.items.size())
-			+ " results (of " + response.total_results + ")", true);
-
-	for (const net::GoogleSearchResultItem& item : response.items)
-	{
-		append_app_log("search", "in", item.title + " - " + item.link, true);
-	}
 }
 
 core::String DroidHost::register_connector(const core::String& body)

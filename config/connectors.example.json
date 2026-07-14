@@ -1,20 +1,20 @@
 {
-  "_comment": "Example droidcli connector config, loaded with --config config/connectors.example.json. Connectors are ILLUSTRATIVE, not built-in: droidcli's core has no knowledge of any specific peer app. The two entries below happen to reference the two apps this repo historically talked to (the LoRA adapter inference service and the media-player-cpp openFrameworks player), but they are just ordinary connector configs an operator supplies - swap in any HTTP peer or local process.",
+  "_comment": "Example droidcli connector config, loaded with --config config/connectors.example.json. Connectors are generic: droidcli's core has no compiled-in knowledge of any specific peer app. Swap these placeholders for whatever HTTP peer or local process you actually want droidcli to control.",
   "connectors": [
     {
-      "id": "adapter-example",
+      "id": "my-http-peer",
       "kind": "http_peer",
-      "base_url": "http://127.0.0.1:8008",
+      "base_url": "http://127.0.0.1:9000",
       "enabled": true,
-      "capabilities": "summarize"
+      "capabilities": "example"
     },
     {
-      "id": "media-player-example",
+      "id": "my-launched-process",
       "kind": "launched_process",
-      "launch_cmd": "media-player-cpp.exe",
-      "work_dir": "C:/path/to/media-player-cpp/bin",
+      "launch_cmd": "some-server.exe",
+      "work_dir": "C:/path/to/project",
       "enabled": true,
-      "capabilities": "play"
+      "capabilities": "example"
     }
   ]
 }
