@@ -78,7 +78,8 @@ want droidcli to control.
 
 ```
 droidcli [--port 30080] [--config path/to/connectors.json] [--no-ai]
-         [--ollama-url URL] [--ollama-model NAME] [--headless] [--daemon]
+         [--ollama-url URL] [--ollama-model NAME] [--token API_TOKEN]
+         [--headless] [--daemon]
 ```
 
 | Flag | Default | Purpose |
@@ -88,8 +89,42 @@ droidcli [--port 30080] [--config path/to/connectors.json] [--no-ai]
 | `--no-ai` | off | Disable `/ai/chat` (Ollama text-gen) |
 | `--ollama-url` | `http://127.0.0.1:11434` | Ollama base URL |
 | `--ollama-model` | `llama3.2` | Ollama model name |
+| `--token` | (none) | Bearer token required on every `/api/*` route and `/ai/chat`. Falls back to `DROIDCLI_API_TOKEN`, then to a randomly generated token printed at startup. See "Security" below. |
 | `--headless` | off | Skip the interactive TUI; run the plain foreground daemon+HTTP-API loop only (unchanged scriptable behavior) |
 | `--daemon` | off | Documented no-op: droidcli always runs in the foreground — use a process supervisor (nssm, Task Scheduler, systemd) for true background operation |
+
+### Security: API authentication
+
+droidcli's HTTP API can execute shell commands (`/api/run`) and drive an LLM
+tool-calling loop that can call those same routes (`/api/agent/turn`) — so
+every `/api/*` route, plus `/ai/chat` (an Ollama call has a real cost even
+though it can't run shell commands), requires an
+`Authorization: Bearer <token>` header. `/health`, `/echo`, and `/notify` stay
+open since they're read-only/log-only and liveness checks shouldn't need a
+token.
+
+The token comes from, in order: `--token <value>`, the `DROIDCLI_API_TOKEN`
+env var, or — if neither is set — a random 32-byte (64 hex char) token
+generated at startup and printed to the console:
+
+```
+droidcli: generated API token (save this): 3f9a1c...
+```
+
+droidcli **never** starts the HTTP API with authentication disabled. A
+request without a valid token gets `401 Unauthorized`:
+
+```sh
+curl -i http://127.0.0.1:30080/api/status
+# HTTP/1.1 401 ...
+# {"error":"unauthorized","message":"missing or invalid Authorization: Bearer <token> header"}
+
+curl -i http://127.0.0.1:30080/api/status -H "Authorization: Bearer 3f9a1c..."
+# HTTP/1.1 200 ...
+```
+
+The in-process TUI (`cli/tui.cpp`) calls `DroidHost` methods directly, not
+over HTTP, so it never needs the token.
 
 ### Config file format
 
@@ -119,25 +154,27 @@ at `[config/connectors.example.json](./config/connectors.example.json)`.
 
 ### HTTP routes
 
+`[auth]` marks routes that require the `Authorization: Bearer <token>` header (see "Security" above).
+
 | Method | Route | Description |
 | ------ | ----- | ------------ |
 | `GET` | `/health` | Liveness + session snapshot (portable handler) |
 | `GET` / `POST` | `/echo` | Echo query/body |
 | `POST` | `/notify` | Ingest notify event |
-| `POST` | `/ai/chat` | Ollama text-gen chat via `LanguageAiRuntime` |
-| `GET` | `/api/status` | Host status: recording / autopilot toggles |
-| `GET` | `/api/network/status` | Networking flag + connector count |
-| `GET` | `/api/config` | Effective host configuration (Ollama) |
-| `POST` | `/api/config` | Update host configuration at runtime |
-| `GET` | `/api/runtimes` | Runtime catalog (all host-local) |
-| `GET` | `/api/notify/log` | Recent notify messages |
-| `GET` | `/api/app/log` | Recent host application log |
-| `POST` | `/api/command` | Dispatch validated command (`{"command":"toggle_recording"}`) |
-| `GET` | `/api/ollama/status` | Ollama text-gen endpoint status + model list |
-| `POST` | `/api/ollama/config` | Update Ollama model at runtime |
-| `GET` | `/api/process/status` | PID + running state of every launched connector process |
+| `POST` | `/ai/chat` `[auth]` | Ollama text-gen chat via `LanguageAiRuntime` |
+| `GET` | `/api/status` `[auth]` | Host status: AI-enabled flag, connector/task counts |
+| `GET` | `/api/network/status` `[auth]` | Networking flag + connector count |
+| `GET` | `/api/config` `[auth]` | Effective host configuration (Ollama) |
+| `POST` | `/api/config` `[auth]` | Update host configuration at runtime |
+| `GET` | `/api/notify/log` `[auth]` | Recent notify messages |
+| `GET` | `/api/app/log` `[auth]` | Recent host application log |
+| `POST` | `/api/run` `[auth]` | Run a one-shot shell command — body `{"command":"...","work_dir":"...","timeout_ms":30000}` |
+| `POST` | `/api/agent/turn` `[auth]` | Tool-calling agent turn — body `{"message":"...","clear":false}` |
+| `GET` | `/api/ollama/status` `[auth]` | Ollama text-gen endpoint status + model list |
+| `POST` | `/api/ollama/config` `[auth]` | Update Ollama model at runtime |
+| `GET` | `/api/process/status` `[auth]` | PID + running state of every launched connector process |
 
-**Connectors** (generic peer config, replaces the old hardcoded `/api/adapter/*` and `/api/media/*`):
+**Connectors** (generic peer config, replaces the old hardcoded `/api/adapter/*` and `/api/media/*`; all `[auth]`):
 
 | Method | Route | Description |
 | ------ | ----- | ------------ |
@@ -148,23 +185,72 @@ at `[config/connectors.example.json](./config/connectors.example.json)`.
 | `POST` | `/api/connectors/{id}/stop` | Stop it |
 | `POST` | `/api/connectors/{id}/call` | Proxy an HTTP call to an `http_peer` connector — body `{"path":"/api/x","method":"POST","payload_json":"{...}"}` |
 
-**Tasks** (persistent pending/running/done/failed queue; `tick_tasks()` runs every poll loop iteration and dispatches one pending task per tick):
+**Tasks** (persistent pending/running/done/failed queue; `tick_tasks()` runs every poll loop iteration and dispatches one pending task per tick; all `[auth]`):
 
 | Method | Route | Description |
 | ------ | ----- | ------------ |
 | `GET` | `/api/tasks` | List all tasks (history capped, pending/running always kept) |
-| `POST` | `/api/tasks` | Enqueue a task — body `{"connector_id":"...","command":"launch\|stop\|<path>","payload_json":"{...}"}` |
-| `GET` | `/api/tasks/{id}` | Task status |
+| `POST` | `/api/tasks` | Enqueue a task — body `{"connector_id":"...","command":"launch\|stop\|run\|<path>","payload_json":"{...}"}` |
+| `GET` | `/api/tasks/{id}` | Task status, including `result_json` once done (e.g. captured stdout/stderr for a `"run"` task) |
 
 A task with `command: "launch"` or `"stop"` calls `launch_connector`/`stop_connector`
-on its `connector_id`; any other command is treated as the HTTP path to call on
-an `http_peer` connector.
+on its `connector_id`; `command: "run"` runs `payload_json`'s `{"command":"...","work_dir":"..."}`
+as a one-shot shell command (no `connector_id` needed); any other command is
+treated as the HTTP path to call on an `http_peer` connector.
+
+### The agent turn (`POST /api/agent/turn`)
+
+Drives a bounded (5-hop) Ollama tool-calling loop: the model sees a fixed tool
+set (`list_connectors`, `connector_status`, `launch_connector`,
+`stop_connector`, `call_connector`, `enqueue_task`, `list_tasks`,
+`run_command`) and can call any of them against this `DroidHost` instance
+before replying in natural language.
+
+```sh
+curl -X POST http://127.0.0.1:30080/api/agent/turn \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"list the registered connectors"}'
+```
+
+Response shape:
+
+```json
+{
+  "ok": true,
+  "assistant": "You have 2 connectors registered: ...",
+  "actions": [
+    {"tool": "list_connectors", "arguments_json": "{}", "result_json": "{\"connectors\":[...]}"}
+  ]
+}
+```
+
+If Ollama is disabled or unreachable, or the transcript budget (5 hops) runs
+out before a final natural-language reply, the response is still valid JSON
+(`ok:false` with an `error`, or `ok:true` with `budget_exhausted:true` and the
+last assistant text) rather than a crash.
+
+### One-shot commands (`POST /api/run`)
+
+```sh
+curl -X POST http://127.0.0.1:30080/api/run \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"echo hello","work_dir":"","timeout_ms":30000}'
+# {"launched":true,"exit_code":0,"stdout":"hello\r\n","stderr":"","error":""}
+```
+
+Synchronous and blocking (unlike the PID-tracked `launched_process` connector
+lifecycle) — captures stdout/stderr and enforces `timeout_ms`, killing the
+process and reporting `error` if it's exceeded.
 
 ## Shared HTTP API (library handlers)
 
 `/health`, `/echo`, `/notify`, and `/ai/chat` are handled by the portable
 `net::RouteTable` (in `src/net/`) and are identical no matter which host binds
-them:
+them. `/ai/chat` requires the bearer token when served by droidcli's
+`mini_http_server` (see "Security" above); `/health`, `/echo`, and `/notify`
+do not:
 
 | Method         | Route      | Description                                            |
 | -------------- | ---------- | ------------------------------------------------------ |
@@ -182,6 +268,7 @@ curl -X POST http://127.0.0.1:30080/notify \
   -H "Content-Type: application/json" \
   -d '{"message":"test event"}'
 curl -X POST http://127.0.0.1:30080/ai/chat \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Hello"}'
 ```
@@ -212,9 +299,8 @@ flowchart LR
 | `droidcli::media`    | PNG/JPEG decode, probe, store, **corpus** (OCR/objects/summaries → subtitles, focus data)                   |
 | `droidcli::net`      | Router, inbound handlers, **`connector`** (generic peer registry)                                            |
 | `droidcli::session`  | `RuntimeSession`, feature flags, status text                                                                |
-| `droidcli::app`      | Command parse/validate, runtime catalog, **`tasks`** (persistent task queue)                                |
-| `droidcli::runtime`  | Host service callbacks (recording + AI snapshots/toggles)                                                   |
-| `droidcli::ai`       | Ollama chat client, `LanguageAiRuntime`                                                                     |
+| `droidcli::app`      | **`tasks`** (persistent task queue)                                                                          |
+| `droidcli::ai`       | Ollama chat client (incl. tool-calling), `LanguageAiRuntime`                                                |
 | `droidcli::notify`   | Notify body parsing                                                                                         |
 | `droidcli::cli`      | droidcli host wiring: `DroidHost`, `ProcessManager`, HTTP route mount (not portable — links sockets/process control) |
 
