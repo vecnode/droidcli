@@ -33,8 +33,6 @@
 #include "net/handlers.hpp"
 #include "net/json.hpp"
 #include "net/router.hpp"
-#include "net/signal_router.hpp"
-#include "net/signal_types.hpp"
 #include "net/types.hpp"
 #include "notify/parse.hpp"
 #include "session/status.hpp"

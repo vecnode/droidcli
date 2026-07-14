@@ -22,8 +22,6 @@
 #include "net/json.cpp"
 #include "net/handlers.cpp"
 #include "net/router.cpp"
-#include "net/signal_types.cpp"
-#include "net/signal_router.cpp"
 #include "net/connector.cpp"
 #include "notify/parse.cpp"
 #include "session/status.cpp"

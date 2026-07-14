@@ -72,10 +72,6 @@ add_executable(droidcli_language_runtime_test tests/language_runtime_test.cpp)
 target_link_libraries(droidcli_language_runtime_test PRIVATE droidcli_core)
 add_test(NAME language_runtime_test COMMAND droidcli_language_runtime_test)
 
-add_executable(droidcli_signal_router_test tests/signal_router_test.cpp)
-target_link_libraries(droidcli_signal_router_test PRIVATE droidcli_core)
-add_test(NAME signal_router_test COMMAND droidcli_signal_router_test)
-
 add_executable(droidcli_runtime_catalog_test tests/runtime_catalog_test.cpp)
 target_link_libraries(droidcli_runtime_catalog_test PRIVATE droidcli_core)
 add_test(NAME runtime_catalog_test COMMAND droidcli_runtime_catalog_test)
