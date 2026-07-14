@@ -1,4 +1,7 @@
-# metaagent — agent core 0.2.0
+# droidcli
+
+![C++](https://img.shields.io/badge/language-C%2B%2B17-00599C?logo=cplusplus&logoColor=white)
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
 Portable C++17 core for the metaagent library, plus **droidcli**, a headless
 CLI agent daemon built on top of it.
