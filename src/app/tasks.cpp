@@ -59,7 +59,7 @@ std::optional<Task> TaskQueue::claim_next()
 	return std::nullopt;
 }
 
-bool TaskQueue::complete(const core::String& task_id)
+bool TaskQueue::complete(const core::String& task_id, const core::String& result_json)
 {
 	for (Task& task : tasks_)
 	{
@@ -67,6 +67,7 @@ bool TaskQueue::complete(const core::String& task_id)
 		{
 			task.status = "done";
 			task.updated_at_ms = current_timestamp_ms();
+			task.result_json = result_json;
 			trim_history();
 			return true;
 		}
@@ -141,7 +142,8 @@ core::String build_task_json(const Task& task)
 	stream << net::json_string_field("status", task.status) << ',';
 	stream << "\"created_at_ms\":" << task.created_at_ms << ',';
 	stream << "\"updated_at_ms\":" << task.updated_at_ms << ',';
-	stream << net::json_string_field("error_message", task.error_message);
+	stream << net::json_string_field("error_message", task.error_message) << ',';
+	stream << net::json_string_field("result_json", task.result_json);
 	stream << '}';
 	return stream.str();
 }
