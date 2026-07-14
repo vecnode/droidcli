@@ -556,30 +556,32 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		Elements lines;
 		for (const ChatEntry& entry : chat_entries)
 		{
+			// paragraph() (not text()) wraps within the panel's width instead
+			// of overflowing off the right edge.
 			if (entry.role == "user")
 			{
-				lines.push_back(text("you: " + entry.text) | bold | color(Color::Cyan));
+				lines.push_back(paragraph("[USER] " + entry.text) | bold | color(Color::Blue));
 			}
 			else if (entry.role == "assistant")
 			{
-				lines.push_back(text("agent: " + entry.text) | color(Color::Green));
+				lines.push_back(paragraph("[AGENT] " + entry.text) | color(Color::Green));
 			}
 			else if (entry.role == "tool")
 			{
-				lines.push_back(text("  " + entry.text) | dim | color(Color::Yellow));
+				lines.push_back(paragraph("  " + entry.text) | dim | color(Color::Yellow));
 			}
 			else if (entry.role == "error")
 			{
-				lines.push_back(text("error: " + entry.text) | color(Color::Red));
+				lines.push_back(paragraph("error: " + entry.text) | color(Color::Red));
 			}
 			else
 			{
-				lines.push_back(text(entry.text) | dim);
+				lines.push_back(paragraph("[SYSTEM] " + entry.text) | dim);
 			}
 		}
 		if (agent_turn_in_flight)
 		{
-			lines.push_back(text("agent: (thinking...)") | dim);
+			lines.push_back(text("[AGENT] (thinking...)") | dim);
 		}
 		if (lines.empty())
 		{
