@@ -2,13 +2,13 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 REM -----------------------------------------------------------------------------
-REM MetaAgent desktop app — configure (only when needed), build, and run.
+REM droidcli agent daemon — configure (only when needed), build, and run.
 REM
 REM Usage: build_and_run.bat [Debug^|Release] [--configure] [--clean] [--no-run]
 REM   Debug^|Release  build configuration (default: Debug)
 REM   --configure     force the CMake configure step
 REM   --clean         delete the CMake cache, then re-configure
-REM   --no-run        build only, do not launch the app
+REM   --no-run        build only, do not launch droidcli
 REM
 REM The CMake configure step runs automatically only when build-msvc has no cache
 REM yet (or with --configure/--clean). On later runs it is skipped — the Visual
@@ -69,18 +69,18 @@ if "%CLEAN_BUILD%"=="1" (
 REM --- Configure only when there is no cache yet, or when forced ---
 if not exist "%BUILD_DIR%\CMakeCache.txt" set "FORCE_CONFIGURE=1"
 if "%FORCE_CONFIGURE%"=="1" (
-  echo [1/3] Configuring %BUILD_DIR% ^(Visual Studio 2022 x64, METAAGENT_BUILD_APP=ON^)
-  "%CMAKE_EXE%" -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A x64 -DMETAAGENT_BUILD_APP=ON
+  echo [1/3] Configuring %BUILD_DIR% ^(Visual Studio 2022 x64^)
+  "%CMAKE_EXE%" -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A x64
   if errorlevel 1 goto error
 ) else (
   echo [1/3] Reusing existing %BUILD_DIR% cache ^(pass --configure to force^).
 )
 
-echo [2/3] Building metaagent-app ^(%CONFIG%^)
-"%CMAKE_EXE%" --build "%BUILD_DIR%" --target metaagent-app -j --config %CONFIG%
+echo [2/3] Building droidcli ^(%CONFIG%^)
+"%CMAKE_EXE%" --build "%BUILD_DIR%" --target droidcli -j --config %CONFIG%
 if errorlevel 1 goto error
 
-set "APP_EXE=%BUILD_DIR%\app\%CONFIG%\metaagent-app.exe"
+set "APP_EXE=%BUILD_DIR%\%CONFIG%\droidcli.exe"
 if not exist "%APP_EXE%" (
   echo [error] Built executable not found: %APP_EXE%
   goto error

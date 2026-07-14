@@ -14,6 +14,7 @@
 
 #include "app/commands.cpp"
 #include "app/runtime_catalog.cpp"
+#include "app/tasks.cpp"
 #include "runtime/host_interfaces.cpp"
 #include "ai/types.cpp"
 #include "ai/ollama_client.cpp"
@@ -24,6 +25,7 @@
 #include "net/router.cpp"
 #include "net/signal_types.cpp"
 #include "net/signal_router.cpp"
+#include "net/connector.cpp"
 #include "notify/parse.cpp"
 #include "session/status.cpp"
 

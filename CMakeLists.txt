@@ -84,17 +84,31 @@ add_executable(metaagent_google_search_test tests/google_search_test.cpp)
 target_link_libraries(metaagent_google_search_test PRIVATE metaagent)
 add_test(NAME google_search_test COMMAND metaagent_google_search_test)
 
-add_executable(metaagent_server tools/metaagent_server.cpp tools/mini_http_server.cpp tools/sync_http_client.cpp)
-target_include_directories(metaagent_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
-target_link_libraries(metaagent_server PRIVATE metaagent)
-if(WIN32)
-    target_link_libraries(metaagent_server PRIVATE ws2_32 winhttp)
-    target_compile_definitions(metaagent_server PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-endif()
+add_executable(metaagent_connector_test tests/connector_test.cpp)
+target_link_libraries(metaagent_connector_test PRIVATE metaagent)
+add_test(NAME connector_test COMMAND metaagent_connector_test)
 
-option(METAAGENT_BUILD_APP "Build the MetaAgent desktop webview application (app/)" OFF)
-if(METAAGENT_BUILD_APP)
-    add_subdirectory(app)
+add_executable(metaagent_task_queue_test tests/task_queue_test.cpp)
+target_link_libraries(metaagent_task_queue_test PRIVATE metaagent)
+add_test(NAME task_queue_test COMMAND metaagent_task_queue_test)
+
+add_executable(droidcli
+    cli/droidcli.cpp
+    cli/host.cpp
+    cli/http_mount.cpp
+    cli/process_manager.cpp
+    tools/mini_http_server.cpp
+    tools/sync_http_client.cpp
+)
+target_include_directories(droidcli
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_SOURCE_DIR}/cli
+)
+target_link_libraries(droidcli PRIVATE metaagent)
+if(WIN32)
+    target_link_libraries(droidcli PRIVATE ws2_32 winhttp)
+    target_compile_definitions(droidcli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
 install(TARGETS metaagent

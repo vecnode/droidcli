@@ -13,6 +13,12 @@ namespace metaagent::tools {
 
 using NotifyCallback = std::function<void(const metaagent::core::String& message)>;
 
+// Fallback dispatch tried when the built-in net::RouteTable (health/echo/notify/
+// ai-chat) doesn't handle a request. Return true and fill out_response if handled.
+using CustomRouteFn = std::function<bool(
+	const metaagent::net::HttpRequest& request,
+	metaagent::net::HttpResponse& out_response)>;
+
 struct MiniHttpServerOptions {
 	int32_t port = 30080;
 	metaagent::session::RuntimeSession session;
@@ -20,6 +26,7 @@ struct MiniHttpServerOptions {
 	bool enable_language_ai = true;
 	metaagent::ai::OllamaConfig ollama_config;
 	metaagent::core::String system_prompt;
+	CustomRouteFn custom_dispatch;
 };
 
 class MiniHttpServer {

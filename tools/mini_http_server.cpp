@@ -340,6 +340,10 @@ bool MiniHttpServer::poll_once(const int32_t timeout_ms)
 				options_.on_notify(dispatch.notify.notify_message.text);
 			}
 		}
+		else if (options_.custom_dispatch && options_.custom_dispatch(request, response))
+		{
+			// handled by custom_dispatch, response already filled in.
+		}
 		else
 		{
 			response.status = net::HttpStatus::NotFound;

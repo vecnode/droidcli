@@ -1,26 +1,26 @@
 @echo off
 rem -----------------------------------------------------------------------------
-rem MetaAgent distribution launcher.
-rem Points metaagent at the sibling folders of this dist and starts it. The app
-rem also auto-discovers this layout by itself; the env vars below just make the
-rem wiring explicit and let you edit paths in one place.
+rem droidcli distribution launcher.
+rem Starts droidcli.exe headless, pointed at the connectors.json next to this
+rem script (edit it to reference the sibling media-player\/adapter\ folders, or
+rem any other http_peer/launched_process connector). droidcli has no window -
+rem it is an HTTP agent daemon; use the routes below or curl to drive it.
 rem Copyright (c) vecnode 2026
 rem -----------------------------------------------------------------------------
 setlocal EnableExtensions
 set "ROOT=%~dp0"
 
-set "METAAGENT_MEDIA_PLAYER_DIR=%ROOT%media-player"
-set "METAAGENT_MEDIA_RUN_CMD=media-player-cpp.exe"
-set "METAAGENT_ADAPTER_DIR=%ROOT%adapter\deploy"
-set "METAAGENT_ADAPTER_LAUNCH_CMD=deploy.bat"
-set "METAAGENT_DATASET_DIR=%ROOT%datasets"
-set "METAAGENT_MEDIA_DATA_DIR=%ROOT%media-player\data"
-
-if not exist "%ROOT%metaagent\metaagent-app.exe" (
-	echo [error] metaagent\metaagent-app.exe not found next to this script.
+if not exist "%ROOT%droidcli\droidcli.exe" (
+	echo [error] droidcli\droidcli.exe not found next to this script.
 	pause
 	exit /b 1
 )
 
-start "metaagent" /D "%ROOT%metaagent" "%ROOT%metaagent\metaagent-app.exe"
+if not exist "%ROOT%connectors.json" (
+	echo [warn] connectors.json not found next to this script - starting with no connectors.
+	echo        Copy config\connectors.example.json from the repo and edit it, or register
+	echo        connectors at runtime via POST /api/connectors.
+)
+
+start "droidcli" /D "%ROOT%droidcli" "%ROOT%droidcli\droidcli.exe" --port 30080 --config "%ROOT%connectors.json"
 endlocal
