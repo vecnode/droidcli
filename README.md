@@ -1,53 +1,27 @@
 # droidcli
 
-![C++](https://img.shields.io/badge/language-C%2B%2B17-00599C?logo=cplusplus&logoColor=white)
+![C++](https://img.shields.io/badge/language-C%2B%2B17-00599C?logo=cplusplus&logoColor=white)  
 ![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-Portable C++17 core for the droidcli library, a headless CLI agent daemon
-built on top of it.
+`droidcli` ìs a library to create agents that execute multimodal tasks, a headless CLI agent daemon.
 
-droidcli does not render or play media itself: it holds the control logic
-(commands, session, corpus, AI seams) and **coordinates peer applications over
-HTTP through a generic connector system** — droidcli has no compiled-in
-knowledge of any specific peer app. Connectors are either an `http_peer`
-(reached by URL, e.g. a local inference server) or a `launched_process`
-(a local command droidcli can start/stop and track by PID), registered via
-config file or at runtime over HTTP.
 
-> **Full internal rename.** The C++ namespace (`droidcli::`), the umbrella
-> library files (`droidcli.h`/`droidcli.cpp`), the export macro
-> (`DROIDCLI_API`), and env var prefixes (`DROIDCLI_*`) all match the
-> `droidcli` product name now. The CMake **library target** is named
-> `droidcli_core` (distinct from the `droidcli` **executable** target, since a
-> CMake project can't have two targets with the same name) — the repository
-> directory and GitHub repo name are unchanged.
+Core capabilities: 
+- HTTP (inbound + outbound)
+- signal/trigger dispatch
+- media and corpus decode
+- Ollama API seam
+- Persistent task queue
+- Launched processes connectors with PID tracking
 
-> **Two separate AI seams, do not conflate them.** **Ollama**
-> (`--ollama-url`, default `:11434`) is an ancillary, general **text-generation**
-> endpoint behind `/ai/chat` — it is not a connector, it's built into the core
-> `ai::LanguageAiRuntime`. Any purpose-trained inference service (an OCR→summary
-> LoRA adapter, or anything else) is registered as an ordinary `http_peer`
-> connector instead; it gets no special-cased code path.
-
-Core capabilities: **HTTP (inbound + outbound)**, **signal/trigger dispatch**,
-**media decode + corpus reading (OCR/objects/summaries)**, **session + command
-validation**, **the Ollama AI seam**, **a generic connector registry**, **a
-persistent task queue**, and **centralised process control** (launch/stop any
-`launched_process` connector with PID tracking).
-
-The **entrypoint** is `[cli/droidcli.cpp](./cli/droidcli.cpp)` — a headless
-HTTP daemon (`droidcli.exe`), no window, no WebView, no GTK. There used to be
-a separate windowed desktop app (`app/`); it has been removed entirely and
-droidcli is now the only host.
-
-Full design notes: `[ARCHITECTURE.md](./ARCHITECTURE.md)`. Working in the repo as
-an agent: `[AGENTS.md](./AGENTS.md)`.
+Full design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
+ Working in the repo as an agent: [AGENTS.md](./AGENTS.md).
 
 ## Build
 
-All commands from the repository root (`metaagent/`, unchanged directory name). Requires CMake 3.20+ and Git.
+Requires CMake 3.20+ and Git.
 
-**Windows** — VS 2022 **MSVC** x64
+**Windows** - VS 2022 **MSVC** x64
 
 On first configure, FFmpeg is downloaded automatically into `third_party/ffmpeg/` when missing.
 
@@ -97,67 +71,6 @@ ctest --test-dir build --output-on-failure
 `.\build_and_distribute.bat` builds everything **Release** and stages a portable
 folder + zip under `dist\droidcli-<version>\`:
 
-| Folder | Contents |
-| ------ | -------- |
-| `droidcli\` | `droidcli.exe` + FFmpeg DLLs |
-| `media-player\` | `media-player-cpp.exe` + MinGW DLLs + `data\` corpus/media (staged unconditionally, unrelated to whether you actually reference it as a connector) |
-| `adapter\` | pre-training deploy code + uv files + the **trained LoRA adapter** (`training/runs/llava15_lora/final_adapter`, ~40 MB — your model, staged as-is; **no base/fused model weights**, ~14 GB, downloaded on first run instead) |
-| `datasets\` | corpus CSVs |
-| `run_all.bat` | starts droidcli with `--config connectors.json` |
-
-Unlike the old windowed app, droidcli does **not** auto-discover
-`media-player\`/`adapter\`/`datasets\` by path convention — connectors are
-explicit config (`connectors.json`, copied from
-`config/connectors.example.json` and edited to point at the sibling folders).
-
-Config (env vars): `DIST_MEDIA_DIR` (media player working copy — point it at your
-openFrameworks tree so `bin\data` media ships; the submodule has code only),
-`DIST_OF_ROOT` (when the media dir is outside an OF tree), `DIST_ADAPTER_DIR`,
-`DIST_ADAPTER_WEIGHTS_DIR` (trained LoRA adapter to stage; default
-`%DIST_ADAPTER_DIR%\training\runs\llava15_lora\final_adapter` — warns, doesn't
-fail, if missing), `DIST_DATASET_DIR`, `MSYS2_ROOT`. Flags: `--skip-media`, `--no-zip`.
-
-Docker was considered and deliberately **not** used: the media player is a
-native Windows GUI app (OpenGL + Media Foundation) and cannot meaningfully run
-in a container; droidcli itself is a plain headless binary and could run in
-one, but there is no current need. The adapter is the best container
-candidate — worth a Dockerfile only if it moves to a Linux GPU server.
-
----
-
-## droidcli agent daemon (`cli/`)
-
-Headless HTTP agent daemon: a process you start once and leave running. It
-owns a session, the Ollama text-gen seam, a **connector registry** (generic
-peer config — no compiled-in adapter/media-player knowledge), and a
-**persistent task queue** it dispatches from its own poll loop.
-
-### Interactive TUI (default) vs `--headless`
-
-By default, running `droidcli` opens an **FTXUI terminal dashboard**
-(`cli/tui.{hpp,cpp}`, `droidcli::cli::run_tui`) on the main thread while the
-HTTP API keeps serving on a background thread underneath it — `curl`/scripts
-work exactly the same whether the TUI is up or not. Pass `--headless` to skip
-the TUI entirely and get the old plain-log foreground daemon loop unchanged
-(scriptable/CI/systemd use).
-
-The dashboard has three read-only-plus-launch/stop panels, refreshed roughly
-every 500ms from `DroidHost`'s existing JSON accessors (`list_connectors_json`,
-`connector_status_json`, `list_tasks_json`, `build_app_log_json`) — no new
-state, no connector-registration form (that stays JSON-config/API driven):
-
-- **Connectors** — every registered connector with live status (process
-  running/PID for `launched_process`, `/health` reachability for `http_peer`).
-- **Tasks** — the task queue with live pending → running → done/failed
-  transitions.
-- **App Log** — a scrolling tail of the host's application log.
-
-| Key | Action |
-| --- | ------ |
-| `↑`/`↓` or `j`/`k` | Move the connector selection |
-| `l` | Launch the selected connector (`launched_process` only) |
-| `s` | Stop the selected connector |
-| `q` or `Ctrl+C` | Quit (stops the HTTP server and exits) |
 
 ### CLI flags
 
@@ -249,27 +162,6 @@ A task with `command: "launch"` or `"stop"` calls `launch_connector`/`stop_conne
 on its `connector_id`; any other command is treated as the HTTP path to call on
 an `http_peer` connector.
 
-### Example session
-
-```sh
-# Start droidcli with the example connectors.
-droidcli --port 30080 --config config/connectors.example.json
-
-# Confirm it's up and see what loaded.
-curl http://127.0.0.1:30080/health
-curl http://127.0.0.1:30080/api/connectors
-
-# Register a new connector at runtime.
-curl -X POST http://127.0.0.1:30080/api/connectors \
-  -d '{"id":"my-peer","kind":"http_peer","base_url":"http://127.0.0.1:9000","capabilities":"summarize"}'
-
-# Launch a launched_process connector directly.
-curl -X POST http://127.0.0.1:30080/api/connectors/media-player-example/launch
-
-# Or queue it as a task and poll for completion.
-curl -X POST http://127.0.0.1:30080/api/tasks -d '{"connector_id":"my-peer","command":"launch"}'
-curl http://127.0.0.1:30080/api/tasks
-```
 
 ### Google search (background)
 
@@ -347,17 +239,7 @@ flowchart LR
 | `droidcli::notify`   | Notify body parsing                                                                                         |
 | `droidcli::cli`      | droidcli host wiring: `DroidHost`, `ProcessManager`, HTTP route mount (not portable — links sockets/process control) |
 
-## Embed elsewhere
 
-```cpp
-#include "droidcli.h"
+# License
 
-int main() {
-    droidcli::initialize_defaults();
-    // Use RouteTable, SignalRouter, ConnectorRegistry, TaskQueue, MediaCorpus,
-    // LanguageAiRuntime, etc.
-    return 0;
-}
-```
-
-Details: `[ARCHITECTURE.md](./ARCHITECTURE.md)`.
+Licensed under the [Apache 2.0](./LICENSE)  license.

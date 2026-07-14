@@ -1,6 +1,0 @@
-[submodule "external/pre-training"]
-	path = external/pre-training
-	url = https://github.com/vecnode/pre-training.git
-[submodule "external/media-player-cpp"]
-	path = external/media-player-cpp
-	url = https://github.com/vecnode/media-player-cpp.git
