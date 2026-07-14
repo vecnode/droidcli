@@ -16,15 +16,6 @@ struct HostConfig {
 	core::String ollama_model = "llama3.2";
 	core::String system_prompt =
 		"You are a concise assistant embedded in the droidcli agent daemon.";
-
-	// Periodic Google Programmable Search Engine ("Custom Search JSON API")
-	// polling. Disabled (no-op) unless api_key + search_engine_id + query are
-	// all set - get a free key + engine id at
-	// https://programmablesearchengine.google.com/ (free tier: 100 queries/day).
-	core::String google_api_key;
-	core::String google_search_engine_id;
-	core::String google_search_query;
-	int32_t google_search_interval_seconds = 10;
 };
 
 // DroidHost is the headless agent daemon core: it owns the session state, the
@@ -58,11 +49,6 @@ public:
 
 	core::String build_ollama_status_json();
 	core::String update_ollama_config(const core::String& body);
-
-	// Runs one Google search request (blocking HTTP) and logs each result to
-	// the app log (channel "search"). No-op if not configured. Safe to call
-	// from any thread.
-	void run_google_search();
 
 	// Connector registry (generic peer config: http_peer or launched_process).
 	core::String register_connector(const core::String& body);
@@ -119,8 +105,6 @@ private:
 	core::Array<AppLogEntry> app_log_;
 	bool recording_active_ = false;
 	bool autopilot_enabled_ = false;
-	float google_search_elapsed_seconds_ = 0.0f;
-	bool google_search_in_flight_ = false;
 	mutable std::mutex mutex_;
 };
 

@@ -99,9 +99,9 @@ std::wstring widen_ascii(const core::String& value)
 
 // HTTPS transport via WinHTTP (handles the TLS handshake natively - no
 // OpenSSL/Schannel code of our own). The plain-HTTP path below (raw sockets)
-// is untouched and still used for the local Ollama/media-player/adapter
-// peers; this path exists for external HTTPS-only APIs (e.g. Google's Custom
-// Search JSON API), which have no plain-HTTP fallback.
+// is untouched and still used for local peers (Ollama, connectors on
+// 127.0.0.1); this path exists for any https:// connector or external API
+// with no plain-HTTP fallback.
 bool https_request_winhttp(
 	const core::String& method,
 	const ParsedHttpUrl& parsed,
