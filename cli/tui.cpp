@@ -576,16 +576,19 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			}
 			else
 			{
-				lines.push_back(paragraph("[SYSTEM] " + entry.text) | dim);
+				// [SYSTEM] (Ollama setup prompts, etc.) shows up often - an
+				// explicit dark grey keeps it visually de-emphasized without
+				// relying on `dim`, whose actual look varies by terminal.
+				lines.push_back(paragraph("[SYSTEM] " + entry.text) | color(Color::GrayDark));
 			}
 		}
 		if (agent_turn_in_flight)
 		{
-			lines.push_back(text("[AGENT] (thinking...)") | dim);
+			lines.push_back(text("[AGENT] (thinking...)"));
 		}
 		if (lines.empty())
 		{
-			lines.push_back(text("(no messages yet - type below and press Enter)") | dim);
+			lines.push_back(text("(no messages yet - type below and press Enter)"));
 		}
 		return vbox(lines) | yframe | flex;
 	});
