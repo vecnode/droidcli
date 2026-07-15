@@ -5,7 +5,7 @@ the connector/task-queue system, media decode, session snapshots, and the
 Ollama AI seam (incl. tool-calling). The droidcli host (`cli/`) supplies
 transport, process I/O, and API auth through thin callbacks.
 
-App version: **agent core 0.2.0** (library version 0.2.0 — hold at 0.2.x).
+App version: **droidcli 0.1.0** (first release under this name).
 
 ---
 
@@ -34,7 +34,7 @@ flowchart LR
 
 | Concern | What it owns | Seam in this repo |
 | ------- | ------------ | ----------------- |
-| **droidcli core + host** | Control logic, command + signal + task dispatch, HTTP in/out, corpus reading, process control | — |
+| **droidcli core + host** | Control logic, command + task dispatch, HTTP in/out, process control | — |
 | **A connector** (operator-configured) | Whatever the operator points it at — an inference server, a media player, anything reachable by URL or local command | `net::Connector` (`http_peer` or `launched_process`), registered via `--config` or `POST /api/connectors` |
 
 > **Ollama stays separate.** Ollama is a general **text-generation** endpoint
@@ -51,7 +51,7 @@ flowchart LR
 | Goal                   | How                                                                     |
 | ---------------------- | ----------------------------------------------------------------------- |
 | Portability            | C++17, `droidcli::core::`* value types, no engine/framework types      |
-| Single source of truth | Command validation, JSON shapes, signal envelopes, corpus parsing       |
+| Single source of truth | Command validation, JSON shapes, connector/task state                   |
 | Testability            | CMake + unit tests without network, GPU, or GUI                         |
 | Host bridge            | Hosts inject transport/process I/O via `std::function` callbacks        |
 
@@ -65,19 +65,18 @@ validation + JSON, it belongs in core.
 
 ```
 metaagent/                        (repository directory name unchanged)
-├── droidcli.h                     Umbrella public API
-├── droidcli.cpp                   Single TU — #includes all module .cpp files
+├── droidcli_core.h                Umbrella public API
+├── droidcli_core.cpp              Single TU — #includes all module .cpp files
 ├── src/
 │   ├── initialize.hpp             initialize_defaults()
 │   ├── core/                      Vec3, math, log_sink, value types
-│   ├── media/                     PNG/JPEG decode, probe, MediaStore, corpus
+│   ├── media/                     PNG/JPEG decode, probe, MediaStore
 │   ├── net/                       Route table, handlers, connector, json
 │   ├── notify/                    Notify body parsing
 │   ├── session/                   RuntimeSession + status strings
-│   ├── app/                       Command registry, runtime catalog
-│   ├── ai/                        Ollama text-gen client + LanguageAiRuntime
-│   └── runtime/                   Host service callbacks (recording/AI)
-├── cli/                            droidcli host: DroidHost, ProcessManager, HTTP route mount, entrypoint
+│   ├── app/                       tasks (persistent task queue)
+│   └── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime
+├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, HTTP route mount, entrypoint
 ├── tools/                         mini_http_server + sync_http_client (raw-socket HTTP, WinHTTP for https://)
 ├── tests/                         One *_test.cpp per core module
 ├── config/                         Example connector config (connectors.example.json)
@@ -87,7 +86,7 @@ metaagent/                        (repository directory name unchanged)
 └── ARCHITECTURE.md
 ```
 
-Public entry point: `#include "droidcli.h"`.
+Public entry point: `#include "droidcli_core.h"`.
 
 ---
 

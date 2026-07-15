@@ -5,6 +5,6 @@
 		}
 	],
 	"settings": {
-		"powershell.cwd": "droidcli"
+		"powershell.cwd": "metaagent"
 	}
 }

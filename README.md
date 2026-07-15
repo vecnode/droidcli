@@ -7,11 +7,10 @@
 
 Core capabilities: 
 - HTTP (inbound + outbound)
-- signal/trigger dispatch
-- media and corpus decode
-- Ollama API seam
+- media decode (FFmpeg-backed)
+- Ollama API seam (incl. tool-calling)
 - Persistent task queue
-- Launched processes connectors with PID tracking
+- Generic connectors (http_peer or launched_process, PID-tracked)
 
 Full design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
  Working in the repo as an agent: [AGENTS.md](./AGENTS.md).

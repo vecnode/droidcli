@@ -4,10 +4,10 @@
  * Droidcli portable library — public entry point.
  *
  * Implementation is compiled from a single translation unit:
- *   droidcli/droidcli.cpp
+ *   droidcli_core.cpp
  *
- * Embed in other applications by adding `droidcli/src` to your include path
- * and compiling `droidcli.cpp` once.
+ * Embed in other applications by adding `src/` to your include path
+ * and compiling `droidcli_core.cpp` once.
  */
 
 #include "export.hpp"

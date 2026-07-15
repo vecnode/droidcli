@@ -8,7 +8,7 @@ in `AGENTS.md` — read it first.
 ## Claude-specific quick reference
 
 - **`droidcli` is the C++ agent controller / network trigger** (library
-  version **0.2.0** — hold at 0.2.x, do not bump to 0.3). The portable core
+  version **0.1.0** — the first release under this name). The portable core
   (`src/`, namespace `droidcli::`) is used by **droidcli** (`cli/`, entrypoint
   `cli/droidcli.cpp`), a headless CLI agent daemon — no windowed app exists
   anymore (`app/` was deleted). droidcli talks to peers through a generic
@@ -16,12 +16,12 @@ in `AGENTS.md` — read it first.
   config-driven via `--config connectors.json` or `POST /api/connectors` —
   there is no compiled-in knowledge of any specific peer app.
 - **Full internal rename to droidcli** — the C++ namespace (`droidcli::`),
-  umbrella library files (`droidcli.h`/`droidcli.cpp`), export macro
+  umbrella library files (`droidcli_core.h`/`droidcli_core.cpp`), export macro
   (`DROIDCLI_API`), CMake targets, test binaries, and `DROIDCLI_*` env vars
   all match the product name now. The CMake **library target** is
   `droidcli_core` (the `droidcli` name is taken by the CLI executable
-  target). The repository directory/GitHub repo name (`metaagent`) is
-  unchanged.
+  target). The local repository directory (`metaagent/`) is unchanged; the
+  GitHub repo itself has been renamed to `vecnode/droidcli`.
 - **Ollama stays separate from connectors.** `ai::LanguageAiRuntime`/`/ai/chat`
   (`--ollama-url`, default `:11434`) is the ancillary text-gen seam, built into
   core — it is not a connector. Any inference service (the old LoRA adapter

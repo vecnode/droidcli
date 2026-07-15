@@ -1,6 +1,6 @@
 #pragma once
 
-#include "droidcli.h"
+#include "droidcli_core.h"
 #include "net/connector.hpp"
 #include "app/tasks.hpp"
 #include "process_manager.hpp"

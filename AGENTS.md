@@ -17,13 +17,14 @@ are registered as **connectors**.
 > **Full internal rename.** The C++ namespace (`droidcli::`), the umbrella
 > library files (`droidcli.h`/`droidcli.cpp`), the export macro
 > (`DROIDCLI_API`), and env var prefixes (`DROIDCLI_*`) all match the
-> `droidcli` product name. The repository directory (`metaagent/`) and the
-> GitHub repo name are unchanged — only internal code identifiers moved.
+> `droidcli` product name. The local repository directory (`metaagent/`) is
+> unchanged; the GitHub repo itself has been renamed to `vecnode/droidcli`.
 
-Versioning: the library is at **0.2.0** — release 0.2.x builds freely, but
-do **not** bump to 0.3 without the owner's say-so.
+Versioning: **droidcli 0.1.0** is the first release under this name — a full
+rewrite of the earlier `metaagent` windowed app (0.2.x) into a headless CLI
+agent daemon, so versioning restarts rather than continuing that lineage.
 
-**No more hardcoded peers.** Where 0.2.0 hardcoded two specific peer apps (a
+**No more hardcoded peers.** Where the old app hardcoded two specific peer apps (a
 LoRA adapter inference service and an openFrameworks media player) behind
 `/api/adapter/*` and `/api/media/*`, droidcli instead has a generic
 **connector** concept (`src/net/connector.hpp`, `net::Connector` /
@@ -63,7 +64,7 @@ message shape or validation rule is a core concern.
 ## Repository map
 
 ```
-droidcli.h / droidcli.cpp   Umbrella public API; single TU includes all module .cpp
+droidcli_core.h / droidcli_core.cpp   Umbrella public API; single TU includes all module .cpp
 src/
   core/        Vec3, math, log_sink, value types
   media/       PNG/JPEG decode, probe, MediaStore
@@ -87,9 +88,9 @@ third_party/   Vendored deps (FFmpeg is local-only, git-ignored)
 distribute/    Templates staged into the dist (run_all.bat, README_DIST.txt)
 ```
 
-Public include is `#include "droidcli.h"`. Everything compiles through the
-single `droidcli.cpp` translation unit — **a new `src/<module>/foo.cpp` must be
-`#include`d from `droidcli.cpp`** or it will not be built into the library.
+Public include is `#include "droidcli_core.h"`. Everything compiles through the
+single `droidcli_core.cpp` translation unit — **a new `src/<module>/foo.cpp` must be
+`#include`d from `droidcli_core.cpp`** or it will not be built into the library.
 `cli/*.cpp` and `tools/*.cpp` are NOT part of that TU — they're separate
 translation units linked into the `droidcli` executable target.
 
