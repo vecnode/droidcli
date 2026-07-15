@@ -228,6 +228,62 @@ bool tool_call_requires_approval(const core::String& tool_name)
 		|| tool_name == "enqueue_task";
 }
 
+// Heuristic: does `text` sound like it's promising to perform an action
+// ("I'll execute ffmpeg to create that...", "Please hold on while I process
+// this") without an accompanying tool call? Local tool-use models
+// occasionally generate this instead of a real tool_calls entry - a false
+// promise that leaves the user hanging with nothing ever happening (the
+// model narrated intent instead of acting on it). Deliberately loose - a
+// commitment phrase plus an action verb, not real NLP - since a false
+// positive here only costs one extra, bounded model round-trip (see the
+// nudge in run_agent_tool_loop), not a wrong final answer.
+bool looks_like_unfulfilled_promise(const core::String& text)
+{
+	core::String lowered;
+	lowered.reserve(text.size());
+	for (const unsigned char character : text)
+	{
+		lowered += static_cast<char>(std::tolower(character));
+	}
+
+	static const char* const kCommitmentPhrases[] = {
+		"i'll ", "i will ", "let me ", "hold on", "one moment",
+		"give me a moment", "please wait", "processing this", "working on it"
+	};
+	bool has_commitment = false;
+	for (const char* phrase : kCommitmentPhrases)
+	{
+		if (lowered.find(phrase) != core::String::npos)
+		{
+			has_commitment = true;
+			break;
+		}
+	}
+	if (!has_commitment)
+	{
+		return false;
+	}
+
+	static const char* const kActionVerbs[] = {
+		"execute", "run ", "create", "generate", "transcode", "convert",
+		"save", "make ", "launch", "open ", "write", "delete", "start "
+	};
+	for (const char* verb : kActionVerbs)
+	{
+		if (lowered.find(verb) != core::String::npos)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+const char* const kUnfulfilledPromiseNudge =
+	"You just said you would perform an action but did not call any tool in that same response. "
+	"If you intend to do something, call the matching tool right now instead of describing it - "
+	"a promise with no tool call never happens. If you're missing information needed to act, "
+	"ask a clarifying question instead of claiming you're already doing it.";
+
 } // namespace
 
 void DroidHost::configure(const HostConfig& config)
@@ -1791,6 +1847,36 @@ core::String DroidHost::agent_turn(const core::String& body)
 			+ net::json_string_field("error", "missing message") + "}";
 	}
 
+	// A gated tool call left awaiting a decision (see PendingAgentToolCall)
+	// is abandoned rather than silently orphaned if a plain chat message
+	// arrives for the same session instead of a POST /api/agent/tool_decision
+	// resolving it - otherwise pending_tool_call_ would sit there forever
+	// (nothing else ever clears it) and the transcript would carry an
+	// assistant turn that implied a tool call with no matching tool result
+	// ever appended, which can confuse a later request built from that
+	// history. Record the abandonment in-context so the model isn't left
+	// wondering what happened to the call it made.
+	bool abandoned_pending_call = false;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (pending_tool_call_.active && pending_tool_call_.session_id == session_id)
+		{
+			pending_tool_call_ = PendingAgentToolCall{};
+			abandoned_pending_call = true;
+		}
+	}
+	if (abandoned_pending_call)
+	{
+		record_agent_message(session_id, ai::ChatRole::System,
+			"(A previously pending tool call in this session was abandoned - the user sent a new "
+			"message instead of approving or declining it. If it's still relevant, call the tool again.)");
+		// record_agent_message() only persists to the transcript/MemoryStore
+		// (session history, GET /api/agent/history) - logged here too so
+		// this shows up in the durable logs/log.jsonl trail alongside every
+		// other chat-loop event, not just in a session replay.
+		append_app_log("chat", "out", "pending tool call abandoned (new message arrived before it was approved/declined)", false, session_id);
+	}
+
 	append_app_log("chat", "in", "user: " + user_message, true, session_id);
 
 	if (!config_.enable_ai)
@@ -1966,13 +2052,55 @@ core::String DroidHost::run_agent_tool_loop(
 				+ net::json_string_field("session_id", session_id) + "}";
 		}
 
-		int32_t status_code = 0;
-		core::String response_body;
-		const bool transport_ok = language_ai_transport_.post_json
-			? language_ai_transport_.post_json(request.url, request.body, status_code, response_body)
-			: false;
+		// A tool-use-tuned local model can come back with neither assistant
+		// text nor a tool call for a given hop - not a transport/HTTP
+		// failure (parse_ollama_chat_response still reports http_success),
+		// just nothing to act on or show. Seen in practice with
+		// llama3-groq-tool-use, and near-always transient: retrying the
+		// identical request resolves it far more often than not (this is
+		// exactly what a user manually re-typing the same message was doing
+		// before this loop existed). Bounded separately from kMaxHops - an
+		// empty reply never produced a tool call, so it shouldn't eat into
+		// that budget the way a real hop does.
+		constexpr int kMaxEmptyRetries = 2;
+		ai::ProviderResponse response;
+		core::String last_response_body;
+		for (int attempt = 0; ; ++attempt)
+		{
+			int32_t status_code = 0;
+			core::String response_body;
+			const bool transport_ok = language_ai_transport_.post_json
+				? language_ai_transport_.post_json(request.url, request.body, status_code, response_body)
+				: false;
 
-		const ai::ProviderResponse response = provider.parse_response(status_code, response_body, transport_ok);
+			response = provider.parse_response(status_code, response_body, transport_ok);
+			last_response_body = response_body;
+
+			if (!response.transport_ok || !response.http_success)
+			{
+				break;
+			}
+			if (!response.assistant_message.empty() || !response.tool_calls.empty())
+			{
+				break;
+			}
+			if (attempt >= kMaxEmptyRetries)
+			{
+				// Capped in the log line - the raw body is diagnostic, not
+				// something that needs to round-trip in full.
+				append_app_log("chat", "out",
+					"hop " + std::to_string(hop) + ": model returned neither text nor a tool call after "
+						+ std::to_string(kMaxEmptyRetries + 1) + " attempts, raw response: "
+						+ last_response_body.substr(0, 500),
+					false, session_id);
+				break;
+			}
+			append_app_log("chat", "out",
+				"hop " + std::to_string(hop) + ": model returned neither text nor a tool call, retrying ("
+					+ std::to_string(attempt + 1) + "/" + std::to_string(kMaxEmptyRetries) + ")",
+				false, session_id);
+		}
+
 		if (!response.transport_ok || !response.http_success)
 		{
 			const core::String error = response.error_message.empty() ? "Ollama request failed" : response.error_message;
@@ -1990,6 +2118,19 @@ core::String DroidHost::run_agent_tool_loop(
 
 		if (response.tool_calls.empty())
 		{
+			// Caught a promise-without-a-tool-call and there's still hop
+			// budget left to give the model one more shot at actually
+			// calling it - nudge and loop back to the top instead of
+			// treating the narration as the final answer. On the last hop
+			// there's no room for a follow-up, so fall through as usual.
+			if (hop < kMaxHops - 1 && looks_like_unfulfilled_promise(response.assistant_message))
+			{
+				append_app_log("chat", "out",
+					"hop " + std::to_string(hop) + ": assistant promised an action without calling a tool, nudging it to follow through",
+					false, session_id);
+				record_agent_message(session_id, ai::ChatRole::System, kUnfulfilledPromiseNudge);
+				continue;
+			}
 			final_assistant_text = response.assistant_message;
 			break;
 		}
@@ -2038,6 +2179,14 @@ core::String DroidHost::run_agent_tool_loop(
 		final_assistant_text = budget_exhausted
 			? "(reached the tool-call limit without a final reply - try rephrasing or breaking the request into smaller steps)"
 			: "(no reply text - the model returned an empty response, try rephrasing)";
+		// A single, definitive false-flagged log line at the one place this
+		// placeholder is ever substituted - a catch-all so every way a turn
+		// can end without a usable reply lands in logs/log.jsonl as a
+		// failure, even if the more specific path that caused it (retry
+		// exhaustion, budget exhaustion) didn't already log its own entry.
+		append_app_log("chat", "out",
+			"turn ended without a usable reply (" + core::String(budget_exhausted ? "tool-call budget exhausted" : "empty model response") + ")",
+			false, session_id);
 	}
 
 	append_app_log("chat", "out", "assistant: " + final_assistant_text, true, session_id);
