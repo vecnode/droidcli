@@ -23,6 +23,54 @@ namespace droidcli::cli {
 
 #ifdef _WIN32
 
+namespace {
+
+bool looks_like_path(const core::String& value)
+{
+	return value.find('\\') != core::String::npos || value.find('/') != core::String::npos;
+}
+
+// Windows' "App Paths" registry mechanism - the same one Explorer/Win+R use
+// to resolve a bare name like "chrome" to its actual install location even
+// when the app was never added to PATH (most GUI app installers register
+// here instead of touching PATH). Checked before falling back to letting
+// CreateProcess do its own bare-name search. Returns an empty string if no
+// match is found in either hive.
+core::String resolve_app_paths_registry(const core::String& name)
+{
+	core::String key_name = name;
+	if (key_name.size() < 4 || key_name.compare(key_name.size() - 4, 4, ".exe") != 0)
+	{
+		key_name += ".exe";
+	}
+	const core::String subkey = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + key_name;
+
+	for (const HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE})
+	{
+		HKEY key = nullptr;
+		if (RegOpenKeyExA(root, subkey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
+		{
+			continue;
+		}
+
+		char buffer[MAX_PATH] = {};
+		DWORD buffer_size = sizeof(buffer);
+		DWORD type = 0;
+		const LONG query_result = RegQueryValueExA(
+			key, nullptr, nullptr, &type, reinterpret_cast<LPBYTE>(buffer), &buffer_size);
+		RegCloseKey(key);
+
+		if (query_result == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && buffer_size > 0)
+		{
+			return core::String(buffer);
+		}
+	}
+
+	return {};
+}
+
+} // namespace
+
 CommandRunResult run_command_once(
 	const core::String& command,
 	const core::String& work_dir,
@@ -154,10 +202,28 @@ LaunchAppResult launch_application(
 		return result;
 	}
 
-	// Quote the target in case it (or its resolved PATH match) contains
-	// spaces; args are appended as given - caller's responsibility to quote
+	// A bare app name (no path separator) is checked against the App Paths
+	// registry first - most installed GUI apps register there instead of
+	// touching PATH, so "chrome"/"code" etc. resolve correctly even though
+	// which_executable()'s PATH-only search wouldn't find them. If there's
+	// no registry match, resolved_target stays as the caller's original
+	// string and CreateProcess falls back to its own bare-name search
+	// (calling process's directory, current directory, system directories,
+	// PATH) - same as before this resolution step existed.
+	core::String resolved_target = path_or_name;
+	if (!looks_like_path(path_or_name))
+	{
+		const core::String registry_path = resolve_app_paths_registry(path_or_name);
+		if (!registry_path.empty())
+		{
+			resolved_target = registry_path;
+		}
+	}
+
+	// Quote the target in case it (or its resolved match) contains spaces;
+	// args are appended as given - caller's responsibility to quote
 	// individual arguments that need it.
-	core::String command_line = "\"" + path_or_name + "\"";
+	core::String command_line = "\"" + resolved_target + "\"";
 	if (!args.empty())
 	{
 		command_line += " " + args;
@@ -192,7 +258,10 @@ LaunchAppResult launch_application(
 	if (created == FALSE)
 	{
 		const DWORD last_error = GetLastError();
-		result.error_message = "CreateProcess failed (" + std::to_string(last_error) + ")";
+		result.error_message = "CreateProcess failed (" + std::to_string(last_error)
+			+ ") trying to launch \"" + resolved_target + "\" - not found via App Paths registry, "
+			"PATH, or as a direct path. Ask the user for the exact executable name or full path "
+			"rather than guessing.";
 		return result;
 	}
 

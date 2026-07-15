@@ -946,15 +946,19 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		Element connectors_panel = window(text(" Connectors  (l=launch, s=stop) "), connector_menu->Render()) | flex;
 		Element tasks_panel = window(text(" Tasks "), tasks_view->Render()) | flex;
 		Element log_panel = window(text(" App Log "), log_view->Render()) | flex;
-		Element chat_panel = window(text(" Agent Chat  (Tab to focus, Enter to send) "),
+		Element chat_panel = window(text(" Agent Chat  (Tab/Esc to leave, Enter to send) "),
 			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() })) | flex;
+
+		const std::string focus_hint = chat_input->Focused()
+			? "chat focused - Tab/Esc: to connectors   Enter: send   Ctrl+C: quit anytime"
+			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   j/k/arrows: move   y: copy chat";
 		return vbox({
 			text(status_line) | bold,
 			hbox({
 				vbox({ connectors_panel, tasks_panel }) | flex,
 				vbox({ log_panel, chat_panel }) | flex,
 			}) | flex,
-			text("Tab: switch focus   (connectors focused) q: quit   l: launch   s: stop   j/k/arrows: move   y: copy chat   Ctrl+C: quit anytime") | dim,
+			text(focus_hint) | dim,
 		});
 	});
 
@@ -988,6 +992,31 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		{
 			running_flag = false;
 			screen.Exit();
+			return true;
+		}
+
+		// Explicit Tab/Shift+Tab/Escape focus switching, handled here (before
+		// anything reaches chat_input) rather than relying on
+		// Container::Vertical's built-in Tab-cycling: FTXUI's Input consumes
+		// Tab as a literal character in its OnEvent (event.is_character() is
+		// checked before anything else), so it never reaches the container's
+		// own focus-navigation logic - without this, Tab just inserts a tab
+		// character into the message and focus can never leave the input.
+		if (event == Event::Tab || event == Event::TabReverse)
+		{
+			if (chat_input->Focused())
+			{
+				connector_menu->TakeFocus();
+			}
+			else
+			{
+				chat_input->TakeFocus();
+			}
+			return true;
+		}
+		if (event == Event::Escape && chat_input->Focused())
+		{
+			connector_menu->TakeFocus();
 			return true;
 		}
 

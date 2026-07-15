@@ -115,6 +115,9 @@ any `launched_process` connector with PID tracking), **`command_runner`**
 stdout/stderr - `POST /api/run` and the `"run"` task command - plus
 `launch_application`, a detached fire-and-forget GUI-app launch with no wait
 and no output capture, distinct from the blocking `run_command_once` -
+resolves a bare app name against the Windows App Paths registry first (how
+most GUI installers register themselves, e.g. `chrome` even though it's
+never added to PATH), falling back to `CreateProcess`'s own PATH search -
 `POST /api/open`), **`filesystem_tools`**
 (`read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/
 `which_executable`, `std::filesystem`-backed, no external dependency - `POST

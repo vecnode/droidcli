@@ -1160,9 +1160,9 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"open_application",
-		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own.",
+		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. path_or_name is resolved against the Windows App Paths registry (how most installed apps register themselves, e.g. 'chrome' even though it's not on PATH), then PATH, then as a direct path. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches, or a prior call failed to resolve it), ask the user to confirm the name or full path rather than guessing at one.",
 		"{\"type\":\"object\",\"properties\":{"
-		"\"path_or_name\":{\"type\":\"string\",\"description\":\"executable name (resolved against PATH, e.g. 'notepad.exe') or a full path\"},"
+		"\"path_or_name\":{\"type\":\"string\",\"description\":\"executable name (e.g. 'chrome', 'notepad.exe') or a full path\"},"
 		"\"args\":{\"type\":\"string\",\"description\":\"optional command-line arguments\"},"
 		"\"work_dir\":{\"type\":\"string\",\"description\":\"optional working directory\"}"
 		"},\"required\":[\"path_or_name\"]}"});
