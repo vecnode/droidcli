@@ -6,6 +6,7 @@
 #include "process_manager.hpp"
 #include "filesystem_tools.hpp"
 #include "app_index.hpp"
+#include "window_list.hpp"
 
 #include <ctime>
 #include <fstream>
@@ -111,6 +112,12 @@ public:
 	// covers apps that never registered on PATH or in App Paths at all.
 	// body: {"query":"..."}. Returns {"matches":[{"name":...,"path":...}]}.
 	core::String find_applications_json(const core::String& body) const;
+
+	// Live snapshot of currently open windows and their PIDs (GET
+	// /api/apps/open) - re-enumerated fresh on every call, not cached like
+	// the installed-apps index, since "open right now" changes constantly.
+	// No arguments. Returns {"windows":[{"title":...,"process_name":...,"pid":...}]}.
+	core::String list_open_windows_json() const;
 
 	// Filesystem-aware agent tools (POST /api/fs/*) - droidcli executes these
 	// itself, no external process or MCP server involved.

@@ -339,7 +339,7 @@ int main(int argc, char** argv)
 	std::cout << "  GET  /api/connectors/{id}/status   POST .../launch  .../stop  .../call   [Bearer token required]" << std::endl;
 	std::cout << "  GET  /api/tasks   POST /api/tasks   GET /api/tasks/{id}          [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/run                          [Bearer token required]" << std::endl;
-	std::cout << "  POST /api/open   POST /api/apps/find    [Bearer token required]" << std::endl;
+	std::cout << "  POST /api/open   POST /api/apps/find   GET /api/apps/open    [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/fs/read  /api/fs/write  /api/fs/list  /api/fs/stat  /api/fs/which  GET /api/fs/cwd   [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/agent/turn                   [Bearer token required]" << std::endl;
 	std::cout << "  GET  /api/ollama/setup-status          [Bearer token required]" << std::endl;
