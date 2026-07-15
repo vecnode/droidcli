@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(droidcli VERSION 0.2.0 LANGUAGES CXX)
+project(droidcli VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,7 +16,7 @@ endif()
 include(cmake/FFmpeg.cmake)
 
 add_library(droidcli_core STATIC
-    droidcli.cpp
+    droidcli_core.cpp
 )
 
 target_include_directories(droidcli_core
@@ -114,7 +114,7 @@ install(TARGETS droidcli_core
     RUNTIME DESTINATION bin
 )
 
-install(FILES droidcli.h DESTINATION include)
+install(FILES droidcli_core.h DESTINATION include)
 install(DIRECTORY src/ DESTINATION include)
 
 install(EXPORT droidcliTargets

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "droidcli.h"
+#include "droidcli_core.h"
 
 #include <cstdint>
 

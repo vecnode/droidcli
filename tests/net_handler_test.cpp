@@ -1,4 +1,4 @@
-#include "droidcli.h"
+#include "droidcli_core.h"
 
 #include <cassert>
 #include <cstring>

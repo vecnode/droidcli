@@ -1,6 +1,6 @@
 #include "host.hpp"
 #include "http_mount.hpp"
-#include "droidcli.h"
+#include "droidcli_core.h"
 #include "net/connector.hpp"
 #include "tools/mini_http_server.hpp"
 #include "tui.hpp"
