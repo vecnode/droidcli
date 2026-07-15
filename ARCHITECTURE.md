@@ -112,10 +112,14 @@ for `http_peer`, `launch_connector`/`stop_connector` for `launched_process`,
 `command_runner`), the **ProcessManager** (Job Object/process-group launch of
 any `launched_process` connector with PID tracking), **`command_runner`**
 (one-shot, synchronous, timeout-bounded shell command execution with captured
-stdout/stderr - `POST /api/run` and the `"run"` task command), and
-**`DroidHost::agent_turn`** (a bounded Ollama tool-calling loop over a fixed
-tool set, each tool implemented by calling back into `DroidHost`'s own
-methods - `POST /api/agent/turn`).
+stdout/stderr - `POST /api/run` and the `"run"` task command), **`filesystem_tools`**
+(`read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/
+`which_executable`, `std::filesystem`-backed, no external dependency - `POST
+/api/fs/*`), and **`DroidHost::agent_turn`** (a bounded Ollama tool-calling
+loop over a fixed tool set - connectors, tasks, shell commands, and these
+filesystem primitives - each tool implemented by calling back into
+`DroidHost`'s own methods, self-contained rather than delegating to another
+process or MCP server - `POST /api/agent/turn`).
 
 ---
 
@@ -196,6 +200,12 @@ over HTTP, so it never needs the token.
 | `GET` | `/api/notify/log` `[auth]` | Recent notify messages |
 | `GET` | `/api/app/log` `[auth]` | Recent host application log |
 | `POST` | `/api/run` `[auth]` | Run a one-shot shell command — body `{"command":"...","work_dir":"...","timeout_ms":30000}` |
+| `POST` | `/api/fs/read` `[auth]` | Read a file — body `{"path":"...","max_bytes":65536}`, response reports `truncated` |
+| `POST` | `/api/fs/write` `[auth]` | Write/append a file — body `{"path":"...","content":"...","append":false}` |
+| `POST` | `/api/fs/list` `[auth]` | Non-recursive directory listing — body `{"path":"..."}` (omit for cwd) |
+| `POST` | `/api/fs/stat` `[auth]` | Check existence/type/size of a path — body `{"path":"..."}` |
+| `GET` | `/api/fs/cwd` `[auth]` | droidcli's current working directory |
+| `POST` | `/api/fs/which` `[auth]` | Resolve an executable against `PATH` — body `{"name":"..."}` |
 | `POST` | `/api/agent/turn` `[auth]` | Tool-calling agent turn — body `{"message":"...","clear":false}` |
 | `GET` | `/api/ollama/status` `[auth]` | Ollama text-gen endpoint status + model list |
 | `POST` | `/api/ollama/config` `[auth]` | Update Ollama model at runtime |

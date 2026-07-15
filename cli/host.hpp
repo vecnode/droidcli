@@ -4,6 +4,7 @@
 #include "net/connector.hpp"
 #include "app/tasks.hpp"
 #include "process_manager.hpp"
+#include "filesystem_tools.hpp"
 
 #include <ctime>
 #include <mutex>
@@ -95,6 +96,21 @@ public:
 	// One-shot shell command execution (POST /api/run). body is
 	// {"command":"...","work_dir":"...","timeout_ms":...}.
 	core::String run_command(const core::String& body);
+
+	// Filesystem-aware agent tools (POST /api/fs/*) - droidcli executes these
+	// itself, no external process or MCP server involved.
+	// body: {"path":"...","max_bytes":...}. Caps read size (default 65536).
+	core::String read_file(const core::String& body);
+	// body: {"path":"...","content":"...","append":bool}.
+	core::String write_file(const core::String& body);
+	// body: {"path":"..."} (empty/omitted = droidcli's own cwd). Non-recursive.
+	core::String list_dir(const core::String& body);
+	// body: {"path":"..."}.
+	core::String stat_path(const core::String& body);
+	// No body/arguments.
+	core::String get_cwd_json() const;
+	// body: {"name":"..."}. Resolves an executable against PATH.
+	core::String which_executable_json(const core::String& body);
 
 	// The tool-calling agent turn (POST /api/agent/turn). body is
 	// {"message":"...","clear":bool}. Drives a bounded Ollama tool-calling

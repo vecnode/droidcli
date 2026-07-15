@@ -89,6 +89,7 @@ FetchContent_MakeAvailable(ftxui)
 add_executable(droidcli
     cli/command_runner.cpp
     cli/droidcli.cpp
+    cli/filesystem_tools.cpp
     cli/host.cpp
     cli/http_mount.cpp
     cli/process_manager.cpp
