@@ -195,7 +195,17 @@ public:
 	core::String build_agent_sessions_json() const;
 
 private:
-	void append_app_log(const core::String& channel, const core::String& direction, const core::String& summary, bool success);
+	// session_id is optional (only "chat" channel entries currently have
+	// one) - attaches to the durable JSONL log line (logs/log.jsonl) so a
+	// log line can be correlated with a MemoryStore session, but is not
+	// part of the in-memory app_log_/GET /api/app/log shape, which is
+	// unaffected by this parameter.
+	void append_app_log(
+		const core::String& channel,
+		const core::String& direction,
+		const core::String& summary,
+		bool success,
+		const core::String& session_id = {});
 	static core::String make_log_timestamp();
 	// Full date+time (not just HH:MM:SS like make_log_timestamp) - the
 	// console/in-memory log only ever covers one running session, but

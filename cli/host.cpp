@@ -225,19 +225,22 @@ void DroidHost::initialize()
 
 		droidcli::initialize_defaults();
 
-		// Durable session log: logs/log.txt accumulates across restarts so a
-		// crash or a bug report can be diagnosed after the fact, not just
-		// while the process happens to still be up. Created relative to the
+		// Durable session log: logs/log.jsonl accumulates across restarts so
+		// a crash or a bug report can be diagnosed after the fact, not just
+		// while the process happens to still be up. Structured JSONL (one
+		// JSON object per line, see append_app_log()), not the bracketed
+		// plain-text format the console gets. Created relative to the
 		// working directory droidcli was launched from - if that directory
 		// isn't writable, log_file_ just stays closed and append_app_log()
 		// silently skips the file write (console/in-memory logging still
 		// works either way).
 		std::error_code log_dir_error;
 		std::filesystem::create_directories("logs", log_dir_error);
-		log_file_.open("logs/log.txt", std::ios::app);
+		log_file_.open("logs/log.jsonl", std::ios::app);
 		if (log_file_)
 		{
-			log_file_ << "=== droidcli session started " << make_full_log_timestamp() << " ===" << std::endl;
+			log_file_ << "{" << net::json_string_field("event", "session_started") << ","
+				<< net::json_string_field("ts", make_full_log_timestamp()) << "}" << std::endl;
 		}
 
 		session_.active = true;
@@ -441,7 +444,8 @@ void DroidHost::append_app_log(
 	const core::String& channel,
 	const core::String& direction,
 	const core::String& summary,
-	const bool success)
+	const bool success,
+	const core::String& session_id)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	AppLogEntry entry;
@@ -456,6 +460,8 @@ void DroidHost::append_app_log(
 		app_log_.erase(app_log_.begin());
 	}
 
+	// Console/stderr output stays a human-readable line - this is for a
+	// person watching the terminal, not for durable structured storage.
 	const core::String line = "[" + entry.timestamp + "] ["
 		+ entry.channel + "] [" + entry.direction + "] " + entry.summary;
 	if (success)
@@ -467,11 +473,24 @@ void DroidHost::append_app_log(
 		std::cerr << line << std::endl;
 	}
 
+	// Durable file log (logs/log.jsonl) is structured JSONL - one JSON
+	// object per line, no bracketed-text formatting - so any tool can parse
+	// it without re-deriving the console format's escaping rules. See
+	// "Structured JSONL logging" in ARCHITECTURE.md's extension plan.
 	if (log_file_)
 	{
-		log_file_ << "[" << make_full_log_timestamp() << "] ["
-			<< entry.channel << "] [" << entry.direction << "] "
-			<< (success ? "ok " : "ERROR ") << entry.summary << std::endl;
+		core::String json_line = "{"
+			+ net::json_string_field("ts", make_full_log_timestamp()) + ","
+			+ net::json_string_field("channel", channel) + ","
+			+ net::json_string_field("direction", direction) + ","
+			+ net::json_string_field("summary", summary) + ","
+			+ net::json_bool_field("success", success);
+		if (!session_id.empty())
+		{
+			json_line += "," + net::json_string_field("session_id", session_id);
+		}
+		json_line += "}";
+		log_file_ << json_line << std::endl;
 	}
 }
 
@@ -1640,11 +1659,11 @@ core::String DroidHost::agent_turn(const core::String& body)
 			+ net::json_string_field("error", "missing message") + "}";
 	}
 
-	append_app_log("chat", "in", "user: " + user_message, true);
+	append_app_log("chat", "in", "user: " + user_message, true, session_id);
 
 	if (!config_.enable_ai)
 	{
-		append_app_log("chat", "out", "rejected: AI is disabled (--no-ai)", false);
+		append_app_log("chat", "out", "rejected: AI is disabled (--no-ai)", false, session_id);
 		return "{" + net::json_bool_field("ok", false) + ","
 			+ net::json_string_field("error", "AI is disabled (--no-ai)") + "}";
 	}
@@ -1708,7 +1727,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 		const ai::ProviderRequest request = provider.build_request(transcript_copy, tools);
 		if (!request.valid)
 		{
-			append_app_log("chat", "out", "request build failed: " + request.error_message, false);
+			append_app_log("chat", "out", "request build failed: " + request.error_message, false, session_id);
 			return "{" + net::json_bool_field("ok", false) + ","
 				+ net::json_string_field("error", request.error_message) + ","
 				+ net::json_string_field("session_id", session_id) + "}";
@@ -1724,7 +1743,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 		if (!response.transport_ok || !response.http_success)
 		{
 			const core::String error = response.error_message.empty() ? "Ollama request failed" : response.error_message;
-			append_app_log("chat", "out", "hop " + std::to_string(hop) + " failed: " + error, false);
+			append_app_log("chat", "out", "hop " + std::to_string(hop) + " failed: " + error, false, session_id);
 			// The user's message (and the system prompt, on a fresh session)
 			// was already persisted via record_agent_message() above, even
 			// though this turn is about to fail - include session_id so a
@@ -1746,7 +1765,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 		{
 			const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
 			append_app_log("chat", "out",
-				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true);
+				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true, session_id);
 
 			record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
 
@@ -1766,7 +1785,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 		{
 			budget_exhausted = true;
 			final_assistant_text = response.assistant_message;
-			append_app_log("chat", "out", "tool-call budget exhausted after " + std::to_string(kMaxHops) + " hops", false);
+			append_app_log("chat", "out", "tool-call budget exhausted after " + std::to_string(kMaxHops) + " hops", false, session_id);
 		}
 	}
 
@@ -1785,7 +1804,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 			: "(no reply text - the model returned an empty response, try rephrasing)";
 	}
 
-	append_app_log("chat", "out", "assistant: " + final_assistant_text, true);
+	append_app_log("chat", "out", "assistant: " + final_assistant_text, true, session_id);
 
 	std::ostringstream stream;
 	stream << '{';
