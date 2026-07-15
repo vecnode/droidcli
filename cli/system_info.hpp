@@ -16,6 +16,14 @@ struct SystemInfo {
 	core::String hostname;
 	core::String username;
 	core::String cwd;            // same as get_current_working_directory()
+	// The current user's actual Desktop folder - resolved via the Windows
+	// Known Folder API (FOLDERID_Desktop), not guessed by string-concatenating
+	// "C:\Users\" + username + "\Desktop", which breaks silently for a
+	// OneDrive-redirected or localized Desktop folder. Empty if it couldn't
+	// be resolved (e.g. the API call failed, or on a POSIX build without a
+	// $HOME to fall back to) - a caller should treat that as "unknown", not
+	// assume the naive path is correct.
+	core::String desktop_path;
 };
 
 // Queries the OS for name/version/architecture/hostname/username/cwd. Cheap

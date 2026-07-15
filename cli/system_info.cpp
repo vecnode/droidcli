@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <shlobj.h>
 #else
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -95,6 +96,35 @@ core::String detect_username()
 	return "unknown";
 }
 
+// The real Desktop folder via the Windows Known Folder API - not a guessed
+// "C:\Users\" + username + "\Desktop" concatenation, which silently gives
+// the wrong answer the moment the Desktop is OneDrive-redirected or the
+// system locale renames the folder. Empty on failure, never a plausible-
+// looking wrong path.
+core::String detect_desktop_path()
+{
+	PWSTR wide_path = nullptr;
+	const HRESULT result = SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &wide_path);
+	if (result != S_OK || wide_path == nullptr)
+	{
+		if (wide_path != nullptr)
+		{
+			CoTaskMemFree(wide_path);
+		}
+		return {};
+	}
+
+	const int required = WideCharToMultiByte(CP_UTF8, 0, wide_path, -1, nullptr, 0, nullptr, nullptr);
+	core::String path;
+	if (required > 1)
+	{
+		path.resize(static_cast<size_t>(required) - 1);
+		WideCharToMultiByte(CP_UTF8, 0, wide_path, -1, path.data(), required, nullptr, nullptr);
+	}
+	CoTaskMemFree(wide_path);
+	return path;
+}
+
 #else
 
 core::String detect_architecture()
@@ -133,6 +163,21 @@ core::String detect_username()
 	return user != nullptr ? core::String(user) : "unknown";
 }
 
+// Best-effort $HOME/Desktop - POSIX has no equivalent of Windows' Known
+// Folder API, and not every distro/desktop environment even has a Desktop
+// folder by convention, so this is a plausible guess, not a verified path
+// the way detect_desktop_path() is on Windows. Empty (not a guess) if
+// $HOME isn't set.
+core::String detect_desktop_path()
+{
+	const char* home = std::getenv("HOME");
+	if (home == nullptr || home[0] == '\0')
+	{
+		return {};
+	}
+	return core::String(home) + "/Desktop";
+}
+
 #endif
 
 } // namespace
@@ -150,6 +195,7 @@ SystemInfo get_system_info()
 	info.hostname = detect_hostname();
 	info.username = detect_username();
 	info.cwd = get_current_working_directory();
+	info.desktop_path = detect_desktop_path();
 	return info;
 }
 

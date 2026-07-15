@@ -135,7 +135,7 @@ target_include_directories(droidcli
 )
 target_link_libraries(droidcli PRIVATE droidcli_core droidcli_sqlite3 ftxui::ftxui)
 if(WIN32)
-    target_link_libraries(droidcli PRIVATE ws2_32 winhttp advapi32)
+    target_link_libraries(droidcli PRIVATE ws2_32 winhttp advapi32 ole32 shell32)
     target_compile_definitions(droidcli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
