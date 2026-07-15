@@ -2112,6 +2112,17 @@ core::String DroidHost::run_agent_tool_loop(
 	constexpr int kMaxHops = 5;
 	core::String final_assistant_text;
 	bool budget_exhausted = false;
+	// Capped at 1, not "every hop until the budget runs out": a model that
+	// fabricates once and self-corrects after a single nudge is common: a
+	// model that fabricates the *same* claim again right after being told
+	// it didn't happen is not going to be talked out of it by repeating the
+	// same nudge three more times - it just burns the hop budget on
+	// nudges instead of ever attempting the real tool call, and in
+	// practice degrades a small local model's output further (observed:
+	// four nudges in one turn led to the model echoing literal
+	// "assistant\n\n" role-token fragments into its own completion).
+	int unverified_claim_nudge_count = 0;
+	constexpr int kMaxUnverifiedClaimNudges = 1;
 
 	// A non-empty resume_calls means we're continuing a hop that was already
 	// fetched from the model before an earlier call in it paused for
@@ -2230,16 +2241,11 @@ core::String DroidHost::run_agent_tool_loop(
 		{
 			// Caught an unverified action claim (a promise never followed
 			// through, or a past-tense "I've done X" with nothing to back
-			// it up) and there's still hop budget left to give the model
-			// one more shot at either actually calling the tool or being
-			// honest about not having done so - nudge and loop back to the
-			// top instead of treating the claim as the final answer. Only
-			// nudges when no action *this turn* actually succeeded yet -
-			// a truthful summary of a tool call that already ran earlier
-			// in the same turn ("I've successfully created it" right after
-			// run_ffmpeg returned ok:true) must not be second-guessed. On
-			// the last hop there's no room for a follow-up, so fall
-			// through as usual.
+			// it up). Only flagged when no action *this turn* actually
+			// succeeded yet - a truthful summary of a tool call that
+			// already ran earlier in the same turn ("I've successfully
+			// created it" right after run_ffmpeg returned ok:true) must
+			// never be second-guessed.
 			bool a_tool_call_already_succeeded_this_turn = false;
 			for (const PendingToolActionRecord& action : actions)
 			{
@@ -2250,15 +2256,46 @@ core::String DroidHost::run_agent_tool_loop(
 					break;
 				}
 			}
-			if (hop < kMaxHops - 1 && !a_tool_call_already_succeeded_this_turn
-				&& looks_like_unverified_action_claim(response.assistant_message))
+			const bool looks_fabricated = !a_tool_call_already_succeeded_this_turn
+				&& looks_like_unverified_action_claim(response.assistant_message);
+
+			if (looks_fabricated && hop < kMaxHops - 1
+				&& unverified_claim_nudge_count < kMaxUnverifiedClaimNudges)
 			{
+				// There's hop budget and nudge budget left - give the model
+				// one shot at either actually calling the tool or being
+				// honest about not having done so, instead of treating the
+				// claim as the final answer.
+				++unverified_claim_nudge_count;
 				append_app_log("chat", "out",
 					"hop " + std::to_string(hop) + ": assistant claimed an action with no successful tool call to back it up, nudging it to correct itself",
 					false, session_id);
 				record_agent_message(session_id, ai::ChatRole::System, kUnverifiedActionClaimNudge);
 				continue;
 			}
+
+			if (looks_fabricated)
+			{
+				// The nudge already fired once this turn (or there's no hop
+				// budget left for one) and the model is STILL claiming an
+				// unbacked action - do not let that fabrication reach the
+				// user under any circumstance, even as a "final" answer.
+				// Override with an honest refusal rather than trusting the
+				// model's own text this one time; the model gets to try
+				// again on the user's next message instead of digging the
+				// same hole deeper across more nudges (which, in practice,
+				// degrades a small local model's output further rather
+				// than fixing anything - see kMaxUnverifiedClaimNudges).
+				append_app_log("chat", "out",
+					"hop " + std::to_string(hop) + ": assistant still claiming an unbacked action after nudging - overriding with an honest refusal instead of passing the fabrication through",
+					false, session_id);
+				final_assistant_text =
+					"I wasn't actually able to complete this - I kept describing the action "
+					"instead of calling the tool for it, and didn't correct that after being "
+					"asked to. Please try again, or rephrase the request.";
+				break;
+			}
+
 			final_assistant_text = response.assistant_message;
 			break;
 		}
