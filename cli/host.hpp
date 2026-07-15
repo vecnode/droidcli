@@ -194,6 +194,14 @@ public:
 	// {"session_ids":[...],"current_session_id":"..."}.
 	core::String build_agent_sessions_json() const;
 
+	// Public logging hook for host-owned background threads spawned via
+	// core::spawn() (see ARCHITECTURE.md's "Spawn attribution") to report
+	// their lifecycle - "spawned"/"joined"/"threw: <what>" - under the
+	// "thread" channel of the same durable JSONL log everything else uses.
+	// core::spawn itself has no host dependency; a caller (e.g. cli/tui.cpp)
+	// wires its ThreadEventSink to this method.
+	void log_thread_event(const core::String& thread_name, const core::String& event);
+
 private:
 	// session_id is optional (only "chat" channel entries currently have
 	// one) - attaches to the durable JSONL log line (logs/log.jsonl) so a

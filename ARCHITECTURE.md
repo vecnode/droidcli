@@ -69,7 +69,7 @@ metaagent/                        (repository directory name unchanged)
 ├── droidcli_core.cpp              Single TU — #includes all module .cpp files
 ├── src/
 │   ├── initialize.hpp             initialize_defaults()
-│   ├── core/                      Vec3, math, log_sink, value types
+│   ├── core/                      Vec3, math, log_sink, value types, spawn() attribution
 │   ├── media/                     PNG/JPEG decode, probe, MediaStore
 │   ├── net/                       Route table, handlers, connector, json
 │   ├── notify/                    Notify body parsing
@@ -97,6 +97,7 @@ Public entry point: `#include "droidcli_core.h"`.
 | Module                    | Role                                                                  |
 | ------------------------- | --------------------------------------------------------------------- |
 | `core/types` + `math`     | `String`, `Array`, `Vec3`, color types, math helpers                  |
+| `core/spawn`              | **Spawn attribution**: `spawn(name, fn, sink)` - named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." via an optional `ThreadEventSink`, no logging mechanism of its own. `cli/tui.cpp`'s background threads wire the sink to `DroidHost::log_thread_event` |
 | `media/decode` + `probe`  | FFmpeg-backed decode + probe (host stages the DLLs)                   |
 | `net/router` + `handlers` | `/health`, `/echo`, `/notify`, `/ai/chat`                             |
 | `net/connector`           | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
@@ -428,7 +429,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 Tests: `media_decode_test`, `net_handler_test`, `ollama_client_test`,
-`language_runtime_test`, `connector_test`, `task_queue_test`, `intent_test`.
+`language_runtime_test`, `connector_test`, `task_queue_test`, `intent_test`,
+`model_provider_test`, `spawn_test`.
 
 On Windows the whole tree builds with **one MSVC runtime**
 (`CMAKE_MSVC_RUNTIME_LIBRARY` in the root CMakeLists: dynamic Debug, static
@@ -588,21 +590,22 @@ flowchart LR
 | `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | GPIO/I2C/SPI/USB, specialized hardware | None | **Not planned** — engine/hardware code was explicitly removed at 0.2.0 (`AGENTS.md` guardrails) |
 | `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); no debouncer/watchdog abstraction yet |
 | `zeroclaw-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.jsonl` | **Have JSONL + partial attribution** — one JSON object per line, `session_id` attribution on `"chat"`-channel entries (Phase 3, done); no `record!`/`scope!`-equivalent macros (C++ has no direct analog), no Observer bridge |
-| `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | Raw `std::thread` in `cli/tui.cpp`/`cli/host.cpp` | **Missing** — no wrapper, no attribution; each background thread is hand-rolled with its own hand-off pattern (see the `PolledState`/`ChatWork` comments in `cli/tui.cpp`) |
+| `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | `core::spawn()` (`src/core/spawn.hpp`/`.cpp`) + `DroidHost::log_thread_event` | **Have** (Phase 5, done) — named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." into `logs/log.jsonl` under the `"thread"` channel; used by `cli/tui.cpp`'s `poller` and `chat_worker`. Not a thread pool/scheduler, same one-thread-in-one-thread-out semantics as a bare `std::thread` |
 | `zeroclaw-macros` | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |
 | `zerocode` | Terminal UI | `cli/tui.cpp` (FTXUI) | **Have** |
 
 ### What this means for droidcli
 
-The honest read, as of Phases 1–3 landing: droidcli now has a real provider
-abstraction, durable/queryable session memory, and structured JSONL logging -
-the biggest structural gaps against ZeroClaw's Core tier are closed. What's
-left is **no Edge tier** (no `channels`, a minimal `gateway`) and
-`zeroclaw-spawn`'s thread-attribution idea, which only earns its keep once
-there's more than one kind of background thread to distinguish in the log.
-That's consistent with what droidcli actually is right now — a
-single-machine, single-operator daemon reached over localhost HTTP or an
-in-process TUI, not yet a multi-channel assistant reachable from
+The honest read, as of Phases 1–3 and 5 landing: droidcli now has a real
+provider abstraction, durable/queryable session memory, structured JSONL
+logging, and named/observable background threads - every Core-tier gap
+against ZeroClaw except a proper `Channel`/`Memory`/`Observer` trait layer is
+closed at the concrete-implementation level. What's left is **no Edge tier**
+(no `channels`, a minimal `gateway`) - Phase 4, deliberately not started
+until a specific channel is wanted. That's consistent with what droidcli
+actually is right now — a single-machine, single-operator daemon reached
+over localhost HTTP or an in-process TUI, not yet a multi-channel assistant
+reachable from
 Discord/Slack/email.
 
 Extension work, roughly in the order it would need to land to close the gap,
@@ -635,11 +638,11 @@ static library:
    webhook handling in `http_mount.cpp`, not a new subsystem. `MemoryStore`'s
    session model (Phase 2) is what would key each external conversation's
    history once this lands.
-5. **`zeroclaw-spawn`'s attribution idea, not its `tokio` mechanism** — a
-   thin wrapper around `std::thread` construction that tags each background
-   thread with what spawned it and why, surfaced in the structured log from
-   (3). Cheap, and it would have made debugging the TUI's worker-thread
-   hand-off pattern easier while it was being built.
+5. ✅ **`zeroclaw-spawn`'s attribution idea, not its `tokio` mechanism** —
+   `core::spawn()` (`src/core/spawn.hpp`) names each background thread and
+   reports "spawned"/"joined"/"threw: ..." through `DroidHost::log_thread_event`
+   into the structured log from (3). `cli/tui.cpp`'s `poller` and
+   `chat_worker` both go through it now. See "Phase 5" below.
 
 `zeroclaw-hardware`/`aardvark-sys`/`robot-kit` and `zeroclaw-plugins` are
 intentionally out of scope — see the "No engine code" and "droidcli does not
@@ -852,31 +855,51 @@ dispatch already switches on `kind` (`launch_connector`/`call_connector` in
 `cli/host.cpp`). If it requires more than that, the abstraction from this
 plan was wrong and needs revisiting before writing a second channel.
 
-### Phase 5 — Spawn attribution
+### Phase 5 — Spawn attribution ✅ implemented
 
 **Goal:** every background `std::thread` in the codebase (the TUI's
 poller/chat-worker threads today; more will exist once Phase 4 adds
 poll-based channel producers) is tagged with what spawned it and why, and
 that tag shows up in the Phase-3 structured log.
 
-**Deliverables:**
-- `src/core/spawn.hpp`: a thin `droidcli::spawn(name, fn)` wrapper around
-  `std::thread` construction — not a thread pool, not a scheduler, just a
-  named-thread constructor that logs "spawned"/"joined"/"threw" against the
-  Phase-3 JSONL schema's `channel`/`summary` fields under a new `"thread"`
-  channel value.
-- Replace the two `std::thread` constructions in `cli/tui.cpp` (`poller`,
-  `chat_worker`) with `droidcli::spawn("tui.poller", ...)` /
-  `droidcli::spawn("tui.chat_worker", ...)`. No behavior change — the
-  existing hand-off patterns (`PolledState`, `ChatWork`) stay exactly as
-  they are; this phase only wraps the construction call.
+**What shipped:**
+- `src/core/spawn.hpp`/`.cpp`: `core::spawn(thread_name, fn, sink = {})` — a
+  thin, portable (no I/O, no host dependency) named-`std::thread`
+  constructor. `sink` (a `ThreadEventSink` — `void(name, event)`) is called
+  with `"spawned"` immediately, then `"joined"` or `"threw: <what>"` when
+  `fn` returns or throws. Exceptions still propagate exactly as they would
+  from a bare `std::thread` (`sink` reports why, it does not swallow the
+  exception or add its own `std::terminate()`-avoidance).
+- `DroidHost::log_thread_event(thread_name, event)` (`cli/host.cpp`), a new
+  public method: the bridge from `core::spawn`'s host-agnostic sink to the
+  Phase-3 JSONL log, under a new `"thread"` channel — `event.rfind("threw",
+  0) == 0` maps to `success:false`, everything else (`"spawned"`/`"joined"`)
+  to `success:true`.
+- `cli/tui.cpp`'s `poller` and `chat_worker` both go through
+  `core::spawn("tui.poller", ...)` / `core::spawn("tui.chat_worker", ...)`
+  now, sharing one `thread_event_sink` lambda declared once near the top of
+  `run_tui()` (it has to be declared before `chat_input`'s `CatchEvent`
+  handler, which is where `chat_worker` actually gets spawned, further down
+  the function, than where `poller` is constructed). The existing hand-off
+  patterns (`PolledState`, `ChatWork`) are untouched — this phase only wraps
+  the two `std::thread` constructions.
+- `tests/spawn_test.cpp`: exercises the basic run/join path and the sink's
+  `"spawned"`/`"joined"` reporting. The `"threw: ..."` path is intentionally
+  **not** unit tested — letting an exception actually escape `core::spawn`'s
+  wrapper would call `std::terminate()` on the test process by design
+  (matching bare `std::thread` semantics exactly), so it can't be exercised
+  safely in-process. Both real callers in `cli/tui.cpp` already catch inside
+  `fn`, which is the documented pattern; `"threw"` is a last-resort signal
+  for a caller that didn't.
 
-**Explicit non-goal:** no thread pool, no work-stealing, no async runtime.
-droidcli's threading is deliberately minimal (one poller, one chat worker at
-a time) — this phase adds visibility, not a new concurrency model.
+**Explicit non-goal, unchanged:** no thread pool, no work-stealing, no async
+runtime. droidcli's threading is deliberately minimal (one poller, one chat
+worker at a time) — this phase adds visibility, not a new concurrency model.
 
-**Acceptance:** `logs/log.jsonl` shows a `"thread"`-channel entry for every
-poller/chat-worker start and stop; `ctest` green; TUI behavior unchanged.
+**Verified:** `ctest` green (8/8, excluding the tracked `ollama_client_test`
+issue); launched the interactive TUI briefly and confirmed
+`{"channel":"thread","direction":"tui.poller","summary":"spawned",...}`
+appears in `logs/log.jsonl`.
 
 ---
 

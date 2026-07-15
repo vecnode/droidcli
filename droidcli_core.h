@@ -16,6 +16,7 @@
 
 #include "core/log_sink.hpp"
 #include "core/math.hpp"
+#include "core/spawn.hpp"
 #include "core/types.hpp"
 
 #include "media/decode.hpp"
