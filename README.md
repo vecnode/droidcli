@@ -30,19 +30,6 @@ cmake --build build-msvc --config Debug -j
 .\build-msvc\Debug\droidcli.exe
 ```
 
-Optional FFmpeg overrides:
-
-```powershell
-# Disable auto-download and use an existing local FFmpeg prefix
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DDROIDCLI_FFMPEG_AUTO_DOWNLOAD=OFF -DDROIDCLI_FFMPEG_ROOT="C:/path/to/ffmpeg"
-
-# Keep auto-download enabled but use a custom archive URL
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DDROIDCLI_FFMPEG_URL="https://.../ffmpeg-win64-shared.zip"
-
-# Disable insecure TLS retry fallback (default is ON)
-cmake -B build-msvc -G "Visual Studio 17 2022" -A x64 -DDROIDCLI_FFMPEG_ALLOW_INSECURE_DOWNLOAD=OFF
-```
-
 Shortcut: `.\build_and_run.bat` (configures only when needed; accepts `Debug`/`Release`, `--configure`, `--clean`, `--no-run`).
 
 Release: use `--config Release` → `build-msvc\Release\droidcli.exe`
