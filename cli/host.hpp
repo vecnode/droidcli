@@ -5,6 +5,7 @@
 #include "app/tasks.hpp"
 #include "process_manager.hpp"
 #include "filesystem_tools.hpp"
+#include "app_index.hpp"
 
 #include <ctime>
 #include <mutex>
@@ -100,7 +101,15 @@ public:
 	// Detached, fire-and-forget application launch (POST /api/open) - for
 	// GUI apps that don't exit on their own, distinct from run_command which
 	// blocks for completion. body: {"path_or_name":"...","args":"...","work_dir":"..."}.
+	// Resolves via the App Paths registry, PATH, and (if those fail) the
+	// installed-apps index scanned at startup - see find_applications_json.
 	core::String open_application(const core::String& body);
+
+	// Searches the installed-apps index (POST /api/apps/find) - scanned once
+	// at startup from Windows' Add/Remove Programs registry entries, so it
+	// covers apps that never registered on PATH or in App Paths at all.
+	// body: {"query":"..."}. Returns {"matches":[{"name":...,"path":...}]}.
+	core::String find_applications_json(const core::String& body) const;
 
 	// Filesystem-aware agent tools (POST /api/fs/*) - droidcli executes these
 	// itself, no external process or MCP server involved.
@@ -143,6 +152,7 @@ private:
 	ProcessManager process_manager_;
 	net::ConnectorRegistry connectors_;
 	app::TaskQueue tasks_;
+	core::Array<InstalledApp> installed_apps_;
 
 	struct AppLogEntry {
 		core::String timestamp;

@@ -1,5 +1,6 @@
 #include "host.hpp"
 
+#include "app_index.hpp"
 #include "command_runner.hpp"
 #include "tools/sync_http_client.hpp"
 
@@ -13,6 +14,44 @@
 
 namespace droidcli::cli {
 namespace {
+
+core::String to_lower_ascii(const core::String& value)
+{
+	core::String result = value;
+	std::transform(result.begin(), result.end(), result.begin(),
+		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return result;
+}
+
+// Best-effort case-insensitive match of `query` against the installed-apps
+// index: exact name match first, then a substring match either direction
+// (so "chrome" matches "Google Chrome" and "kicad" matches "KiCad 8.0").
+// Returns an empty path if nothing plausible is found.
+core::String find_installed_app_match(const core::Array<InstalledApp>& apps, const core::String& query)
+{
+	if (query.empty())
+	{
+		return {};
+	}
+	const core::String lower_query = to_lower_ascii(query);
+
+	for (const InstalledApp& app : apps)
+	{
+		if (to_lower_ascii(app.name) == lower_query)
+		{
+			return app.path;
+		}
+	}
+	for (const InstalledApp& app : apps)
+	{
+		const core::String lower_name = to_lower_ascii(app.name);
+		if (lower_name.find(lower_query) != core::String::npos || lower_query.find(lower_name) != core::String::npos)
+		{
+			return app.path;
+		}
+	}
+	return {};
+}
 
 core::Array<core::String> parse_ollama_model_names(const core::String& tags_json)
 {
@@ -161,9 +200,19 @@ void DroidHost::initialize()
 		{
 			language_ai_.set_runtime_enabled(false);
 		}
+
+		// Scan once at startup, not per-lookup: this walks potentially
+		// hundreds of registry keys (Windows Uninstall/Add-Remove-Programs
+		// entries) and touches disk to resolve some paths. Lets
+		// open_application()/find_application resolve names like "Blender"
+		// or "KiCad" that installers never add to PATH or the App Paths
+		// registry key - most installers only ever register an Add/Remove
+		// Programs entry.
+		installed_apps_ = scan_installed_applications();
 	}
 
-	append_app_log("host", "event", "droidcli host initialized", true);
+	append_app_log("host", "event",
+		"droidcli host initialized (" + std::to_string(installed_apps_.size()) + " installed apps indexed)", true);
 }
 
 
@@ -988,7 +1037,25 @@ core::String DroidHost::open_application(const core::String& body)
 			+ net::json_string_field("error", "missing path_or_name") + "}";
 	}
 
-	const LaunchAppResult result = launch_application(path_or_name, args, work_dir);
+	// App Paths registry / raw PATH search first (launch_application's own
+	// resolution) - if that fails, fall back to the installed-apps index
+	// (scanned once at startup from the Uninstall/Add-Remove-Programs
+	// registry), which covers apps that never registered themselves on
+	// PATH or in App Paths at all.
+	LaunchAppResult result = launch_application(path_or_name, args, work_dir);
+	if (!result.launched)
+	{
+		core::String indexed_path;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			indexed_path = find_installed_app_match(installed_apps_, path_or_name);
+		}
+		if (!indexed_path.empty())
+		{
+			result = launch_application(indexed_path, args, work_dir);
+		}
+	}
+
 	append_app_log("open", "out", path_or_name, result.launched);
 
 	std::ostringstream stream;
@@ -997,6 +1064,35 @@ core::String DroidHost::open_application(const core::String& body)
 	stream << "\"pid\":" << result.pid << ',';
 	stream << net::json_string_field("error", result.error_message);
 	stream << '}';
+	return stream.str();
+}
+
+core::String DroidHost::find_applications_json(const core::String& body) const
+{
+	const core::String query = net::extract_json_string_field(body, "query");
+
+	std::lock_guard<std::mutex> lock(mutex_);
+	std::ostringstream stream;
+	stream << "{\"matches\":[";
+	bool first = true;
+	const core::String lower_query = to_lower_ascii(query);
+	for (const InstalledApp& app : installed_apps_)
+	{
+		if (!query.empty() && to_lower_ascii(app.name).find(lower_query) == core::String::npos)
+		{
+			continue;
+		}
+		if (!first)
+		{
+			stream << ',';
+		}
+		first = false;
+		stream << '{';
+		stream << net::json_string_field("name", app.name) << ',';
+		stream << net::json_string_field("path", app.path);
+		stream << '}';
+	}
+	stream << "]}";
 	return stream.str();
 }
 
@@ -1159,8 +1255,15 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"},\"required\":[\"command\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
+		"find_application",
+		"Search the index of applications actually installed on this machine (scanned once at startup from Windows' Add/Remove Programs registry) for a name matching or containing the query. Use this BEFORE open_application when you aren't certain of an app's exact name, or after open_application fails - it tells you the exact installed name and resolved path so you don't have to guess. Returns a list of {name, path} matches; if there's more than one plausible match, ask the user which one they mean instead of picking for them.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"query\":{\"type\":\"string\",\"description\":\"app name or partial name to search for, e.g. 'blender' or 'kicad'\"}"
+		"},\"required\":[\"query\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
 		"open_application",
-		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. path_or_name is resolved against the Windows App Paths registry (how most installed apps register themselves, e.g. 'chrome' even though it's not on PATH), then PATH, then as a direct path. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches, or a prior call failed to resolve it), ask the user to confirm the name or full path rather than guessing at one.",
+		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. path_or_name is resolved against the Windows App Paths registry, then PATH, then the installed-apps index (find_application's data source) as a fallback, then as a direct path. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches from find_application, or a prior call failed to resolve it), ask the user to confirm rather than guessing.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"path_or_name\":{\"type\":\"string\",\"description\":\"executable name (e.g. 'chrome', 'notepad.exe') or a full path\"},"
 		"\"args\":{\"type\":\"string\",\"description\":\"optional command-line arguments\"},"
@@ -1250,6 +1353,10 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "run_command")
 	{
 		return run_command(arguments_json);
+	}
+	if (tool_name == "find_application")
+	{
+		return find_applications_json(arguments_json);
 	}
 	if (tool_name == "open_application")
 	{
