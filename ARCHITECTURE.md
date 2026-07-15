@@ -348,9 +348,19 @@ default). `POST /api/agent/turn`'s body may include `"session_id"`:
   request.
 
 Every `agent_turn` response includes the active `"session_id"` - a caller
-that wants to resume a conversation later needs to hold onto it (the TUI
-doesn't do this yet; see the "Persistent memory" phase in the extension plan
-below for what's still ahead of this).
+that wants to resume a conversation later needs to hold onto it.
+`cli/tui.cpp` does exactly this: it holds the current session's id in memory
+for the process's lifetime (shown in the UI as a `session: <id>` status
+line), writes it to `droidcli_last_session.txt` (repo-root-relative,
+git-ignored) whenever a turn returns one, and on the *next* launch reads
+that file and calls `GET`-equivalent `build_agent_history_json()` directly
+(a local SQLite read, safe to call synchronously before `screen.Loop()`
+starts) to replay the prior conversation into the chat panel and resume
+sending with that `session_id` - so restarting the TUI itself, not just the
+underlying `droidcli` daemon, continues where you left off. Pressing `n`
+(connectors-panel focus) starts a brand new session on the next message
+instead (same semantics as `"clear":true`), for when starting fresh is what
+you actually want.
 
 **Deliberately minimal**: no embeddings, no vector retrieval, no eviction
 policy. Durability (survive a restart) and queryability (`GET

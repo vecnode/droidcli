@@ -77,3 +77,6 @@ droidcli_state.json
 
 # Persistent agent-turn memory (SQLite, see cli/memory_store.cpp)
 droidcli_memory.sqlite3
+
+# Last agent-turn session the TUI was on (see cli/tui.cpp - resumed on next launch)
+droidcli_last_session.txt

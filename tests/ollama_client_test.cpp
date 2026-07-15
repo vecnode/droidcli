@@ -90,7 +90,15 @@ int main()
 	const OllamaOutboundRequest follow_up_request = build_ollama_chat_request(config, follow_up);
 	assert(follow_up_request.valid);
 	assert(follow_up_request.body.find("\"role\":\"tool\"") != String::npos);
-	assert(follow_up_request.body.find("\"connectors\":[]") != String::npos);
+	// The tool message's content is a JSON string VALUE containing literal
+	// JSON text ({"connectors":[]}), so json_string_field() correctly
+	// escapes its embedded quotes - the wire body contains
+	// \"connectors\":[] (backslash-escaped), not a bare "connectors":[]
+	// substring. Searching for the unescaped form was the actual bug here,
+	// not build_ollama_chat_request() - that function's escaping is
+	// required by the JSON spec for embedding one JSON document inside a
+	// string field of another.
+	assert(follow_up_request.body.find("\\\"connectors\\\":[]") != String::npos);
 
 	std::cout << "ollama_client_test passed" << std::endl;
 	return 0;
