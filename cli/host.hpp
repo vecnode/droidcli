@@ -46,7 +46,11 @@ struct HostConfig {
 		"trying to do and ask what they'd prefer instead. "
 		"Prefer acting over narrating: when a tool call can answer the question, call it, then "
 		"report the concrete result (e.g. a PID, a file's contents, a match list) rather than a "
-		"vague description of what you attempted.";
+		"vague description of what you attempted. Never say 'I'll run/execute/create that' or "
+		"'hold on, processing' without actually calling the tool in that exact same response - "
+		"a sentence describing an action is not the action, and the user is left with nothing "
+		"having happened. If you have enough information to act, call the tool now; if you don't, "
+		"ask the specific question you need answered instead of claiming you're already acting.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's

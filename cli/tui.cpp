@@ -817,6 +817,20 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	int left_pane_width = 36;
 	int right_pane_width = 30;
 	std::string chat_input_text;
+	// Cursor position for chat_input, exposed so history recall below can
+	// jump it to the end of a recalled message instead of leaving it
+	// wherever it happened to be - see the InputOption passed to Input().
+	int chat_input_cursor = 0;
+	// Shell-style message history: every message actually sent to the agent
+	// (not pending_open/pending_tool_approval yes/no replies - those aren't
+	// "prompts" worth recalling), oldest first. ArrowUp/ArrowDown below walk
+	// it; chat_history_cursor is -1 while editing live text, otherwise an
+	// index into chat_history. chat_history_draft holds whatever was being
+	// typed before the first ArrowUp, restored once ArrowDown walks back
+	// past the newest entry - the same behavior a shell's history gives you.
+	std::vector<std::string> chat_history;
+	int chat_history_cursor = -1;
+	std::string chat_history_draft;
 	bool agent_turn_in_flight = false;
 	PendingOpen pending_open;
 	// Set whenever an agent_turn()/agent_tool_decision() response pauses on
@@ -1317,9 +1331,74 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		screen.PostEvent(Event::Custom);
 	};
 
-	Component chat_input = Input(&chat_input_text, "type a message, Enter to send...");
+	// Records a message the user actually sent into chat_history (see its
+	// declaration above) - resets the browse cursor so the next ArrowUp
+	// starts from this newest entry, and skips an exact repeat of the
+	// immediately preceding one so hitting Enter twice on the same text
+	// doesn't clutter history with duplicates.
+	auto record_chat_history = [&](const std::string& message)
+	{
+		if (message.empty())
+		{
+			return;
+		}
+		if (!chat_history.empty() && chat_history.back() == message)
+		{
+			return;
+		}
+		chat_history.push_back(message);
+		chat_history_cursor = -1;
+		chat_history_draft.clear();
+	};
+
+	InputOption chat_input_option;
+	chat_input_option.cursor_position = &chat_input_cursor;
+	Component chat_input = Input(&chat_input_text, "type a message, Enter to send...", chat_input_option);
 	chat_input = CatchEvent(chat_input, [&](Event event) -> bool
 	{
+		// Intercepted here, ahead of Input's own ArrowUp/ArrowDown (which
+		// only move the cursor within multi-line content - irrelevant for a
+		// single-line chat box), so Up/Down always walks message history
+		// regardless of where the cursor currently sits.
+		if (event == Event::ArrowUp)
+		{
+			if (chat_history.empty())
+			{
+				return true;
+			}
+			if (chat_history_cursor == -1)
+			{
+				chat_history_draft = chat_input_text;
+				chat_history_cursor = static_cast<int>(chat_history.size()) - 1;
+			}
+			else if (chat_history_cursor > 0)
+			{
+				--chat_history_cursor;
+			}
+			chat_input_text = chat_history[static_cast<size_t>(chat_history_cursor)];
+			chat_input_cursor = static_cast<int>(chat_input_text.size());
+			return true;
+		}
+		if (event == Event::ArrowDown)
+		{
+			if (chat_history_cursor == -1)
+			{
+				return true;
+			}
+			++chat_history_cursor;
+			if (chat_history_cursor >= static_cast<int>(chat_history.size()))
+			{
+				chat_history_cursor = -1;
+				chat_input_text = chat_history_draft;
+			}
+			else
+			{
+				chat_input_text = chat_history[static_cast<size_t>(chat_history_cursor)];
+			}
+			chat_input_cursor = static_cast<int>(chat_input_text.size());
+			return true;
+		}
+
 		if (event == Event::Return)
 		{
 			if (agent_turn_in_flight)
@@ -1452,6 +1531,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					const std::string message = chat_input_text;
 					chat_input_text.clear();
 					chat_entries.push_back(ChatEntry{"user", message});
+					record_chat_history(message);
 
 					pending_open.active = true;
 					pending_open.app_name = quick_open.app_name;
@@ -1481,6 +1561,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			if (!message.empty())
 			{
 				chat_entries.push_back(ChatEntry{"user", message});
+				record_chat_history(message);
 			}
 			agent_turn_in_flight = true;
 
