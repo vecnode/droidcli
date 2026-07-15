@@ -145,6 +145,11 @@ real socket, GPU, or file, the change is in the wrong layer.
   transport library from core.
 - Keep JSON building/parsing in `net/json` + the module that owns the shape; the
   host should not hand-roll core JSON.
+- **Every agent-tool JSON result carries `"ok"`, as the first field, always.**
+  This is the model's only trustworthy success signal (see "Phase 6" in
+  `ARCHITECTURE.md` for the incident that made this a hard rule, not a
+  style preference) — never assume a caller will infer success from an
+  exit code, a `"launched"` flag, or the presence of output.
 
 ## Adding things (follow the existing extension points)
 
@@ -189,7 +194,22 @@ in one change so the core/host/test trio stays in sync:
    description, JSON Schema parameters) and a matching branch in
    `DroidHost::execute_agent_tool()` (`cli/host.cpp`). Tools call back into
    `DroidHost`'s own methods (connectors/tasks/run_command) — never a second,
-   parallel command dispatch table.
+   parallel command dispatch table. Two rules that came out of a real
+   hallucination incident (see "Phase 6" in `ARCHITECTURE.md`), both
+   required for every new tool:
+   - **Every tool result must have an `"ok"` boolean, first field.** The
+     model has shown it will not reliably infer success from anything
+     else (a `"launched":true` flag, a numeric exit code, the mere presence
+     of output) — `"ok"` is the only field it's conditioned to trust. If the
+     tool wraps `CommandRunResult`, use `command_succeeded()`
+     (`cli/command_runner.hpp`) rather than re-deriving the check inline —
+     two independent copies of that logic already drifted apart once.
+   - **If the tool has a side effect** (writes to disk, runs a process,
+     touches a connector/task/filesystem beyond a read), add its name to
+     `tool_call_requires_approval()` (`cli/host.cpp`) so it pauses for human
+     approval via `POST /api/agent/tool_decision` instead of executing the
+     instant the model asks for it. Read-only tools should NOT be added
+     there — gating them only slows the agent down for no safety benefit.
 
 **Every new core `src/<module>/*_test.cpp` must be registered in
 `CMakeLists.txt`** and pass under `ctest`.

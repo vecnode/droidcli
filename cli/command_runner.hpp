@@ -27,6 +27,18 @@ CommandRunResult run_command_once(
 	const core::String& work_dir,
 	int32_t timeout_ms = 30000);
 
+// The single, authoritative definition of "did this command actually
+// succeed" - launched, exited zero, and no error_message (timeout/spawn
+// failure both set one). Derived on demand from CommandRunResult's existing
+// fields rather than stored as a field of its own, so there's no way for it
+// to drift out of sync with them the way two independent inline
+// `launched && exit_code == 0` checks (as DroidHost::install_ollama() and
+// pull_ollama_model() used to each have their own copy of) could.
+inline bool command_succeeded(const CommandRunResult& result)
+{
+	return result.launched && result.exit_code == 0 && result.error_message.empty();
+}
+
 struct LaunchAppResult {
 	bool launched = false;
 	int64_t pid = 0;
