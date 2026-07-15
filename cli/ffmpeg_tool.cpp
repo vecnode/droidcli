@@ -64,7 +64,12 @@ CommandRunResult run_ffmpeg(
 	}
 
 	const core::String command = "\"" + resolved.resolved_path + "\" " + args;
-	return run_command_once(command, work_dir, timeout_ms);
+	// via_shell=false: ffmpeg invocations never need shell features (pipes,
+	// redirects, env var expansion) and args frequently contain their own
+	// nested double quotes (filter expressions like s="sin(2*PI*440)") that
+	// cmd.exe's `/c` re-tokenizing pass can silently mangle - see the
+	// header comment on run_command_once.
+	return run_command_once(command, work_dir, timeout_ms, /*via_shell=*/false);
 }
 
 } // namespace droidcli::cli

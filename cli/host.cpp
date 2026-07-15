@@ -1877,6 +1877,24 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"Get the host machine droidcli is actually running on right now: OS name, OS version/build, CPU architecture, hostname, username, current working directory, and desktop_path (the user's actual Desktop folder, resolved via the OS - not a guess, use this instead of constructing a 'C:\\Users\\<name>\\Desktop'-style path yourself, which breaks for a redirected or localized Desktop folder). This was already queried once at startup and is in your system prompt, but call this if you need to double-check or report it precisely (e.g. the user asks 'what machine/OS is this' or 'where is my Desktop'). Takes no arguments.",
 		"{\"type\":\"object\",\"properties\":{}}"});
 
+	tools.push_back(ai::ToolDefinition{
+		"search_command_fixes",
+		"Search previously recorded fixes for run_command/run_ffmpeg failures - a persistent memory of bugs already solved before, so you don't have to rediscover the same fix from scratch every time. Call this BEFORE attempting a run_command/run_ffmpeg call similar to something that failed earlier (same tool, similar error, similar kind of task), not after. query is matched case-insensitively against the tool name, the broken command, its failure reason, and the lesson text - keep it short and specific (e.g. 'ffmpeg static image' or 'ffmpeg quotes'), not the full failing command.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"query\":{\"type\":\"string\",\"description\":\"short search text, e.g. 'ffmpeg static image'\"}"
+		"},\"required\":[\"query\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"record_command_fix",
+		"Record a 'this was broken, this is what fixed it' lesson so future run_command/run_ffmpeg calls (in this or a later session) can look it up via search_command_fixes instead of hitting the same wall again. Call this right after you fix something that failed at least once first - not for a command that worked on the first try, and not for a fix you haven't actually verified worked (an 'ok':true tool result). broken/working should be the actual command/args strings, not a paraphrase; lesson should be one short, specific, reusable sentence (e.g. 'ffmpeg embeds nested double-quotes badly through cmd.exe - avoid quoting filter expressions that don't need it').",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"tool\":{\"type\":\"string\",\"description\":\"which tool this is about, e.g. 'run_ffmpeg'\"},"
+		"\"broken\":{\"type\":\"string\",\"description\":\"the command/args string that failed\"},"
+		"\"failure_reason\":{\"type\":\"string\",\"description\":\"what the failure was, e.g. from the tool result's failure_reason field\"},"
+		"\"working\":{\"type\":\"string\",\"description\":\"the command/args string that worked instead\"},"
+		"\"lesson\":{\"type\":\"string\",\"description\":\"one short, specific, reusable takeaway\"}"
+		"},\"required\":[\"tool\",\"broken\",\"working\",\"lesson\"]}"});
+
 	return tools;
 }
 
@@ -1962,6 +1980,14 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	{
 		return run_ffmpeg_json(arguments_json);
 	}
+	if (tool_name == "search_command_fixes")
+	{
+		return search_command_fixes_json(arguments_json);
+	}
+	if (tool_name == "record_command_fix")
+	{
+		return record_command_fix_json(arguments_json);
+	}
 
 	return "{" + net::json_bool_field("ok", false) + ","
 		+ net::json_string_field("error", "unknown tool: " + tool_name) + "}";
@@ -1987,6 +2013,54 @@ core::String DroidHost::build_agent_tools_json() const
 		// parameters_json_schema is already well-formed JSON - matches how
 		// Ollama receives it in the "tools" request field.
 		stream << "\"parameters\":" << (tool.parameters_json_schema.empty() ? "{}" : tool.parameters_json_schema);
+		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
+}
+
+core::String DroidHost::record_command_fix_json(const core::String& body)
+{
+	const core::String tool = net::extract_json_string_field(body, "tool");
+	const core::String broken = net::extract_json_string_field(body, "broken");
+	const core::String failure_reason = net::extract_json_string_field(body, "failure_reason");
+	const core::String working = net::extract_json_string_field(body, "working");
+	const core::String lesson = net::extract_json_string_field(body, "lesson");
+
+	if (tool.empty() || broken.empty() || working.empty() || lesson.empty())
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "tool, broken, working, and lesson are all required") + "}";
+	}
+
+	const bool ok = memory_store_.record_lesson(tool, broken, failure_reason, working, lesson);
+	append_app_log("lessons", "in", "recorded fix for " + tool + ": " + lesson, ok);
+	return "{" + net::json_bool_field("ok", ok) + "}";
+}
+
+core::String DroidHost::search_command_fixes_json(const core::String& body) const
+{
+	const core::String query = net::extract_json_string_field(body, "query");
+	const core::Array<CommandLesson> lessons = memory_store_.search_lessons(query);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", true) << ',';
+	stream << "\"lessons\":[";
+	for (size_t index = 0; index < lessons.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const CommandLesson& entry = lessons[index];
+		stream << '{';
+		stream << net::json_string_field("tool", entry.tool) << ',';
+		stream << net::json_string_field("broken", entry.broken) << ',';
+		stream << net::json_string_field("failure_reason", entry.failure_reason) << ',';
+		stream << net::json_string_field("working", entry.working) << ',';
+		stream << net::json_string_field("lesson", entry.lesson) << ',';
+		stream << net::json_string_field("created_at", entry.created_at);
 		stream << '}';
 	}
 	stream << "]}";

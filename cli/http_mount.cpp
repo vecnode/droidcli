@@ -228,6 +228,16 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.agent_tool_decision(request.body));
 			return true;
 		}
+		if (is_post && path == "/api/agent/lessons")
+		{
+			set_json(response, host.record_command_fix_json(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/agent/lessons/search")
+		{
+			set_json(response, host.search_command_fixes_json(request.body));
+			return true;
+		}
 		if (is_get && path == "/api/agent/history")
 		{
 			set_json(response, host.build_agent_history_json(query_param(request.query_string, "session_id")));

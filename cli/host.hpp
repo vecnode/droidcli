@@ -59,7 +59,16 @@ struct HostConfig {
 		"never report success anyway, and never invent a file path, output location, or result you "
 		"did not get back from a tool. If you have not called a tool for something, you have not "
 		"done it, no matter how confident that sounds - use get_cwd/list_dir/stat_path to check "
-		"where something actually landed rather than guessing or making up a plausible-sounding path.";
+		"where something actually landed rather than guessing or making up a plausible-sounding path. "
+		"You have a persistent memory of run_command/run_ffmpeg bugs already solved before, across "
+		"this and every past session - call search_command_fixes with a short query BEFORE "
+		"attempting a command similar to a kind of task that has failed before (a specific ffmpeg "
+		"filter, a specific error message), so you don't waste attempts rediscovering the same fix. "
+		"After you fix something that failed at least once - a verified \"ok\":true result, not a "
+		"guess - call record_command_fix with the exact broken and working command/args and one "
+		"short, reusable lesson, so the next time (in this session or a future one) doesn't start "
+		"from scratch. Don't record a command that worked on the first try - only ones you had to "
+		"fix.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's
@@ -211,6 +220,27 @@ public:
 	// duplicating that list. No arguments. Returns {"tools":[{"name":...,
 	// "description":...,"parameters_json_schema":...}]}.
 	core::String build_agent_tools_json() const;
+
+	// Persists a "this broke, this fixed it" lesson (see CommandLesson,
+	// cli/memory_store.hpp) - POST /api/agent/lessons, and the
+	// record_command_fix agent tool. body: {"tool":"run_command"|
+	// "run_ffmpeg"|...,"broken":"...","failure_reason":"...","working":
+	// "...","lesson":"short takeaway"}. The model decides when to call this
+	// - there's no automatic capture from a failed-then-succeeded pair in
+	// the same turn, since the next attempt happening to work doesn't
+	// reliably mean that specific change is what fixed it. Read/write-
+	// adjacent (recording knowledge, not touching the OS) so it's not
+	// gated behind tool_call_requires_approval() the way run_command/
+	// run_ffmpeg themselves are. Returns {"ok":bool}.
+	core::String record_command_fix_json(const core::String& body);
+
+	// Looks up previously recorded lessons (POST /api/agent/lessons/search,
+	// and the search_command_fixes agent tool) - case-insensitive substring
+	// match against tool/broken/failure_reason/lesson, most recent first.
+	// body: {"query":"..."}. Returns {"ok":true,"lessons":[{"tool":...,
+	// "broken":...,"failure_reason":...,"working":...,"lesson":...,
+	// "created_at":...}]}.
+	core::String search_command_fixes_json(const core::String& body) const;
 
 	// The tool-calling agent turn (POST /api/agent/turn). body is
 	// {"message":"...","clear":bool,"session_id":"..."}. Drives a bounded
