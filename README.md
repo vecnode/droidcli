@@ -5,12 +5,15 @@
 `droidcli` is a library to create agents that execute multimodal tasks, a headless CLI agent daemon.
 
 Core capabilities: 
-- Interactive terminal dashboard (FTXUI), default mode - chat panel plus live connector/task/log views
-- Ollama tool-calling agent loop, self-contained (no MCP client): the model can act on this machine directly
+- Interactive terminal dashboard [FTXUI](https://github.com/ArthurSonzogni/FTXUI), default mode - chat panel plus live connector/task/log views
+- [Ollama](https://ollama.com/) tool-calling agent loop, self-contained (no MCP client): the model can act on this machine directly
+- Persistent, per-session agent memory (SQLite-backed) - conversations survive a restart and are queryable over the HTTP API
+- Pluggable LLM provider abstraction: [Ollama](https://ollama.com/)
 - Filesystem tools (read/write/list/stat files, resolve executables on PATH)
 - Run shell commands, and open/launch GUI applications (detached, not blocked on)
-- Installed-application discovery, scanned at startup (Windows Add/Remove Programs registry)
+- Installed-application discovery, scanned at startup (Windows Add/Remove Programs registry, plus built-in Windows accessories)
 - Generic connectors (http_peer or launched_process, PID-tracked) and a persistent task queue
+- Structured JSONL application log, with session and background-thread attribution
 - Bearer-token authentication on the whole HTTP API by default
 - Media decode (FFmpeg-backed)
 
