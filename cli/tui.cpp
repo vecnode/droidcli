@@ -20,6 +20,13 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace droidcli::cli {
 namespace {
 
@@ -193,6 +200,38 @@ struct ChatEntry {
 	std::string text;
 };
 
+// Plain-text rendering of the chat transcript (one line per entry, with the
+// same [USER]/[AGENT]/[SYSTEM] prefixes the chat panel shows, minus color)
+// for copying to the clipboard.
+std::string format_chat_transcript(const std::vector<ChatEntry>& entries)
+{
+	std::ostringstream stream;
+	for (const ChatEntry& entry : entries)
+	{
+		if (entry.role == "user")
+		{
+			stream << "[USER] " << entry.text << "\n";
+		}
+		else if (entry.role == "assistant")
+		{
+			stream << "[AGENT] " << entry.text << "\n";
+		}
+		else if (entry.role == "tool")
+		{
+			stream << "  " << entry.text << "\n";
+		}
+		else if (entry.role == "error")
+		{
+			stream << "error: " << entry.text << "\n";
+		}
+		else
+		{
+			stream << "[SYSTEM] " << entry.text << "\n";
+		}
+	}
+	return stream.str();
+}
+
 // Chat results computed on a detached background thread (agent turns, Ollama
 // install/start/pull can all take seconds to minutes) and handed off to the
 // FTXUI event-loop thread the same way PolledState is: the background thread
@@ -357,6 +396,61 @@ std::string to_lower(const std::string& value)
 	std::transform(result.begin(), result.end(), result.begin(),
 		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	return result;
+}
+
+// Copies `text` (UTF-8) to the OS clipboard. Windows-only for now, matching
+// this codebase's existing Windows-first precedent (command_runner.cpp,
+// process_manager.cpp) - a POSIX implementation (X11/Wayland clipboard, or
+// shelling out to pbcopy on macOS) is a reasonable future addition but not
+// implemented here.
+bool copy_text_to_clipboard(const std::string& text)
+{
+#ifdef _WIN32
+	if (!OpenClipboard(nullptr))
+	{
+		return false;
+	}
+
+	// CF_UNICODETEXT (not CF_TEXT) so non-ASCII chat content - emoji from a
+	// model's reply, non-English text, etc. - survives the copy intact.
+	const int wide_length = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+	if (wide_length <= 0)
+	{
+		CloseClipboard();
+		return false;
+	}
+
+	const HGLOBAL buffer_handle = GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(wide_length) * sizeof(wchar_t));
+	if (buffer_handle == nullptr)
+	{
+		CloseClipboard();
+		return false;
+	}
+
+	wchar_t* buffer = static_cast<wchar_t*>(GlobalLock(buffer_handle));
+	if (buffer == nullptr)
+	{
+		GlobalFree(buffer_handle);
+		CloseClipboard();
+		return false;
+	}
+	MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, buffer, wide_length);
+	GlobalUnlock(buffer_handle);
+
+	EmptyClipboard();
+	// The clipboard owns buffer_handle after a successful SetClipboardData -
+	// do not GlobalFree it ourselves.
+	const bool ok = SetClipboardData(CF_UNICODETEXT, buffer_handle) != nullptr;
+	if (!ok)
+	{
+		GlobalFree(buffer_handle);
+	}
+	CloseClipboard();
+	return ok;
+#else
+	(void)text;
+	return false;
+#endif
 }
 
 // One line describing what the user should type next for a given setup
@@ -860,7 +954,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				vbox({ connectors_panel, tasks_panel }) | flex,
 				vbox({ log_panel, chat_panel }) | flex,
 			}) | flex,
-			text("Tab: switch focus   (connectors focused) q: quit   l: launch   s: stop   j/k/arrows: move   Ctrl+C: quit anytime") | dim,
+			text("Tab: switch focus   (connectors focused) q: quit   l: launch   s: stop   j/k/arrows: move   y: copy chat   Ctrl+C: quit anytime") | dim,
 		});
 	});
 
@@ -930,6 +1024,24 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				{
 					host.stop_connector(connector_id);
 				}
+			}
+			return true;
+		}
+
+		if (event == Event::y)
+		{
+			const std::string transcript = format_chat_transcript(chat_entries);
+			if (transcript.empty())
+			{
+				chat_entries.push_back(ChatEntry{"info", "Nothing to copy yet."});
+			}
+			else if (copy_text_to_clipboard(transcript))
+			{
+				chat_entries.push_back(ChatEntry{"info", "Copied the chat transcript to the clipboard."});
+			}
+			else
+			{
+				chat_entries.push_back(ChatEntry{"error", "Could not copy to the clipboard."});
 			}
 			return true;
 		}

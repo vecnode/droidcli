@@ -119,6 +119,11 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.run_command(request.body));
 			return true;
 		}
+		if (is_post && path == "/api/open")
+		{
+			set_json(response, host.open_application(request.body));
+			return true;
+		}
 
 		// Filesystem-aware agent tools - droidcli executes these itself, no
 		// external process or MCP server involved.

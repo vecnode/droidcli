@@ -975,6 +975,31 @@ core::String DroidHost::run_command(const core::String& body)
 	return stream.str();
 }
 
+core::String DroidHost::open_application(const core::String& body)
+{
+	const core::String path_or_name = net::extract_json_string_field(body, "path_or_name");
+	const core::String args = net::extract_json_string_field(body, "args");
+	const core::String work_dir = net::extract_json_string_field(body, "work_dir");
+
+	if (path_or_name.empty())
+	{
+		return "{" + net::json_bool_field("launched", false) + ","
+			+ "\"pid\":0,"
+			+ net::json_string_field("error", "missing path_or_name") + "}";
+	}
+
+	const LaunchAppResult result = launch_application(path_or_name, args, work_dir);
+	append_app_log("open", "out", path_or_name, result.launched);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("launched", result.launched) << ',';
+	stream << "\"pid\":" << result.pid << ',';
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+}
+
 core::String DroidHost::read_file(const core::String& body)
 {
 	const core::String path = net::extract_json_string_field(body, "path");
@@ -1134,6 +1159,15 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"},\"required\":[\"command\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
+		"open_application",
+		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"path_or_name\":{\"type\":\"string\",\"description\":\"executable name (resolved against PATH, e.g. 'notepad.exe') or a full path\"},"
+		"\"args\":{\"type\":\"string\",\"description\":\"optional command-line arguments\"},"
+		"\"work_dir\":{\"type\":\"string\",\"description\":\"optional working directory\"}"
+		"},\"required\":[\"path_or_name\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
 		"read_file",
 		"Read a file's contents from the local filesystem. Caps the read at max_bytes (default 65536) to avoid overloading context - the result reports whether the file was truncated.",
 		"{\"type\":\"object\",\"properties\":{"
@@ -1143,7 +1177,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"write_file",
-		"Write content to a file on the local filesystem, creating parent directories if needed. Overwrites by default - use only for tasks the user actually asked for.",
+		"Create a new file, or overwrite/append to an existing one, on the local filesystem. Creates the file if it doesn't exist yet (this is also the tool to use for 'create a file'), and creates any missing parent directories. Overwrites by default - use only for tasks the user actually asked for.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"path\":{\"type\":\"string\",\"description\":\"file path to write\"},"
 		"\"content\":{\"type\":\"string\",\"description\":\"text to write\"},"
@@ -1216,6 +1250,10 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "run_command")
 	{
 		return run_command(arguments_json);
+	}
+	if (tool_name == "open_application")
+	{
+		return open_application(arguments_json);
 	}
 	if (tool_name == "read_file")
 	{

@@ -112,12 +112,15 @@ for `http_peer`, `launch_connector`/`stop_connector` for `launched_process`,
 `command_runner`), the **ProcessManager** (Job Object/process-group launch of
 any `launched_process` connector with PID tracking), **`command_runner`**
 (one-shot, synchronous, timeout-bounded shell command execution with captured
-stdout/stderr - `POST /api/run` and the `"run"` task command), **`filesystem_tools`**
+stdout/stderr - `POST /api/run` and the `"run"` task command - plus
+`launch_application`, a detached fire-and-forget GUI-app launch with no wait
+and no output capture, distinct from the blocking `run_command_once` -
+`POST /api/open`), **`filesystem_tools`**
 (`read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/
 `which_executable`, `std::filesystem`-backed, no external dependency - `POST
 /api/fs/*`), and **`DroidHost::agent_turn`** (a bounded Ollama tool-calling
-loop over a fixed tool set - connectors, tasks, shell commands, and these
-filesystem primitives - each tool implemented by calling back into
+loop over a fixed tool set - connectors, tasks, shell commands, app launches,
+and filesystem primitives - each tool implemented by calling back into
 `DroidHost`'s own methods, self-contained rather than delegating to another
 process or MCP server - `POST /api/agent/turn`).
 
@@ -200,6 +203,7 @@ over HTTP, so it never needs the token.
 | `GET` | `/api/notify/log` `[auth]` | Recent notify messages |
 | `GET` | `/api/app/log` `[auth]` | Recent host application log |
 | `POST` | `/api/run` `[auth]` | Run a one-shot shell command — body `{"command":"...","work_dir":"...","timeout_ms":30000}` |
+| `POST` | `/api/open` `[auth]` | Launch a GUI application, detached (no wait, no output capture) — body `{"path_or_name":"...","args":"...","work_dir":"..."}` |
 | `POST` | `/api/fs/read` `[auth]` | Read a file — body `{"path":"...","max_bytes":65536}`, response reports `truncated` |
 | `POST` | `/api/fs/write` `[auth]` | Write/append a file — body `{"path":"...","content":"...","append":false}` |
 | `POST` | `/api/fs/list` `[auth]` | Non-recursive directory listing — body `{"path":"..."}` (omit for cwd) |
