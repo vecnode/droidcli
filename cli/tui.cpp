@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -245,15 +246,26 @@ struct ChatWork {
 	std::mutex mutex;
 	std::vector<ChatEntry> pending_entries;
 	bool clear_in_flight = false;
+	// Set whenever an agent_turn response carries a "session_id" - drained
+	// into the UI thread's current_session_id the same way pending_entries
+	// is, so the TUI can display it and include it in the next request
+	// (resuming a session across a restart - see "Persistent memory" in
+	// ARCHITECTURE.md). Empty means "no update this round", not "clear it".
+	std::string session_id;
 };
 
 // Extracts DroidHost::agent_turn()'s response ({"ok":bool,"assistant":"...",
-// "actions":[{"tool":"...","arguments_json":"...","result_json":"..."}],
-// "error":"..."}) into chat lines: the assistant's reply plus one line per
-// tool call made along the way.
-std::vector<ChatEntry> parse_agent_turn_response(const std::string& json)
+// "session_id":"...","actions":[{"tool":"...","arguments_json":"...",
+// "result_json":"..."}],"error":"..."}) into chat lines: the assistant's
+// reply plus one line per tool call made along the way. out_session_id is
+// set whenever the response carries one (including on some error paths -
+// see agent_turn()'s doc comment in cli/host.hpp) so the caller can persist
+// it for resuming this conversation later.
+std::vector<ChatEntry> parse_agent_turn_response(const std::string& json, std::string& out_session_id)
 {
 	std::vector<ChatEntry> entries;
+	out_session_id = net::extract_json_string_field(json, "session_id");
+
 	bool ok = false;
 	net::extract_json_bool_field(json, "ok", ok);
 	if (!ok)
@@ -622,6 +634,80 @@ bool try_resolve_model_selection(
 	return false;
 }
 
+// Where the TUI remembers which agent_turn session to resume next launch -
+// repo-root-relative like droidcli_state.json/droidcli_memory.sqlite3,
+// git-ignored (see .gitignore). Plain text, one line: just the session id,
+// no JSON needed for a single scalar.
+const char* kLastSessionIdFile = "droidcli_last_session.txt";
+
+std::string read_last_session_id()
+{
+	std::ifstream file(kLastSessionIdFile);
+	if (!file)
+	{
+		return {};
+	}
+	std::string line;
+	std::getline(file, line);
+	return trim(line);
+}
+
+void write_last_session_id(const std::string& session_id)
+{
+	std::ofstream file(kLastSessionIdFile, std::ios::trunc);
+	if (file)
+	{
+		file << session_id << std::endl;
+	}
+}
+
+// Turns DroidHost::build_agent_history_json()'s response
+// ({"session_id":"...","messages":[{"hop_index":N,"role":"...",
+// "content":"...","created_at":"..."}]}) into chat lines for replaying a
+// resumed session into the chat panel at startup. The system-prompt message
+// (always hop_index 0 when present) is summarized rather than shown in
+// full - it's long by design (see HostConfig::system_prompt) and was never
+// something the user typed or read the first time either.
+std::vector<ChatEntry> parse_agent_history_for_resume(const std::string& json)
+{
+	std::vector<ChatEntry> entries;
+	bool saw_system_prompt = false;
+	for (const std::string& message : extract_json_object_array(json, "messages"))
+	{
+		const std::string role = net::extract_json_string_field(message, "role");
+		const std::string content = net::extract_json_string_field(message, "content");
+		if (role == "system")
+		{
+			saw_system_prompt = true;
+			continue;
+		}
+		if (role == "assistant")
+		{
+			entries.push_back(ChatEntry{"assistant", content});
+		}
+		else if (role == "tool")
+		{
+			entries.push_back(ChatEntry{"tool", "(resumed) " + content});
+		}
+		else
+		{
+			entries.push_back(ChatEntry{"user", content});
+		}
+	}
+	if (!entries.empty())
+	{
+		std::string summary = "Resumed a prior session (" + std::to_string(entries.size()) + " message"
+			+ (entries.size() == 1 ? "" : "s");
+		if (saw_system_prompt)
+		{
+			summary += ", plus the system prompt";
+		}
+		summary += "). Press 'n' to start a new session instead.";
+		entries.insert(entries.begin(), ChatEntry{"info", summary});
+	}
+	return entries;
+}
+
 } // namespace
 
 int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
@@ -643,6 +729,17 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	std::string chat_input_text;
 	bool agent_turn_in_flight = false;
 	PendingOpen pending_open;
+	// The active agent_turn session (see "Persistent memory" in
+	// ARCHITECTURE.md) - included in every real chat request once known, so
+	// a restarted TUI resumes the same conversation instead of silently
+	// starting a fresh one server-side. Persisted to kLastSessionIdFile
+	// whenever a response reports it; loaded back at startup below.
+	std::string current_session_id;
+	// Set by the 'n' keybinding: the next real chat message sends
+	// "clear":true instead of the current session_id, starting a brand new
+	// session (old history stays in MemoryStore, just no longer active -
+	// same semantics as agent_turn()'s "clear" field).
+	bool pending_new_session = false;
 
 	// core::spawn (droidcli's zeroclaw-spawn analog - see ARCHITECTURE.md's
 	// "Spawn attribution") names each background thread and reports its
@@ -848,7 +945,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// "error" chat entry, never propagate out - an uncaught exception on a
 	// detached thread calls std::terminate() immediately and takes the whole
 	// process down, which is exactly the crash this replaces.
-	auto run_chat_turn = [&](std::string message)
+	auto run_chat_turn = [&](std::string message, bool start_new_session)
 	{
 		std::vector<ChatEntry> results;
 		try
@@ -994,12 +1091,30 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			else
 			{
 				std::ostringstream request_body;
-				request_body << '{' << net::json_string_field("message", message) << '}';
+				request_body << '{' << net::json_string_field("message", message);
+				if (start_new_session)
+				{
+					request_body << ',' << net::json_bool_field("clear", true);
+				}
+				else if (!current_session_id.empty())
+				{
+					// Resuming/continuing the session this TUI process is
+					// on - see current_session_id's declaration above and
+					// "Persistent memory" in ARCHITECTURE.md.
+					request_body << ',' << net::json_string_field("session_id", current_session_id);
+				}
+				request_body << '}';
 				const std::string response_json = host.agent_turn(request_body.str());
 
-				for (const ChatEntry& entry : parse_agent_turn_response(response_json))
+				std::string response_session_id;
+				for (const ChatEntry& entry : parse_agent_turn_response(response_json, response_session_id))
 				{
 					results.push_back(entry);
+				}
+				if (!response_session_id.empty())
+				{
+					std::lock_guard<std::mutex> lock(chat_work.mutex);
+					chat_work.session_id = response_session_id;
 				}
 			}
 		}
@@ -1152,13 +1267,21 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			}
 			agent_turn_in_flight = true;
 
+			// Snapshotted here (UI thread) rather than read from inside
+			// run_chat_turn (background thread) to avoid a data race on
+			// pending_new_session - it's reset immediately, before the
+			// spawned thread can observe it, so a second 'n' press while a
+			// turn is in flight can't accidentally apply to two turns.
+			const bool start_new_session = pending_new_session;
+			pending_new_session = false;
+
 			if (chat_worker.joinable())
 			{
 				chat_worker.join();
 			}
 			chat_worker = droidcli::core::spawn(
 				"tui.chat_worker",
-				[run_chat_turn, message]() { run_chat_turn(message); },
+				[run_chat_turn, message, start_new_session]() { run_chat_turn(message, start_new_session); },
 				thread_event_sink);
 			return true;
 		}
@@ -1181,9 +1304,13 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 
 		const std::string focus_hint = chat_input->Focused()
 			? "chat focused - Tab/Esc: to connectors   Enter: send   Ctrl+C: quit anytime"
-			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   j/k/arrows: move   y: copy chat";
+			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   j/k/arrows: move   y: copy chat";
+		const std::string session_line = current_session_id.empty()
+			? "session: (none yet - starts on your first message)"
+			: "session: " + current_session_id;
 		return vbox({
 			text(status_line) | bold,
+			text(session_line) | dim,
 			hbox({
 				vbox({ connectors_panel, tasks_panel }) | flex,
 				vbox({ log_panel, chat_panel }) | flex,
@@ -1210,6 +1337,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				chat_entries.push_back(std::move(entry));
 			}
 			chat_work.pending_entries.clear();
+			if (!chat_work.session_id.empty() && chat_work.session_id != current_session_id)
+			{
+				current_session_id = chat_work.session_id;
+				write_last_session_id(current_session_id);
+				chat_work.session_id.clear();
+			}
 			if (chat_work.clear_in_flight)
 			{
 				agent_turn_in_flight = false;
@@ -1305,6 +1438,21 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			return true;
 		}
 
+		if (event == Event::n)
+		{
+			// Takes effect on the *next* message (agent_turn requires a
+			// non-empty message, so there's no way to clear the server-side
+			// session immediately without one) - see start_new_session in
+			// run_chat_turn above. The visual chat panel clears right away
+			// so it's obvious a fresh conversation has started, even though
+			// the old one is still on disk and resumable by session_id.
+			pending_new_session = true;
+			current_session_id.clear();
+			chat_entries.clear();
+			chat_entries.push_back(ChatEntry{"info", "Starting a new session on your next message."});
+			return true;
+		}
+
 		return false;
 	});
 
@@ -1317,6 +1465,37 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// before screen.Loop() starts).
 	chat_entries.push_back(ChatEntry{"info",
 		"Welcome to droidcli " + std::string(version_string) + ". Type a message below and press Enter to chat."});
+
+	// Resume the last session this TUI process was on, if any (see
+	// current_session_id's declaration above and "Persistent memory" in
+	// ARCHITECTURE.md) - build_agent_history_json() is a local SQLite read
+	// (via DroidHost::memory_store_), safe to call synchronously here
+	// before screen.Loop() starts, same as the Ollama setup check below.
+	try
+	{
+		const std::string last_session_id = read_last_session_id();
+		if (!last_session_id.empty())
+		{
+			const std::vector<ChatEntry> resumed = parse_agent_history_for_resume(
+				host.build_agent_history_json(last_session_id));
+			if (!resumed.empty())
+			{
+				current_session_id = last_session_id;
+				for (const ChatEntry& entry : resumed)
+				{
+					chat_entries.push_back(entry);
+				}
+			}
+		}
+	}
+	catch (const std::exception& e)
+	{
+		chat_entries.push_back(ChatEntry{"error", std::string("internal error: ") + e.what()});
+	}
+	catch (...)
+	{
+		chat_entries.push_back(ChatEntry{"error", "internal error: unknown exception"});
+	}
 
 	try
 	{
