@@ -87,6 +87,7 @@ FetchContent_Declare(ftxui
 FetchContent_MakeAvailable(ftxui)
 
 add_executable(droidcli
+    cli/app_index.cpp
     cli/command_runner.cpp
     cli/droidcli.cpp
     cli/filesystem_tools.cpp

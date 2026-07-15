@@ -117,8 +117,14 @@ stdout/stderr - `POST /api/run` and the `"run"` task command - plus
 and no output capture, distinct from the blocking `run_command_once` -
 resolves a bare app name against the Windows App Paths registry first (how
 most GUI installers register themselves, e.g. `chrome` even though it's
-never added to PATH), falling back to `CreateProcess`'s own PATH search -
-`POST /api/open`), **`filesystem_tools`**
+never added to PATH), then PATH, then falls back to the **`app_index`**
+installed-apps index if both fail - `POST /api/open`), **`app_index`**
+(`scan_installed_applications()`, Windows' Add/Remove Programs/Uninstall
+registry entries under HKLM native + WOW6432Node + HKCU, resolving each
+entry's `DisplayIcon` or a shallow `InstallLocation` scan to an actual
+`.exe`; scanned once at `DroidHost::initialize()` and cached, not re-scanned
+per lookup - covers apps that never registered on PATH or in App Paths at
+all, e.g. Blender or KiCad - `POST /api/apps/find`), **`filesystem_tools`**
 (`read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/
 `which_executable`, `std::filesystem`-backed, no external dependency - `POST
 /api/fs/*`), and **`DroidHost::agent_turn`** (a bounded Ollama tool-calling
@@ -207,6 +213,7 @@ over HTTP, so it never needs the token.
 | `GET` | `/api/app/log` `[auth]` | Recent host application log |
 | `POST` | `/api/run` `[auth]` | Run a one-shot shell command — body `{"command":"...","work_dir":"...","timeout_ms":30000}` |
 | `POST` | `/api/open` `[auth]` | Launch a GUI application, detached (no wait, no output capture) — body `{"path_or_name":"...","args":"...","work_dir":"..."}` |
+| `POST` | `/api/apps/find` `[auth]` | Search the installed-apps index (scanned at startup) — body `{"query":"..."}`, returns `{"matches":[{"name":...,"path":...}]}` |
 | `POST` | `/api/fs/read` `[auth]` | Read a file — body `{"path":"...","max_bytes":65536}`, response reports `truncated` |
 | `POST` | `/api/fs/write` `[auth]` | Write/append a file — body `{"path":"...","content":"...","append":false}` |
 | `POST` | `/api/fs/list` `[auth]` | Non-recursive directory listing — body `{"path":"..."}` (omit for cwd) |
