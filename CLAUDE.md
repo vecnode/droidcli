@@ -32,6 +32,15 @@ in `AGENTS.md` — read it first.
   (`cli/host.cpp`) drains one per poll-loop iteration, dispatching to
   `launch_connector`/`stop_connector`/`call_connector` depending on the task's
   `command`. Routes: `POST/GET /api/tasks`, `GET /api/tasks/{id}`.
+- **Agent tool-calling is self-contained, not an MCP client.**
+  `DroidHost::agent_turn` (`POST /api/agent/turn`) drives a bounded Ollama
+  tool-calling loop over native `DroidHost` methods only — connectors, tasks,
+  `run_command`, and the `filesystem_tools.{hpp,cpp}` primitives
+  (`read_file`/`write_file`/`list_dir`/`stat_path`/`get_cwd`/`which`). Per
+  ZeroClaw's self-contained/minimal philosophy, droidcli does not shell out
+  to external MCP servers to gain capabilities — new tools are new
+  `DroidHost` methods, not new MCP client wiring. If MCP ever gets added,
+  it's droidcli exposing itself *as* a server, not consuming other servers.
 - **No engine code.** Unreal Engine / particle / camera support was removed at
   0.2.0 — do not reintroduce engine modules, UE callbacks, or "ue5" scoping.
 - **HTTPS exists now, but only for external APIs.** `tools/sync_http_client`
