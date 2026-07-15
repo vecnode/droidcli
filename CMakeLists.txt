@@ -90,6 +90,10 @@ add_executable(droidcli_model_provider_test tests/model_provider_test.cpp)
 target_link_libraries(droidcli_model_provider_test PRIVATE droidcli_core)
 add_test(NAME model_provider_test COMMAND droidcli_model_provider_test)
 
+add_executable(droidcli_spawn_test tests/spawn_test.cpp)
+target_link_libraries(droidcli_spawn_test PRIVATE droidcli_core)
+add_test(NAME spawn_test COMMAND droidcli_spawn_test)
+
 # FTXUI powers droidcli's default interactive terminal dashboard (cli/tui.cpp).
 # Scoped to the droidcli target only via FetchContent + target_link_libraries -
 # it must never leak into the core `droidcli_core` library or the test targets.

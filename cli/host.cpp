@@ -1885,4 +1885,13 @@ core::String DroidHost::build_agent_sessions_json() const
 	return stream.str();
 }
 
+void DroidHost::log_thread_event(const core::String& thread_name, const core::String& event)
+{
+	// A "threw: ..." event is the one case worth flagging as a failure in
+	// the log (success:false) - "spawned"/"joined" are routine lifecycle,
+	// not something to alarm on.
+	const bool success = event.rfind("threw", 0) != 0;
+	append_app_log("thread", thread_name, event, success);
+}
+
 } // namespace droidcli::cli

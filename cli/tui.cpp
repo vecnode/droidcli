@@ -644,6 +644,21 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	bool agent_turn_in_flight = false;
 	PendingOpen pending_open;
 
+	// core::spawn (droidcli's zeroclaw-spawn analog - see ARCHITECTURE.md's
+	// "Spawn attribution") names each background thread and reports its
+	// lifecycle ("spawned"/"joined"/"threw: ...") into logs/log.jsonl under
+	// the "thread" channel via DroidHost::log_thread_event, so a stuck or
+	// crashed background thread is diagnosable from the log instead of just
+	// eventually noticed. Declared here, before chat_input's CatchEvent
+	// handler below (which spawns chat_worker), so both call sites -
+	// chat_worker here and poller further down - can capture it by
+	// reference.
+	const droidcli::core::ThreadEventSink thread_event_sink =
+		[&host](const std::string& thread_name, const std::string& event)
+	{
+		host.log_thread_event(thread_name, event);
+	};
+
 	// Fires the actual launch for a confirmed quick-open request and reports
 	// the result - reuses DroidHost::open_application (the same path
 	// find_application/open_application tool calls go through), so a quick
@@ -1141,7 +1156,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			{
 				chat_worker.join();
 			}
-			chat_worker = std::thread(run_chat_turn, message);
+			chat_worker = droidcli::core::spawn(
+				"tui.chat_worker",
+				[run_chat_turn, message]() { run_chat_turn(message); },
+				thread_event_sink);
 			return true;
 		}
 		return false;
@@ -1324,7 +1342,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// below, so a try/catch around screen.Loop() would not protect this
 	// thread. Defense in depth: catch here too, log to stderr, and keep
 	// polling rather than letting one bad iteration kill the process.
-	std::thread poller([&]()
+	std::thread poller = droidcli::core::spawn("tui.poller", [&]()
 	{
 		while (running_flag)
 		{
@@ -1363,7 +1381,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 			}
 		}
-	});
+	}, thread_event_sink);
 
 	// Defense in depth, matching the try/catch already wrapped around the
 	// chat-submit handler above: nothing reachable from screen.Loop() is

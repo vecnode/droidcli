@@ -6,6 +6,7 @@
 #include "core/types.cpp"
 #include "core/math.cpp"
 #include "core/log_sink.cpp"
+#include "core/spawn.cpp"
 
 #include "media/decode.cpp"
 #include "media/probe.cpp"
