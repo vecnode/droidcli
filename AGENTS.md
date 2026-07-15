@@ -86,6 +86,8 @@ config/        connectors.example.json (generic, illustrative connector config)
 cmake/         FFmpeg.cmake (auto-download helper)
 third_party/   Vendored deps (FFmpeg is local-only, git-ignored)
 distribute/    Templates staged into the dist (run_all.bat, README_DIST.txt)
+db/            Runtime databases/state (SQLite memory, connector state, last
+               TUI session) - all git-ignored except db/README.md, see there
 ```
 
 Public include is `#include "droidcli_core.h"`. Everything compiles through the
@@ -242,7 +244,7 @@ setup. The Ollama URL/model are runtime-editable via `POST /api/config` /
 
 **State persistence**: runtime-registered connectors (via `POST
 /api/connectors` or the agent, not `--config`) are saved to
-`droidcli_state.json` (repo-root-relative, git-ignored) on clean exit and
+`db/droidcli_state.json` (git-ignored, see `db/README.md`) on clean exit and
 reloaded on the next start, before `--config` is applied - `--config` entries
 win over a stale saved entry with the same id (`register_connector` replaces
 by id). Only a graceful exit (SIGINT/SIGTERM, or the TUI's `q`/Ctrl+C) reaches

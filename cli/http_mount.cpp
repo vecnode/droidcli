@@ -149,6 +149,11 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.run_command(request.body));
 			return true;
 		}
+		if (is_post && path == "/api/ffmpeg/run")
+		{
+			set_json(response, host.run_ffmpeg_json(request.body));
+			return true;
+		}
 		if (is_post && path == "/api/open")
 		{
 			set_json(response, host.open_application(request.body));
@@ -202,10 +207,25 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.which_executable_json(request.body));
 			return true;
 		}
+		if (is_get && path == "/api/system")
+		{
+			set_json(response, host.build_system_info_json());
+			return true;
+		}
 
+		if (is_get && path == "/api/agent/tools")
+		{
+			set_json(response, host.build_agent_tools_json());
+			return true;
+		}
 		if (is_post && path == "/api/agent/turn")
 		{
 			set_json(response, host.agent_turn(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/agent/tool_decision")
+		{
+			set_json(response, host.agent_tool_decision(request.body));
 			return true;
 		}
 		if (is_get && path == "/api/agent/history")

@@ -323,8 +323,8 @@ not just the in-process `agent_transcript_` `std::vector` that existed
 before. This is real file I/O, so it lives in `cli/` (host), linked against
 the vendored SQLite amalgamation (`third_party/sqlite/`, see
 `third_party/README.md`) - never in the portable `droidcli_core` library, per
-`AGENTS.md`'s Golden rule. The database file (`droidcli_memory.sqlite3`,
-repo-root-relative, git-ignored like `droidcli_state.json`) is opened once at
+`AGENTS.md`'s Golden rule. The database file (`db/droidcli_memory.sqlite3`,
+git-ignored like everything else under `db/` - see `db/README.md`) is opened once at
 `DroidHost::initialize()`; a failed open leaves the store closed and
 `record_agent_message()`/the history routes degrade to in-memory-only
 behavior rather than crashing the daemon over it.
@@ -351,8 +351,8 @@ Every `agent_turn` response includes the active `"session_id"` - a caller
 that wants to resume a conversation later needs to hold onto it.
 `cli/tui.cpp` does exactly this: it holds the current session's id in memory
 for the process's lifetime (shown in the UI as a `session: <id>` status
-line), writes it to `droidcli_last_session.txt` (repo-root-relative,
-git-ignored) whenever a turn returns one, and on the *next* launch reads
+line), writes it to `db/droidcli_last_session.json` (git-ignored, see
+`db/README.md`) whenever a turn returns one, and on the *next* launch reads
 that file and calls `GET`-equivalent `build_agent_history_json()` directly
 (a local SQLite read, safe to call synchronously before `screen.Loop()`
 starts) to replay the prior conversation into the chat panel and resume
@@ -560,7 +560,7 @@ flowchart LR
     subgraph CORE["Core"]
         RUNTIME["droidcli-runtime\nDroidHost::agent_turn loop · tool dispatch ·\nConnectorRegistry · TaskQueue"]
         MEMORY["droidcli-memory\nMemoryStore (SQLite) ·\nsessions, history, resume-after-restart"]
-        CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · droidcli_state.json"]
+        CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · db/droidcli_state.json"]
         PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOllamaProvider (today; a second\nprovider implements the same interface)"]
         TOOLS["droidcli-tools\nfilesystem_tools · command_runner ·\napp_index · window_list · intent"]
         RUNTIME --> MEMORY
@@ -598,7 +598,7 @@ flowchart LR
 | `zeroclaw-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); no embeddings, no vector retrieval - deliberately out of scope, see the extension plan below |
 | `zeroclaw-plugins` | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
 | `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | GPIO/I2C/SPI/USB, specialized hardware | None | **Not planned** — engine/hardware code was explicitly removed at 0.2.0 (`AGENTS.md` guardrails) |
-| `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); no debouncer/watchdog abstraction yet |
+| `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `db/droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); no debouncer/watchdog abstraction yet |
 | `zeroclaw-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.jsonl` | **Have JSONL + partial attribution** — one JSON object per line, `session_id` attribution on `"chat"`-channel entries (Phase 3, done); no `record!`/`scope!`-equivalent macros (C++ has no direct analog), no Observer bridge |
 | `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | `core::spawn()` (`src/core/spawn.hpp`/`.cpp`) + `DroidHost::log_thread_event` | **Have** (Phase 5, done) — named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." into `logs/log.jsonl` under the `"thread"` channel; used by `cli/tui.cpp`'s `poller` and `chat_worker`. Not a thread pool/scheduler, same one-thread-in-one-thread-out semantics as a bare `std::thread` |
 | `zeroclaw-macros` | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |

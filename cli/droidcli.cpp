@@ -207,7 +207,10 @@ void load_connectors_from_config(const std::string& path, droidcli::cli::DroidHo
 // ({"connectors":[...]}), so it reuses load_connectors_from_config() -
 // loaded first, with --config applied on top (register_connector replaces
 // by id, so --config entries win over a stale saved state for the same id).
-constexpr const char* kStateFilePath = "droidcli_state.json";
+// db/ is created by DroidHost::initialize() (called before both
+// load_state_if_present and save_state - see main()) so it always exists by
+// the time this path is touched.
+constexpr const char* kStateFilePath = "db/droidcli_state.json";
 
 void load_state_if_present(droidcli::cli::DroidHost& host)
 {

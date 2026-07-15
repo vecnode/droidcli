@@ -116,11 +116,13 @@ add_executable(droidcli
     cli/app_index.cpp
     cli/command_runner.cpp
     cli/droidcli.cpp
+    cli/ffmpeg_tool.cpp
     cli/filesystem_tools.cpp
     cli/host.cpp
     cli/http_mount.cpp
     cli/memory_store.cpp
     cli/process_manager.cpp
+    cli/system_info.cpp
     cli/tui.cpp
     cli/window_list.cpp
     tools/mini_http_server.cpp
@@ -133,7 +135,7 @@ target_include_directories(droidcli
 )
 target_link_libraries(droidcli PRIVATE droidcli_core droidcli_sqlite3 ftxui::ftxui)
 if(WIN32)
-    target_link_libraries(droidcli PRIVATE ws2_32 winhttp)
+    target_link_libraries(droidcli PRIVATE ws2_32 winhttp advapi32)
     target_compile_definitions(droidcli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
