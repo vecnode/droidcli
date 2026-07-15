@@ -216,6 +216,14 @@ in one change so the core/host/test trio stays in sync:
 - Don't let `DroidHost::agent_turn`'s tool loop call into anything that isn't
   already a `DroidHost` method with its own validation — tools are a second
   entry point into the same surface `/api/*` exposes, not a way around it.
+- **droidcli does not consume MCP servers.** Following ZeroClaw's
+  self-contained/minimal philosophy (https://docs.zeroclawlabs.ai), agent
+  tools are native `DroidHost` methods (see `filesystem_tools.{hpp,cpp}` and
+  `command_runner.{hpp,cpp}` for the pattern) — droidcli executes capabilities
+  itself rather than shelling out to external MCP servers as an MCP client.
+  If MCP support is ever added, it's droidcli exposing *itself* as an MCP
+  server (so external MCP clients can drive it), not the other way around —
+  don't add an MCP client dependency chain.
 
 ## Host configuration
 
