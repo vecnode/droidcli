@@ -1,0 +1,190 @@
+#include "memory_store.hpp"
+
+#include "sqlite3.h"
+
+#include <ctime>
+
+namespace droidcli::cli {
+namespace {
+
+core::String make_timestamp()
+{
+	const std::time_t now = std::time(nullptr);
+	std::tm local_time{};
+#ifdef _WIN32
+	localtime_s(&local_time, &now);
+#else
+	localtime_r(&now, &local_time);
+#endif
+	char buffer[32] = {};
+	std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &local_time);
+	return core::String(buffer);
+}
+
+// sqlite3_bind_text/column_text take raw C strings; wrapping every call site
+// in this pattern keeps the SQLITE_TRANSIENT lifetime rule (SQLite copies
+// the string immediately, so a temporary core::String going out of scope
+// right after the bind call is safe) explicit at each use.
+bool bind_text(sqlite3_stmt* statement, const int index, const core::String& value)
+{
+	return sqlite3_bind_text(statement, index, value.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK;
+}
+
+} // namespace
+
+MemoryStore::~MemoryStore()
+{
+	if (db_ != nullptr)
+	{
+		sqlite3_close(db_);
+		db_ = nullptr;
+	}
+}
+
+bool MemoryStore::open(const core::String& db_path)
+{
+	if (db_ != nullptr)
+	{
+		sqlite3_close(db_);
+		db_ = nullptr;
+	}
+
+	if (sqlite3_open(db_path.c_str(), &db_) != SQLITE_OK)
+	{
+		if (db_ != nullptr)
+		{
+			sqlite3_close(db_);
+			db_ = nullptr;
+		}
+		return false;
+	}
+
+	static const char* kCreateTable =
+		"CREATE TABLE IF NOT EXISTS memory_entries ("
+		"id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"session_id TEXT NOT NULL,"
+		"hop_index INTEGER NOT NULL,"
+		"role TEXT NOT NULL,"
+		"content TEXT NOT NULL,"
+		"created_at TEXT NOT NULL"
+		");"
+		"CREATE INDEX IF NOT EXISTS idx_memory_entries_session "
+		"ON memory_entries(session_id, hop_index);";
+
+	char* error_message = nullptr;
+	if (sqlite3_exec(db_, kCreateTable, nullptr, nullptr, &error_message) != SQLITE_OK)
+	{
+		sqlite3_free(error_message);
+		sqlite3_close(db_);
+		db_ = nullptr;
+		return false;
+	}
+
+	return true;
+}
+
+bool MemoryStore::is_open() const
+{
+	return db_ != nullptr;
+}
+
+bool MemoryStore::append(
+	const core::String& session_id, const int32_t hop_index, const core::String& role, const core::String& content)
+{
+	if (db_ == nullptr)
+	{
+		return false;
+	}
+
+	static const char* kInsert =
+		"INSERT INTO memory_entries (session_id, hop_index, role, content, created_at) "
+		"VALUES (?, ?, ?, ?, ?);";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kInsert, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return false;
+	}
+
+	bool ok = bind_text(statement, 1, session_id)
+		&& sqlite3_bind_int(statement, 2, hop_index) == SQLITE_OK
+		&& bind_text(statement, 3, role)
+		&& bind_text(statement, 4, content)
+		&& bind_text(statement, 5, make_timestamp());
+
+	if (ok)
+	{
+		ok = sqlite3_step(statement) == SQLITE_DONE;
+	}
+
+	sqlite3_finalize(statement);
+	return ok;
+}
+
+core::Array<MemoryRecord> MemoryStore::load_session(const core::String& session_id) const
+{
+	core::Array<MemoryRecord> records;
+	if (db_ == nullptr)
+	{
+		return records;
+	}
+
+	static const char* kSelect =
+		"SELECT hop_index, role, content, created_at FROM memory_entries "
+		"WHERE session_id = ? ORDER BY hop_index ASC;";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kSelect, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return records;
+	}
+
+	if (!bind_text(statement, 1, session_id))
+	{
+		sqlite3_finalize(statement);
+		return records;
+	}
+
+	while (sqlite3_step(statement) == SQLITE_ROW)
+	{
+		MemoryRecord record;
+		record.session_id = session_id;
+		record.hop_index = sqlite3_column_int(statement, 0);
+		record.role = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
+		record.content = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
+		record.created_at = reinterpret_cast<const char*>(sqlite3_column_text(statement, 3));
+		records.push_back(record);
+	}
+
+	sqlite3_finalize(statement);
+	return records;
+}
+
+core::Array<core::String> MemoryStore::list_session_ids() const
+{
+	core::Array<core::String> session_ids;
+	if (db_ == nullptr)
+	{
+		return session_ids;
+	}
+
+	static const char* kSelect =
+		"SELECT session_id, MAX(created_at) AS last_seen FROM memory_entries "
+		"GROUP BY session_id ORDER BY last_seen DESC;";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kSelect, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return session_ids;
+	}
+
+	while (sqlite3_step(statement) == SQLITE_ROW)
+	{
+		session_ids.push_back(reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)));
+	}
+
+	sqlite3_finalize(statement);
+	return session_ids;
+}
+
+} // namespace droidcli::cli

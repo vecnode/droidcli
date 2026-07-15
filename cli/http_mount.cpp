@@ -18,6 +18,30 @@ void set_json(net::HttpResponse& response, const core::String& body, net::HttpSt
 	response.body = body;
 }
 
+// Extracts a single "key=value" pair from a raw query string
+// ("a=1&key=value&b=2"). Local to this file - net::handlers.cpp has its own
+// equivalent in an anonymous namespace, not exported for reuse here.
+core::String query_param(const core::String& query_string, const core::String& key)
+{
+	const core::String needle = key + "=";
+	size_t cursor = 0;
+	while (cursor < query_string.size())
+	{
+		const size_t amp = query_string.find('&', cursor);
+		const core::String pair = query_string.substr(cursor, amp == core::String::npos ? core::String::npos : amp - cursor);
+		if (pair.rfind(needle, 0) == 0)
+		{
+			return pair.substr(needle.size());
+		}
+		if (amp == core::String::npos)
+		{
+			break;
+		}
+		cursor = amp + 1;
+	}
+	return {};
+}
+
 // Splits "/api/connectors/<id>/<rest>" into id + rest ("" if there's no rest
 // segment). prefix must include the trailing slash, e.g. "/api/connectors/".
 bool split_id_and_rest(
@@ -182,6 +206,16 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 		if (is_post && path == "/api/agent/turn")
 		{
 			set_json(response, host.agent_turn(request.body));
+			return true;
+		}
+		if (is_get && path == "/api/agent/history")
+		{
+			set_json(response, host.build_agent_history_json(query_param(request.query_string, "session_id")));
+			return true;
+		}
+		if (is_get && path == "/api/agent/sessions")
+		{
+			set_json(response, host.build_agent_sessions_json());
 			return true;
 		}
 

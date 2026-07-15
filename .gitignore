@@ -74,3 +74,6 @@ logs/*
 # Persisted runtime state (registered connectors, saved on shutdown/reloaded
 # on startup - see DroidHost state persistence in cli/droidcli.cpp)
 droidcli_state.json
+
+# Persistent agent-turn memory (SQLite, see cli/memory_store.cpp)
+droidcli_memory.sqlite3

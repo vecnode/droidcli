@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(droidcli VERSION 0.1.0 LANGUAGES CXX)
+project(droidcli VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,20 @@ if(MSVC)
 endif()
 
 include(cmake/FFmpeg.cmake)
+
+# Vendored SQLite amalgamation (third_party/README.md) - backs
+# cli/memory_store.cpp's persistent agent-turn history. Built as its own
+# tiny static library, warnings suppressed (/w) since this is unmodified
+# third-party C, not code this repo's /W4 policy should apply to. Linked
+# only into the droidcli executable target, never droidcli_core - real
+# file I/O is a host concern per AGENTS.md's Golden rule.
+add_library(droidcli_sqlite3 STATIC third_party/sqlite/sqlite3.c)
+target_include_directories(droidcli_sqlite3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite)
+if(MSVC)
+    target_compile_options(droidcli_sqlite3 PRIVATE /w)
+else()
+    target_compile_options(droidcli_sqlite3 PRIVATE -w)
+endif()
 
 add_library(droidcli_core STATIC
     droidcli_core.cpp
@@ -72,6 +86,10 @@ add_executable(droidcli_intent_test tests/intent_test.cpp)
 target_link_libraries(droidcli_intent_test PRIVATE droidcli_core)
 add_test(NAME intent_test COMMAND droidcli_intent_test)
 
+add_executable(droidcli_model_provider_test tests/model_provider_test.cpp)
+target_link_libraries(droidcli_model_provider_test PRIVATE droidcli_core)
+add_test(NAME model_provider_test COMMAND droidcli_model_provider_test)
+
 # FTXUI powers droidcli's default interactive terminal dashboard (cli/tui.cpp).
 # Scoped to the droidcli target only via FetchContent + target_link_libraries -
 # it must never leak into the core `droidcli_core` library or the test targets.
@@ -97,6 +115,7 @@ add_executable(droidcli
     cli/filesystem_tools.cpp
     cli/host.cpp
     cli/http_mount.cpp
+    cli/memory_store.cpp
     cli/process_manager.cpp
     cli/tui.cpp
     cli/window_list.cpp
@@ -108,7 +127,7 @@ target_include_directories(droidcli
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
         ${CMAKE_CURRENT_SOURCE_DIR}/cli
 )
-target_link_libraries(droidcli PRIVATE droidcli_core ftxui::ftxui)
+target_link_libraries(droidcli PRIVATE droidcli_core droidcli_sqlite3 ftxui::ftxui)
 if(WIN32)
     target_link_libraries(droidcli PRIVATE ws2_32 winhttp)
     target_compile_definitions(droidcli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

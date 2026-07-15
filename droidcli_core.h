@@ -24,6 +24,7 @@
 #include "media/store.hpp"
 
 #include "ai/language_runtime.hpp"
+#include "ai/model_provider.hpp"
 #include "ai/ollama_client.hpp"
 #include "ai/types.hpp"
 #include "app/tasks.hpp"

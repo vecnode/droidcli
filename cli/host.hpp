@@ -6,6 +6,7 @@
 #include "process_manager.hpp"
 #include "filesystem_tools.hpp"
 #include "app_index.hpp"
+#include "memory_store.hpp"
 #include "window_list.hpp"
 
 #include <ctime>
@@ -167,10 +168,31 @@ public:
 	core::String which_executable_json(const core::String& body);
 
 	// The tool-calling agent turn (POST /api/agent/turn). body is
-	// {"message":"...","clear":bool}. Drives a bounded Ollama tool-calling
-	// loop against the fixed tool set declared in agent_tool_definitions(),
-	// executing each requested tool against this DroidHost's own methods.
+	// {"message":"...","clear":bool,"session_id":"..."}. Drives a bounded
+	// Ollama tool-calling loop against the fixed tool set declared in
+	// agent_tool_definitions(), executing each requested tool against this
+	// DroidHost's own methods. Every message added to the transcript is
+	// also persisted to memory_store_ under the active session id (see
+	// "Persistent memory" in ARCHITECTURE.md's extension plan) - omitting
+	// session_id continues whatever session this process most recently
+	// used; passing a previously-returned session_id resumes that session's
+	// history, including across a restart. clear:true always starts a
+	// brand new session id, ignoring any session_id in the same request.
+	// The response's "session_id" field is what a caller should hold onto
+	// to resume this conversation later.
 	core::String agent_turn(const core::String& body);
+
+	// Loads one session's persisted message history (GET
+	// /api/agent/history?session_id=...) - session_id defaults to the
+	// current in-process session when omitted. Returns
+	// {"session_id":"...","messages":[{"hop_index":N,"role":"...",
+	// "content":"...","created_at":"..."}]}.
+	core::String build_agent_history_json(const core::String& session_id) const;
+
+	// Every session id with at least one persisted message, most recently
+	// active first (GET /api/agent/sessions). Returns
+	// {"session_ids":[...],"current_session_id":"..."}.
+	core::String build_agent_sessions_json() const;
 
 private:
 	void append_app_log(const core::String& channel, const core::String& direction, const core::String& summary, bool success);
@@ -186,6 +208,14 @@ private:
 	// the JSON result text to feed back to the model as a "tool" message.
 	core::String execute_agent_tool(const core::String& tool_name, const core::String& arguments_json);
 
+	// A short, sortable-enough id ("2026-07-15T12-30-00-4f2a") - readable in
+	// logs/history listings without needing a UUID library dependency.
+	static core::String generate_session_id();
+	// Appends one message to both agent_transcript_ and memory_store_ under
+	// the given session - the single call site every transcript mutation in
+	// agent_turn goes through, so the two never drift out of sync.
+	void record_agent_message(const core::String& session_id, ai::ChatRole role, const core::String& content);
+
 	HostConfig config_;
 	session::RuntimeSession session_;
 	ai::LanguageAiRuntime language_ai_;
@@ -197,6 +227,15 @@ private:
 	net::ConnectorRegistry connectors_;
 	app::TaskQueue tasks_;
 	core::Array<InstalledApp> installed_apps_;
+
+	// Persistent agent-turn history (see "Persistent memory" in
+	// ARCHITECTURE.md's extension plan) - memory_store_ is the durable
+	// SQLite-backed log; current_session_id_ is which session agent_turn is
+	// actively appending to. Generated fresh at initialize() (no auto-resume
+	// across a restart - a caller opts into resuming a prior session by
+	// passing its id explicitly in an agent_turn request).
+	MemoryStore memory_store_;
+	core::String current_session_id_;
 
 	struct AppLogEntry {
 		core::String timestamp;

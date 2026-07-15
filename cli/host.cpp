@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -284,6 +285,19 @@ void DroidHost::initialize()
 		// registry key - most installers only ever register an Add/Remove
 		// Programs entry.
 		installed_apps_ = scan_installed_applications();
+
+		// Persistent agent-turn memory (see "Persistent memory" in
+		// ARCHITECTURE.md's extension plan) - a fresh session id every
+		// process start (no auto-resume; a caller opts in by passing a
+		// prior session_id explicitly, see agent_turn()). A failed open()
+		// (bad working directory, disk full) leaves memory_store_ closed;
+		// record_agent_message()/history routes degrade to in-memory-only
+		// behavior rather than crashing the daemon over it.
+		current_session_id_ = generate_session_id();
+		if (!memory_store_.open("droidcli_memory.sqlite3"))
+		{
+			append_app_log("host", "event", "warning: could not open droidcli_memory.sqlite3 - agent history will not persist across restarts", false);
+		}
 	}
 
 	append_app_log("host", "event",
@@ -489,6 +503,32 @@ core::String DroidHost::make_full_log_timestamp()
 	char buffer[32] {};
 	std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &local_time);
 	return buffer;
+}
+
+core::String DroidHost::generate_session_id()
+{
+	std::time_t raw_time = std::time(nullptr);
+	std::tm local_time {};
+#if defined(_WIN32)
+	localtime_s(&local_time, &raw_time);
+#else
+	localtime_r(&raw_time, &local_time);
+#endif
+
+	char buffer[32] {};
+	std::strftime(buffer, sizeof(buffer), "%Y%m%dT%H%M%S", &local_time);
+
+	// A timestamp alone can collide if two sessions start within the same
+	// second (e.g. --no-ai smoke tests launched back to back); a few bits
+	// of the address of a stack-local disambiguate without pulling in a
+	// UUID/random dependency for something that only needs to be
+	// locally-unique, not globally-unique or unpredictable.
+	int disambiguator = 0;
+	const auto address_bits = reinterpret_cast<std::uintptr_t>(&disambiguator);
+
+	std::ostringstream stream;
+	stream << buffer << "-" << std::hex << (address_bits & 0xffff);
+	return stream.str();
 }
 
 bool DroidHost::should_emit_periodic_log(
@@ -1565,11 +1605,33 @@ core::String DroidHost::agent_turn(const core::String& body)
 	const core::String user_message = net::extract_json_string_field(body, "message");
 	bool clear = false;
 	net::extract_json_bool_field(body, "clear", clear);
+	const core::String requested_session_id = net::extract_json_string_field(body, "session_id");
 
-	if (clear)
+	core::String session_id;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		agent_transcript_.clear();
+		if (clear)
+		{
+			// Always starts a brand new session, ignoring any session_id in
+			// the same request - see the field comment on agent_turn() in
+			// host.hpp. Old history isn't deleted, just no longer active.
+			agent_transcript_.clear();
+			current_session_id_ = generate_session_id();
+		}
+		else if (!requested_session_id.empty() && requested_session_id != current_session_id_)
+		{
+			// Switching to (or resuming, possibly after a restart) a
+			// different session: replay its persisted history into the
+			// in-memory working transcript before this turn's message is
+			// appended to it.
+			agent_transcript_.clear();
+			for (const MemoryRecord& record : memory_store_.load_session(requested_session_id))
+			{
+				agent_transcript_.push_back(ai::ChatMessage{ai::chat_role_from_string(record.role), record.content});
+			}
+			current_session_id_ = requested_session_id;
+		}
+		session_id = current_session_id_;
 	}
 
 	if (user_message.empty())
@@ -1588,6 +1650,8 @@ core::String DroidHost::agent_turn(const core::String& body)
 	}
 
 	ai::OllamaConfig ollama_config;
+	bool seed_system_prompt = false;
+	core::String system_prompt_text;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		ollama_config.base_url = config_.ollama_url;
@@ -1600,15 +1664,30 @@ core::String DroidHost::agent_turn(const core::String& body)
 			// so the model is told a fact, not a capability description it might
 			// discount - "you have 74 apps indexed" is harder to hedge on than
 			// "you can look up installed apps".
-			const core::String system_prompt = config_.system_prompt
+			seed_system_prompt = true;
+			system_prompt_text = config_.system_prompt
 				+ " Right now this index has " + std::to_string(installed_apps_.size())
 				+ " installed applications in it.";
-			agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::System, system_prompt});
 		}
-		agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::User, user_message});
 	}
 
+	// record_agent_message() takes its own lock - must not be called while
+	// mutex_ is already held (std::mutex isn't recursive), hence reading
+	// the booleans/text above under lock and acting on them here instead.
+	if (seed_system_prompt)
+	{
+		record_agent_message(session_id, ai::ChatRole::System, system_prompt_text);
+	}
+	record_agent_message(session_id, ai::ChatRole::User, user_message);
+
 	const core::Array<ai::ToolDefinition> tools = agent_tool_definitions();
+
+	// Coded against ai::ModelProvider, not ai::OllamaProvider directly, so a
+	// second provider only means constructing a different concrete type
+	// here - nothing below this line changes. See "Provider abstraction" in
+	// ARCHITECTURE.md's extension plan and src/ai/model_provider.hpp.
+	const ai::OllamaProvider ollama_provider(ollama_config);
+	const ai::ModelProvider& provider = ollama_provider;
 
 	std::ostringstream actions_stream;
 	actions_stream << '[';
@@ -1626,12 +1705,13 @@ core::String DroidHost::agent_turn(const core::String& body)
 			transcript_copy = agent_transcript_;
 		}
 
-		const ai::OllamaOutboundRequest request = ai::build_ollama_chat_request(ollama_config, transcript_copy, tools);
+		const ai::ProviderRequest request = provider.build_request(transcript_copy, tools);
 		if (!request.valid)
 		{
 			append_app_log("chat", "out", "request build failed: " + request.error_message, false);
 			return "{" + net::json_bool_field("ok", false) + ","
-				+ net::json_string_field("error", request.error_message) + "}";
+				+ net::json_string_field("error", request.error_message) + ","
+				+ net::json_string_field("session_id", session_id) + "}";
 		}
 
 		int32_t status_code = 0;
@@ -1640,19 +1720,21 @@ core::String DroidHost::agent_turn(const core::String& body)
 			? language_ai_transport_.post_json(request.url, request.body, status_code, response_body)
 			: false;
 
-		const ai::OllamaChatResponse response = ai::parse_ollama_chat_response(status_code, response_body, transport_ok);
+		const ai::ProviderResponse response = provider.parse_response(status_code, response_body, transport_ok);
 		if (!response.transport_ok || !response.http_success)
 		{
 			const core::String error = response.error_message.empty() ? "Ollama request failed" : response.error_message;
 			append_app_log("chat", "out", "hop " + std::to_string(hop) + " failed: " + error, false);
+			// The user's message (and the system prompt, on a fresh session)
+			// was already persisted via record_agent_message() above, even
+			// though this turn is about to fail - include session_id so a
+			// caller can still find it via GET /api/agent/history.
 			return "{" + net::json_bool_field("ok", false) + ","
-				+ net::json_string_field("error", error) + "}";
+				+ net::json_string_field("error", error) + ","
+				+ net::json_string_field("session_id", session_id) + "}";
 		}
 
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::Assistant, response.assistant_message});
-		}
+		record_agent_message(session_id, ai::ChatRole::Assistant, response.assistant_message);
 
 		if (response.tool_calls.empty())
 		{
@@ -1666,10 +1748,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 			append_app_log("chat", "out",
 				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true);
 
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::Tool, tool_result});
-			}
+			record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
 
 			if (!first_action)
 			{
@@ -1712,12 +1791,78 @@ core::String DroidHost::agent_turn(const core::String& body)
 	stream << '{';
 	stream << net::json_bool_field("ok", true) << ',';
 	stream << net::json_string_field("assistant", final_assistant_text) << ',';
+	stream << net::json_string_field("session_id", session_id) << ',';
 	if (budget_exhausted)
 	{
 		stream << net::json_bool_field("budget_exhausted", true) << ',';
 	}
 	stream << "\"actions\":" << actions_stream.str();
 	stream << '}';
+	return stream.str();
+}
+
+void DroidHost::record_agent_message(const core::String& session_id, const ai::ChatRole role, const core::String& content)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	agent_transcript_.push_back(ai::ChatMessage{role, content});
+	const int32_t hop_index = static_cast<int32_t>(agent_transcript_.size()) - 1;
+	memory_store_.append(session_id, hop_index, ai::chat_role_to_string(role), content);
+}
+
+core::String DroidHost::build_agent_history_json(const core::String& session_id) const
+{
+	core::String resolved_session_id;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		resolved_session_id = session_id.empty() ? current_session_id_ : session_id;
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_string_field("session_id", resolved_session_id) << ',';
+	stream << "\"messages\":[";
+	bool first = true;
+	for (const MemoryRecord& record : memory_store_.load_session(resolved_session_id))
+	{
+		if (!first)
+		{
+			stream << ',';
+		}
+		first = false;
+		stream << '{';
+		stream << "\"hop_index\":" << record.hop_index << ',';
+		stream << net::json_string_field("role", record.role) << ',';
+		stream << net::json_string_field("content", record.content) << ',';
+		stream << net::json_string_field("created_at", record.created_at);
+		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
+}
+
+core::String DroidHost::build_agent_sessions_json() const
+{
+	core::String current;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		current = current_session_id_;
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_string_field("current_session_id", current) << ',';
+	stream << "\"session_ids\":[";
+	bool first = true;
+	for (const core::String& id : memory_store_.list_session_ids())
+	{
+		if (!first)
+		{
+			stream << ',';
+		}
+		first = false;
+		stream << '"' << net::escape_json_string(id) << '"';
+	}
+	stream << "]}";
 	return stream.str();
 }
 
