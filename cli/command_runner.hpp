@@ -18,14 +18,31 @@ struct CommandRunResult {
 	core::String error_message;
 };
 
-// Runs `command` (via the platform shell) in `work_dir` (current directory if
-// empty), waiting up to `timeout_ms` for it to finish. On timeout, the
-// process is forcibly terminated and error_message is set, but any output
-// captured before the timeout is still returned.
+// Runs `command` in `work_dir` (current directory if empty), waiting up to
+// `timeout_ms` for it to finish. On timeout, the process is forcibly
+// terminated and error_message is set, but any output captured before the
+// timeout is still returned.
+//
+// `via_shell` (default true, matching the original behavior) routes through
+// the platform shell (`cmd.exe /c` on Windows, `sh -c` on POSIX) - needed for
+// shell features (pipes, redirects, env var expansion) but on Windows
+// `cmd.exe`'s own command-line grammar re-tokenizes the whole string before
+// the target program ever sees it, which can silently corrupt an argument
+// that itself contains embedded double quotes (observed: an ffmpeg filter
+// expression like `s="sin(2*PI*44)"` came out mangled, producing a bogus
+// "filename ... syntax is incorrect" error with no ffmpeg output at all -
+// cmd.exe never even got to launching ffmpeg correctly). Pass `via_shell =
+// false` for a command that's just "<quoted program path> <args>" and needs
+// no shell features - CreateProcess's own command-line parsing (the same
+// convention every C program's argv uses) handles nested quotes correctly
+// where cmd.exe's `/c` grammar does not. On POSIX this flag currently has no
+// effect (both paths go through `sh -c`) - the corruption above is a
+// cmd.exe-specific quirk, not a POSIX shell one.
 CommandRunResult run_command_once(
 	const core::String& command,
 	const core::String& work_dir,
-	int32_t timeout_ms = 30000);
+	int32_t timeout_ms = 30000,
+	bool via_shell = true);
 
 // The single, authoritative definition of "did this command actually
 // succeed" - launched, exited zero, and no error_message (timeout/spawn

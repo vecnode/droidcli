@@ -74,7 +74,8 @@ core::String resolve_app_paths_registry(const core::String& name)
 CommandRunResult run_command_once(
 	const core::String& command,
 	const core::String& work_dir,
-	const int32_t timeout_ms)
+	const int32_t timeout_ms,
+	const bool via_shell)
 {
 	CommandRunResult result;
 	if (command.empty())
@@ -117,7 +118,13 @@ CommandRunResult run_command_once(
 	startup.hStdInput = nullptr;
 
 	PROCESS_INFORMATION process {};
-	core::String command_line = "cmd.exe /c " + command;
+	// via_shell=false skips cmd.exe's own `/c` re-tokenizing pass entirely -
+	// `command` is passed straight to CreateProcess, which parses it using
+	// standard argv-quoting rules (the same ones ffmpeg's own argument
+	// parser expects), rather than cmd.exe's separate and more fragile
+	// grammar. See the header comment on run_command_once for the incident
+	// this fixes.
+	core::String command_line = via_shell ? ("cmd.exe /c " + command) : command;
 	std::vector<char> mutable_command_line(command_line.begin(), command_line.end());
 	mutable_command_line.push_back('\0');
 
@@ -306,8 +313,14 @@ bool drain_available(int fd, core::String& out)
 CommandRunResult run_command_once(
 	const core::String& command,
 	const core::String& work_dir,
-	const int32_t timeout_ms)
+	const int32_t timeout_ms,
+	const bool via_shell)
 {
+	// via_shell has no effect here - see the header comment. Both paths
+	// already go through `sh -c`, which doesn't share cmd.exe's
+	// nested-quote-mangling behavior.
+	(void)via_shell;
+
 	CommandRunResult result;
 	if (command.empty())
 	{

@@ -2,6 +2,7 @@
 
 #include "sqlite3.h"
 
+#include <cctype>
 #include <ctime>
 
 namespace droidcli::cli {
@@ -69,7 +70,18 @@ bool MemoryStore::open(const core::String& db_path)
 		"created_at TEXT NOT NULL"
 		");"
 		"CREATE INDEX IF NOT EXISTS idx_memory_entries_session "
-		"ON memory_entries(session_id, hop_index);";
+		"ON memory_entries(session_id, hop_index);"
+		"CREATE TABLE IF NOT EXISTS command_lessons ("
+		"id INTEGER PRIMARY KEY AUTOINCREMENT,"
+		"tool TEXT NOT NULL,"
+		"broken TEXT NOT NULL,"
+		"failure_reason TEXT NOT NULL,"
+		"working TEXT NOT NULL,"
+		"lesson TEXT NOT NULL,"
+		"created_at TEXT NOT NULL"
+		");"
+		"CREATE INDEX IF NOT EXISTS idx_command_lessons_tool "
+		"ON command_lessons(tool);";
 
 	char* error_message = nullptr;
 	if (sqlite3_exec(db_, kCreateTable, nullptr, nullptr, &error_message) != SQLITE_OK)
@@ -185,6 +197,94 @@ core::Array<core::String> MemoryStore::list_session_ids() const
 
 	sqlite3_finalize(statement);
 	return session_ids;
+}
+
+bool MemoryStore::record_lesson(
+	const core::String& tool,
+	const core::String& broken,
+	const core::String& failure_reason,
+	const core::String& working,
+	const core::String& lesson)
+{
+	if (db_ == nullptr)
+	{
+		return false;
+	}
+
+	static const char* kInsert =
+		"INSERT INTO command_lessons (tool, broken, failure_reason, working, lesson, created_at) "
+		"VALUES (?, ?, ?, ?, ?, ?);";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kInsert, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return false;
+	}
+
+	bool ok = bind_text(statement, 1, tool)
+		&& bind_text(statement, 2, broken)
+		&& bind_text(statement, 3, failure_reason)
+		&& bind_text(statement, 4, working)
+		&& bind_text(statement, 5, lesson)
+		&& bind_text(statement, 6, make_timestamp());
+
+	if (ok)
+	{
+		ok = sqlite3_step(statement) == SQLITE_DONE;
+	}
+
+	sqlite3_finalize(statement);
+	return ok;
+}
+
+core::Array<CommandLesson> MemoryStore::search_lessons(const core::String& query, const int32_t max_results) const
+{
+	core::Array<CommandLesson> lessons;
+	if (db_ == nullptr)
+	{
+		return lessons;
+	}
+
+	static const char* kSelect =
+		"SELECT id, tool, broken, failure_reason, working, lesson, created_at FROM command_lessons "
+		"WHERE LOWER(tool) LIKE ?1 OR LOWER(broken) LIKE ?1 OR LOWER(failure_reason) LIKE ?1 OR LOWER(lesson) LIKE ?1 "
+		"ORDER BY created_at DESC LIMIT ?2;";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kSelect, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return lessons;
+	}
+
+	core::String lowered_query;
+	lowered_query.reserve(query.size());
+	for (const unsigned char character : query)
+	{
+		lowered_query += static_cast<char>(std::tolower(character));
+	}
+	const core::String pattern = "%" + lowered_query + "%";
+
+	if (!bind_text(statement, 1, pattern) || sqlite3_bind_int(statement, 2, max_results) != SQLITE_OK)
+	{
+		sqlite3_finalize(statement);
+		return lessons;
+	}
+
+	while (sqlite3_step(statement) == SQLITE_ROW)
+	{
+		CommandLesson entry;
+		entry.id = sqlite3_column_int64(statement, 0);
+		entry.tool = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
+		entry.broken = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
+		entry.failure_reason = reinterpret_cast<const char*>(sqlite3_column_text(statement, 3));
+		entry.working = reinterpret_cast<const char*>(sqlite3_column_text(statement, 4));
+		entry.lesson = reinterpret_cast<const char*>(sqlite3_column_text(statement, 5));
+		entry.created_at = reinterpret_cast<const char*>(sqlite3_column_text(statement, 6));
+		lessons.push_back(entry);
+	}
+
+	sqlite3_finalize(statement);
+	return lessons;
 }
 
 } // namespace droidcli::cli
