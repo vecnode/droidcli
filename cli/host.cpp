@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -163,6 +164,21 @@ void DroidHost::initialize()
 		std::lock_guard<std::mutex> lock(mutex_);
 
 		droidcli::initialize_defaults();
+
+		// Durable session log: logs/log.txt accumulates across restarts so a
+		// crash or a bug report can be diagnosed after the fact, not just
+		// while the process happens to still be up. Created relative to the
+		// working directory droidcli was launched from - if that directory
+		// isn't writable, log_file_ just stays closed and append_app_log()
+		// silently skips the file write (console/in-memory logging still
+		// works either way).
+		std::error_code log_dir_error;
+		std::filesystem::create_directories("logs", log_dir_error);
+		log_file_.open("logs/log.txt", std::ios::app);
+		if (log_file_)
+		{
+			log_file_ << "=== droidcli session started " << make_full_log_timestamp() << " ===" << std::endl;
+		}
 
 		session_.active = true;
 		session_.map_name = "droidcli";
@@ -377,6 +393,13 @@ void DroidHost::append_app_log(
 	{
 		std::cerr << line << std::endl;
 	}
+
+	if (log_file_)
+	{
+		log_file_ << "[" << make_full_log_timestamp() << "] ["
+			<< entry.channel << "] [" << entry.direction << "] "
+			<< (success ? "ok " : "ERROR ") << entry.summary << std::endl;
+	}
 }
 
 core::String DroidHost::make_log_timestamp()
@@ -391,6 +414,21 @@ core::String DroidHost::make_log_timestamp()
 
 	char buffer[32] {};
 	std::strftime(buffer, sizeof(buffer), "%H:%M:%S", &local_time);
+	return buffer;
+}
+
+core::String DroidHost::make_full_log_timestamp()
+{
+	std::time_t raw_time = std::time(nullptr);
+	std::tm local_time {};
+#if defined(_WIN32)
+	localtime_s(&local_time, &raw_time);
+#else
+	localtime_r(&raw_time, &local_time);
+#endif
+
+	char buffer[32] {};
+	std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &local_time);
 	return buffer;
 }
 

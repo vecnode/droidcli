@@ -66,3 +66,11 @@ Desktop/Release/
 third_party/ffmpeg/
 
 *.zip
+
+# Runtime session logs (created automatically - see logs/README.md)
+logs/*
+!logs/README.md
+
+# Persisted runtime state (registered connectors, saved on shutdown/reloaded
+# on startup - see DroidHost state persistence in cli/droidcli.cpp)
+droidcli_state.json
