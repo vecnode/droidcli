@@ -150,6 +150,14 @@ real socket, GPU, or file, the change is in the wrong layer.
   `ARCHITECTURE.md` for the incident that made this a hard rule, not a
   style preference) — never assume a caller will infer success from an
   exit code, a `"launched"` flag, or the presence of output.
+- **A command-execution tool prone to repeated model mistakes** (wrong
+  filter syntax, a misremembered flag) should point the model at
+  `search_command_fixes`/`record_command_fix` (`cli/host.cpp`, see "Phase
+  8" in `ARCHITECTURE.md`) in its own tool description — droidcli's
+  persistent, model-driven memory of past command bugs and their fixes,
+  backed by a `command_lessons` table in the same `MemoryStore` database
+  conversation history already uses. Don't build a second, tool-specific
+  memory mechanism for this.
 
 ## Adding things (follow the existing extension points)
 
@@ -210,6 +218,25 @@ in one change so the core/host/test trio stays in sync:
      approval via `POST /api/agent/tool_decision` instead of executing the
      instant the model asks for it. Read-only tools should NOT be added
      there — gating them only slows the agent down for no safety benefit.
+   - **If the tool shells out and never needs shell features** (pipes,
+     redirects, env var expansion — `run_ffmpeg` is the precedent, see
+     "Phase 7" in `ARCHITECTURE.md`), call `run_command_once(...,
+     via_shell=false)` on Windows. Routing a command through `cmd.exe /c`
+     re-tokenizes the whole string with `cmd.exe`'s own grammar before the
+     target program ever sees it, which silently corrupts an argument
+     containing embedded double quotes (a filter expression, a JSON blob,
+     …) — `CreateProcess`'s own command-line parsing does not have this
+     problem and is what the target program's own `argv` parsing expects
+     anyway.
+   - **If the model has been observed reliably making the same mistake
+     despite the right fact already being in its system prompt** (see
+     `desktop_path`/`substitute_bare_desktop_token()` in "Phase 7",
+     `ARCHITECTURE.md` — the model kept writing a bare `desktop/...` path
+     even after being told the real one), a deterministic substitution at
+     the tool-execution layer is a reasonable fix once the pattern is
+     reproducible, not a one-off guess. Report what actually ran back to
+     the model (a `"resolved_args"`/`"resolved_command"`-style field) so it
+     can tell the user the truth instead of what it originally typed.
 
 **Every new core `src/<module>/*_test.cpp` must be registered in
 `CMakeLists.txt`** and pass under `ctest`.

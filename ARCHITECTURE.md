@@ -580,10 +580,10 @@ flowchart LR
 
     subgraph CORE["Core"]
         RUNTIME["droidcli-runtime\nDroidHost::agent_turn loop · tool dispatch ·\nConnectorRegistry · TaskQueue"]
-        MEMORY["droidcli-memory\nMemoryStore (SQLite) ·\nsessions, history, resume-after-restart"]
+        MEMORY["droidcli-memory\nMemoryStore (SQLite) ·\nsessions, history, resume-after-restart ·\ncommand_lessons (procedural memory)"]
         CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · db/droidcli_state.json"]
         PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOllamaProvider (today; a second\nprovider implements the same interface)"]
-        TOOLS["droidcli-tools\nfilesystem_tools · command_runner ·\napp_index · window_list · intent"]
+        TOOLS["droidcli-tools\nfilesystem_tools · command_runner ·\napp_index · window_list · intent ·\nffmpeg_tool · system_info"]
         RUNTIME --> MEMORY
         RUNTIME --> CONFIG
         RUNTIME --> PROVIDERS
@@ -614,9 +614,9 @@ flowchart LR
 | `zeroclaw-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai::ModelProvider` interface + `ai::OllamaProvider` (`src/ai/model_provider.{hpp,cpp}`, adapting the tested `ai/ollama_client.cpp`) | **Have the abstraction, one implementation** — `agent_turn` (`cli/host.cpp`) is coded against `ai::ModelProvider`, not Ollama directly (Phase 1, done); adding Anthropic/OpenAI means implementing the interface, no router/retry wrapper yet since there's nothing to route between |
 | `zeroclaw-channels` | 30+ messaging integrations (Discord, Slack, Telegram, …) | None | **Missing entirely** — `Connector` generalizes the concept but nothing implements a messaging-channel connector yet |
 | `zeroclaw-gateway` | HTTP/WebSocket gateway, web dashboard, webhook ingress | `tools::MiniHttpServer` + `cli/http_mount.cpp` | **Partial** — REST exists; no WebSocket, no dashboard UI, webhook auth is the same bearer-token gate as everything else |
-| `zeroclaw-tools` | Callable tool implementations (browser, HTTP, PDF, hardware probes) | `filesystem_tools.cpp`, `command_runner.cpp`, `window_list.cpp`, `app_index.cpp`, `intent/open_intent.cpp` | **Have**, functionally — not split into a separate module boundary, all linked straight into `cli/`/`src/` |
+| `zeroclaw-tools` | Callable tool implementations (browser, HTTP, PDF, hardware probes) | `filesystem_tools.cpp`, `command_runner.cpp`, `window_list.cpp`, `app_index.cpp`, `intent/open_intent.cpp`, `ffmpeg_tool.cpp`, `system_info.cpp` | **Have**, functionally — not split into a separate module boundary, all linked straight into `cli/`/`src/`. `system_info.cpp` is droidcli's environment-grounding tool (OS, architecture, real Desktop path via the Windows Known Folder API - Phase 7, done) - the ZeroClaw comparison doesn't have a named equivalent for "know what machine you're actually on," but it's the same self-contained-capability shape as every other tool here |
 | `zeroclaw-tool-call-parser` | Model-side tool-call syntax parsing/normalization | `ai::ollama_client`'s `tool_calls` JSON parsing | **Partial** — handles Ollama's native tool-call format only, nothing to normalize across providers since there's only one |
-| `zeroclaw-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); no embeddings, no vector retrieval - deliberately out of scope, see the extension plan below |
+| `zeroclaw-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability + procedural memory, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); the same database also now holds `command_lessons` - model-recorded "this broke, this fixed it" pairs the agent can search before repeating a past mistake (Phase 8, done) - a form of procedural/lessons-learned memory, distinct from conversation history but living in the same store; still no embeddings, no vector retrieval - deliberately out of scope, see the extension plan below |
 | `zeroclaw-plugins` | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
 | `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | GPIO/I2C/SPI/USB, specialized hardware | None | **Not planned** — engine/hardware code was explicitly removed at 0.2.0 (`AGENTS.md` guardrails) |
 | `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `db/droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); no debouncer/watchdog abstraction yet |
@@ -1043,6 +1043,136 @@ that the model's next response now correctly reports the failure instead of
 claiming success. Also live-verified the approval-pause/resume round trip,
 the pending-call-abandonment path (confirmed the system note lands in `GET
 /api/agent/history`), and the empty-response retry/give-up log lines.
+
+---
+
+### Phase 7 — Nudge hardening, environment grounding, shell-execution correctness ✅ implemented
+
+**Goal:** Phase 6 caught fabrication but didn't bound how the agent responds
+to being corrected, and left two more incidents to shake out from continued
+dogfooding: (1) a model that fabricates the *same* claim again right after a
+nudge got nudged on every remaining hop, burning the whole tool-calling
+budget on repeated near-identical system messages and, worse, still reaching
+the user on the final hop once there was no nudge check left there - observed
+degrading the model's own output into literal `assistant\n\n` role-token
+fragments; (2) the model reliably (not once, but reproducibly across
+sessions) writing a bare relative `desktop/foo.png` path instead of the real
+Desktop folder, and an `ffmpeg` filter expression containing embedded double
+quotes (`s="sin(2*PI*440)"`) reliably producing a bogus Windows shell error
+("filename ... syntax is incorrect") before `ffmpeg` ever launched.
+
+**What shipped:**
+
+- **Capped the Phase 6 nudge at one attempt per turn**, not "every hop until
+  the budget runs out." If the model fabricates the same claim again right
+  after correction, it isn't nudged a second time - `run_agent_tool_loop`
+  overrides the response with an honest refusal instead
+  ("I wasn't actually able to complete this...") regardless of whether that
+  happens mid-turn or on the literal last hop, guaranteeing a fabrication
+  never reaches the user no matter how the hop budget plays out.
+- **`SystemInfo::desktop_path`** (`cli/system_info.{hpp,cpp}`) - the real
+  Desktop folder resolved via the Windows Known Folder API
+  (`SHGetKnownFolderPath(FOLDERID_Desktop)`), not a guessed
+  `C:\Users\<name>\Desktop` string, which silently breaks for a
+  OneDrive-redirected or localized Desktop. Exposed via `GET /api/system`,
+  `get_system_info`, and folded into the boot-time system prompt.
+- **`substitute_bare_desktop_token()`** (`cli/host.cpp`) - `run_command`/
+  `run_ffmpeg` automatically replace a bare `desktop/...`/`desktop\...` token
+  (only at a word boundary, never touching an already-correct absolute path)
+  with the real `desktop_path` before executing, since giving the model the
+  right fact in its system prompt wasn't sufficient on its own - it kept
+  writing the unresolvable relative path anyway. Both tools report a
+  `"resolved_args"`/`"resolved_command"` field when this happened, so the
+  model reports the actual location back to the user instead of what it
+  originally typed.
+- **`run_command_once` gained a `via_shell` parameter** (`cli/command_runner.
+  {hpp,cpp}`) - `run_ffmpeg` now bypasses `cmd.exe /c` entirely
+  (`via_shell=false`), since it never needs shell features (pipes,
+  redirects, env var expansion) and `cmd.exe`'s own command-line grammar was
+  silently corrupting args containing embedded double quotes before
+  `CreateProcess` even launched the target program. `CreateProcess`'s own
+  command-line parsing (the same convention every C program's `argv` uses,
+  ffmpeg included) handles nested quotes correctly where `cmd.exe`'s `/c`
+  grammar does not. POSIX is unaffected either way - the corruption is a
+  `cmd.exe`-specific quirk, not inherent to shell quoting in general.
+- **`run_ffmpeg`'s tool description gained a concrete "generate a single
+  static image" recipe** (`-frames:v 1 -update 1`), fixing a recurring
+  `image2`-muxer error the model kept hitting without a worked example to
+  copy.
+
+**Explicit non-goal, same as Phase 6:** none of this raises the underlying
+local model's own ffmpeg-syntax competence (e.g. it still needs to know
+`aevalsrc`'s `s=` means sample rate, not the source expression) - that
+ceiling is what Phase 8's persistent lesson memory starts to address instead.
+
+**Verified:** `ctest` green (9/9). Live-replayed the exact args from both
+incidents: `desktop/red.png` (bare token) correctly resolved to the real
+Desktop path and the PNG was confirmed to exist on disk afterward, not just
+in a green API response; the `aevalsrc=0:s="sin(2*PI*44)"` args now
+correctly launch `ffmpeg` and surface its own real semantic error
+(`"Invalid sample rate 'sin(2*PI*44)'"`) instead of the bogus `cmd.exe`
+shell error. Traced both nudge-exhaustion paths (mid-turn, and landing on
+the literal last hop) by hand to confirm the honest-refusal override fires
+in each.
+
+---
+
+### Phase 8 — Persistent command-fix memory ✅ implemented
+
+**Goal:** a local model repeatedly hits the same class of mistake (wrong
+`ffmpeg` filter syntax, a misremembered flag) with no way to remember a fix
+it already worked out earlier - Phase 6/7 make sure a *failure* is reported
+honestly, but nothing carried a *solution* forward once found, even within
+the same session, let alone into a later one. This is the "capture solutions
+of command bugs automatically" capability - `zeroclaw-memory`'s conversation
+memory (Phase 2) already answers "what did we say," this answers "what did
+we already learn how to do."
+
+**What shipped:**
+
+- **`command_lessons` table** in the same SQLite database `MemoryStore`
+  already owns (`db/droidcli_memory.sqlite3`) - `CommandLesson` (`cli/
+  memory_store.hpp`): `tool`, `broken`, `failure_reason`, `working`,
+  `lesson`, `created_at`. Lives alongside `memory_entries` (conversation
+  history) in the same file/connection, not a second persistence mechanism.
+- **Two new agent tools, model-driven, not auto-inferred.**
+  `record_command_fix` is for the model to call right after it fixes
+  something that failed at least once - a verified `"ok":true` result, not a
+  guess - with the exact broken/working command strings and one short,
+  reusable lesson. `search_command_fixes` is for the model to call *before*
+  attempting a command similar to a kind of task that's failed before,
+  matched case-insensitively (a `LIKE` scan, not embeddings/vector search -
+  deliberately minimal, the same "no semantic recall" stance `zeroclaw-
+  memory`'s row in the crate table already takes) against `tool`/`broken`/
+  `failure_reason`/`lesson`. Deliberately not automatic: inferring "the next
+  attempt worked" as "this specific change was the fix" from a bare
+  failed-then-succeeded pair in the transcript is unreliable enough (the fix
+  might be unrelated, or the user might have changed the request) that an
+  explicit model decision is the more trustworthy signal, matching this
+  project's existing preference for the model calling a tool over droidcli
+  guessing intent from side channels.
+- **Two new routes**: `POST /api/agent/lessons` (record),
+  `POST /api/agent/lessons/search` (search) - both also reachable as agent
+  tools, mirroring every other capability in this codebase having both an
+  HTTP route and a tool-calling path onto the same `DroidHost` method.
+- **System prompt guidance** (`HostConfig::system_prompt`, `cli/host.hpp`):
+  explicit instructions on when to search (before a risky attempt) and when
+  to record (after a verified fix, never for something that worked on the
+  first try).
+
+**Explicit non-goal:** no embeddings, no vector retrieval, no automatic
+lesson extraction - same deliberate scope boundary `zeroclaw-memory`'s
+conversation-history side already has (see its row in the crate-by-crate
+mapping table above). A lesson is exactly as good as the model's own
+judgment about what it just learned; this phase gives it somewhere durable
+to write that down, not a smarter way to write it.
+
+**Verified:** `ctest` green (9/9). Recorded and searched a real lesson (the
+`aevalsrc` sample-rate mistake from Phase 7's verification) end-to-end via
+`POST /api/agent/lessons` and `POST /api/agent/lessons/search`, confirmed an
+unrelated query returns no results (the `LIKE` matching isn't just returning
+everything), and confirmed the row persists in `db/droidcli_memory.sqlite3`
+across a process restart the same way `memory_entries` already does.
 
 ---
 
