@@ -195,6 +195,41 @@ void scan_uninstall_hive(HKEY root, const char* subkey_path, core::Array<Install
 	RegCloseKey(uninstall_key);
 }
 
+// Windows accessories/system tools (Notepad, Calculator, Paint, ...) are not
+// installed applications in the Add/Remove Programs sense - they ship with
+// the OS and never register an Uninstall entry, so scan_uninstall_hive()
+// above can never find them. They resolve fine via bare PATH lookup
+// (System32 is always on PATH) once launch_application() tries them, but
+// find_application()/find_installed_app_match() only searches this index -
+// without an entry here, a query like "notepad" or "calculator" comes back
+// with zero matches even though opening it would have worked. Listing them
+// explicitly closes that gap and lets find_application answer confidently
+// for the apps a user is most likely to ask for by a common name.
+void add_builtin_accessories(core::Array<InstalledApp>& out_apps)
+{
+	static const struct { const char* name; const char* exe; } kBuiltins[] = {
+		{"Notepad", "notepad.exe"},
+		{"Calculator", "calc.exe"},
+		{"Paint", "mspaint.exe"},
+		{"WordPad", "write.exe"},
+		{"Command Prompt", "cmd.exe"},
+		{"PowerShell", "powershell.exe"},
+		{"File Explorer", "explorer.exe"},
+		{"Task Manager", "taskmgr.exe"},
+		{"Control Panel", "control.exe"},
+		{"Snipping Tool", "snippingtool.exe"},
+		{"Magnifier", "magnify.exe"},
+		{"Registry Editor", "regedit.exe"},
+		{"Character Map", "charmap.exe"},
+		{"Remote Desktop Connection", "mstsc.exe"},
+		{"Disk Cleanup", "cleanmgr.exe"},
+	};
+	for (const auto& builtin : kBuiltins)
+	{
+		out_apps.push_back(InstalledApp{builtin.name, builtin.exe});
+	}
+}
+
 } // namespace
 
 core::Array<InstalledApp> scan_installed_applications()
@@ -207,6 +242,7 @@ core::Array<InstalledApp> scan_installed_applications()
 	scan_uninstall_hive(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", apps);
 	scan_uninstall_hive(HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall", apps);
 	scan_uninstall_hive(HKEY_CURRENT_USER, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", apps);
+	add_builtin_accessories(apps);
 	return apps;
 }
 

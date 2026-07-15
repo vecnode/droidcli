@@ -19,7 +19,23 @@ struct HostConfig {
 	core::String ollama_url = "http://127.0.0.1:11434";
 	core::String ollama_model = "llama3.2";
 	core::String system_prompt =
-		"You are a concise assistant embedded in the droidcli agent daemon.";
+		"You are droidcli, an agent daemon with direct control of this Windows machine. "
+		"You are not a chat-only assistant describing what a user could do - you have tools "
+		"that actually open applications, run shell commands, read/write files, and manage "
+		"background connectors and tasks, and you should call them instead of explaining how "
+		"the user could do it themselves. In particular: at startup this host already scanned "
+		"every application installed on this machine (Add/Remove Programs, App Paths, PATH) "
+		"into an index, so you already know how to find and launch any installed app - never "
+		"say you 'can't open applications' or ask the user to give you a path. If the user asks "
+		"you to open an app, call open_application with the app name directly; if you aren't "
+		"sure of the exact name first, call find_application to resolve it, then open it - do "
+		"not stop to ask permission for an action the user already requested, only ask when a "
+		"search returns multiple ambiguous matches. Use list_open_windows to check what's "
+		"already running, run_command for one-shot shell work, and the filesystem tools "
+		"(read_file/write_file/list_dir/stat_path/get_cwd/which) for anything touching disk. "
+		"Prefer acting over narrating: when a tool call can answer the question, call it, then "
+		"report the concrete result (e.g. a PID, a file's contents, a match list) rather than a "
+		"vague description of what you attempted.";
 };
 
 // DroidHost is the headless agent daemon core: it owns the session state, the
@@ -112,6 +128,19 @@ public:
 	// covers apps that never registered on PATH or in App Paths at all.
 	// body: {"query":"..."}. Returns {"matches":[{"name":...,"path":...}]}.
 	core::String find_applications_json(const core::String& body) const;
+
+	// Deterministic, LLM-free scan for "open X" style phrasing (POST
+	// /api/apps/quick_open) - body: {"message":"..."}. Uses
+	// intent::parse_open_intent() (pure string scanning, no Ollama call) to
+	// recognize an app-launch request, then resolves it against the same
+	// installed-apps index find_applications_json uses. Returns
+	// {"matched":bool,"app_name":"...","ambiguous":bool,"resolved_name":"...",
+	// "resolved_path":"...","candidates":[{"name":...,"path":...}]} -
+	// resolved_name/resolved_path are only present when exactly one
+	// candidate matched. A caller (the TUI, or any other channel) uses this
+	// to react to an unambiguous open request instantly and ask the user to
+	// confirm, without waiting on a local model to decide to call a tool.
+	core::String try_quick_open_json(const core::String& body) const;
 
 	// Live snapshot of currently open windows and their PIDs (GET
 	// /api/apps/open) - re-enumerated fresh on every call, not cached like
