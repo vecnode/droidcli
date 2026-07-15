@@ -229,6 +229,8 @@ over HTTP, so it never needs the token.
 | `GET` | `/api/notify/log` `[auth]` | Recent notify messages |
 | `GET` | `/api/app/log` `[auth]` | Recent host application log |
 | `POST` | `/api/run` `[auth]` | Run a one-shot shell command — body `{"command":"...","work_dir":"...","timeout_ms":30000}` |
+| `POST` | `/api/ffmpeg/run` `[auth]` | Run ffmpeg (resolved via `PATH` or `$DROIDCLI_FFMPEG_ROOT`) — body `{"args":"...","work_dir":"...","timeout_ms":120000}` |
+| `GET` | `/api/system` `[auth]` | The host machine droidcli is running on — `os_name`/`os_version`/`architecture`/`hostname`/`username`/`cwd`, queried once at startup |
 | `POST` | `/api/open` `[auth]` | Launch a GUI application, detached (no wait, no output capture) — body `{"path_or_name":"...","args":"...","work_dir":"..."}` |
 | `POST` | `/api/apps/find` `[auth]` | Search the installed-apps index (scanned at startup) — body `{"query":"..."}`, returns `{"matches":[{"name":...,"path":...}]}` |
 | `POST` | `/api/apps/quick_open` `[auth]` | Deterministic, LLM-free "open X" recognizer — body `{"message":"..."}`, returns `{"matched":bool,"app_name":"...","ambiguous":bool,"resolved_name":"...","resolved_path":"...","candidates":[...]}` (see "Quick-open" below) |
@@ -239,11 +241,17 @@ over HTTP, so it never needs the token.
 | `POST` | `/api/fs/stat` `[auth]` | Check existence/type/size of a path — body `{"path":"..."}` |
 | `GET` | `/api/fs/cwd` `[auth]` | droidcli's current working directory |
 | `POST` | `/api/fs/which` `[auth]` | Resolve an executable against `PATH` — body `{"name":"..."}` |
-| `POST` | `/api/agent/turn` `[auth]` | Tool-calling agent turn — body `{"message":"...","clear":false,"session_id":"..."}`, response includes `"session_id"` (see "Persistent memory" below) |
+| `POST` | `/api/agent/turn` `[auth]` | Tool-calling agent turn — body `{"message":"...","clear":false,"session_id":"..."}`, response includes `"session_id"` (see "Persistent memory" and "Phase 6" below) |
+| `POST` | `/api/agent/tool_decision` `[auth]` | Resolve a gated tool call `agent_turn` paused on — body `{"approved":bool,"session_id":"...","reason":"..."}` (see "Phase 6" below) |
+| `GET` | `/api/agent/tools` `[auth]` | The agent's fixed tool set — `{"tools":[{"name":...,"description":...,"parameters":{...}}]}` |
 | `GET` | `/api/agent/history` `[auth]` | One session's persisted message history — `?session_id=...` (defaults to the current session), returns `{"session_id":"...","messages":[{"hop_index":N,"role":"...","content":"...","created_at":"..."}]}` |
 | `GET` | `/api/agent/sessions` `[auth]` | Every session id with persisted history, most recently active first — `{"current_session_id":"...","session_ids":[...]}` |
 | `GET` | `/api/ollama/status` `[auth]` | Ollama text-gen endpoint status + model list |
 | `POST` | `/api/ollama/config` `[auth]` | Update Ollama model at runtime |
+| `GET` | `/api/ollama/setup-status` `[auth]` | Whether Ollama is installed/online, pulled models, configured-model status (drives the TUI's in-chat setup flow) |
+| `POST` | `/api/ollama/install` `[auth]` | Run `winget install --id Ollama.Ollama ...` (blocking) |
+| `POST` | `/api/ollama/start` `[auth]` | Launch `ollama serve` and poll until reachable (blocking) |
+| `POST` | `/api/ollama/pull` `[auth]` | Pull a model and make it the active one — body `{"model":"..."}` (blocking) |
 | `GET` | `/api/process/status` `[auth]` | PID + running state of every launched connector process |
 
 **Connectors** (generic peer config; all `[auth]`):
@@ -373,11 +381,19 @@ meaningfully bigger work that nothing in droidcli needs yet.
 Drives a bounded (5-hop) tool-calling loop against a `ai::ModelProvider`
 (Ollama today via `ai::OllamaProvider` - see "Provider abstraction" in the
 extension plan below and `src/ai/model_provider.hpp`): the model sees a fixed
-tool set (`list_connectors`, `connector_status`, `launch_connector`,
-`stop_connector`, `call_connector`, `enqueue_task`, `list_tasks`,
-`run_command`) and can call any of them against this `DroidHost` instance
-before replying in natural language. Every message added to the transcript is
+tool set and can call any of them against this `DroidHost` instance before
+replying in natural language. The tool set is defined once, in
+`DroidHost::agent_tool_definitions()` (`cli/host.cpp`) - `GET
+/api/agent/tools` is its live source of truth (also rendered as the TUI's
+"Agent Tools" panel), so it's deliberately not duplicated here where it would
+just go stale as tools are added. Every message added to the transcript is
 also persisted via `MemoryStore` (see "Persistent memory" above).
+
+Side-effecting tools (anything that writes to disk, runs a shell command, or
+touches a connector/process/task) don't execute the instant the model
+requests them - the loop pauses for human approval first, and every tool
+result carries a uniform `"ok"` contract the model can trust. See "Phase 6 -
+Agent tool-result reliability & human-in-the-loop approval" below for both.
 
 ```sh
 curl -X POST http://127.0.0.1:30080/api/agent/turn \
@@ -418,12 +434,15 @@ curl -X POST http://127.0.0.1:30080/api/run \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"command":"echo hello","work_dir":"","timeout_ms":30000}'
-# {"launched":true,"exit_code":0,"stdout":"hello\r\n","stderr":"","error":""}
+# {"ok":true,"launched":true,"exit_code":0,"stdout":"hello\r\n","stderr":"","error":""}
 ```
 
 Synchronous and blocking (unlike the PID-tracked `launched_process` connector
 lifecycle) — captures stdout/stderr and enforces `timeout_ms`, killing the
-process and reporting `error` if it's exceeded.
+process and reporting `error` if it's exceeded. `"ok"` (`command_succeeded()`
+in `cli/command_runner.hpp`) is `launched && exit_code == 0 &&
+error_message.empty()` - the same contract `/api/ffmpeg/run` and every other
+agent tool follow, see "Phase 6" below for why this is load-bearing.
 
 ---
 
@@ -587,7 +606,7 @@ flowchart LR
 
 | ZeroClaw crate | Role | droidcli equivalent | Status |
 | --- | --- | --- | --- |
-| `zeroclaw-runtime` | Agent loop, security policy, SOP engine, cron, SubAgents, RPC | `DroidHost::agent_turn` (`cli/host.cpp`) — one bounded tool-calling loop | **Partial** — no security-policy layer beyond the bearer token, no SOP engine, no cron scheduler (`TaskQueue` is a dispatch queue, not a scheduler), no SubAgents/RPC |
+| `zeroclaw-runtime` | Agent loop, security policy, SOP engine, cron, SubAgents, RPC | `DroidHost::agent_turn`/`run_agent_tool_loop` (`cli/host.cpp`) — one bounded tool-calling loop | **Partial** — now has a real security-policy layer beyond the bearer token: side-effecting tools require human approval before executing (Phase 6, done, `POST /api/agent/tool_decision`); no SOP engine, no cron scheduler (`TaskQueue` is a dispatch queue, not a scheduler), no SubAgents/RPC |
 | `zeroclaw-config` | TOML schema, secrets encryption, autonomy levels, workspace resolution | `HostConfig` (`cli/host.hpp`) + CLI flags + `connectors.json` | **Partial** — flat JSON/CLI flags not TOML, token is plaintext (env var or CLI arg, never echoed back — see `CLAUDE.md`), no autonomy levels, no workspace concept |
 | `zeroclaw-api` | Public traits: `ModelProvider`, `Channel`, `Tool`, `Memory`, `Observer`, `RuntimeAdapter`, `Peripheral` (kernel ABI) | `ai::ModelProvider` (`src/ai/model_provider.hpp`) is the `ModelProvider` equivalent; `net::Connector` is the closest thing to a `Channel`/`Peripheral` abstraction; `ai::ToolDefinition`/`ToolCall` is the Tool ABI | **Partial** — `ModelProvider` now exists as a real interface (Phase 1, done); `Connector` still covers what ZeroClaw splits into `Channel`+`Peripheral`; no `Memory`/`Observer` trait abstractions (though `MemoryStore` now exists as a concrete class, see `zeroclaw-memory` below) |
 | `zeroclaw-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai::ModelProvider` interface + `ai::OllamaProvider` (`src/ai/model_provider.{hpp,cpp}`, adapting the tested `ai/ollama_client.cpp`) | **Have the abstraction, one implementation** — `agent_turn` (`cli/host.cpp`) is coded against `ai::ModelProvider`, not Ollama directly (Phase 1, done); adding Anthropic/OpenAI means implementing the interface, no router/retry wrapper yet since there's nothing to route between |
@@ -910,6 +929,118 @@ worker at a time) — this phase adds visibility, not a new concurrency model.
 issue); launched the interactive TUI briefly and confirmed
 `{"channel":"thread","direction":"tui.poller","summary":"spawned",...}`
 appears in `logs/log.jsonl`.
+
+---
+
+### Phase 6 — Agent tool-result reliability & human-in-the-loop approval ✅ implemented
+
+**Goal:** droidcli 0.1.0's agent loop drives a *local* Ollama model, which is
+materially less reliable than a hosted frontier model at both tool-calling
+and self-reporting. Two concrete incidents drove this phase, both caught by
+hand while dogfooding the agent through the TUI: (1) a `run_ffmpeg` call
+failed with a filter-graph syntax error (`exit_code=22`) and the model told
+the user the image had been "successfully created" anyway; (2) the model
+later claimed it had "successfully moved" a file to the Desktop with **zero
+tool calls anywhere in that turn** - a complete fabrication. This phase is
+the trust layer that makes those two failure modes structurally harder to
+hit, not a one-off patch for either transcript - it's the foundation
+everything else in the agent loop (Phase 4's future channel-as-connector
+work included) builds on, so it's tracked here as its own phase rather than
+folded into a `## Extension points` bullet.
+
+**What shipped:**
+
+- **A uniform `"ok"` contract for every tool result.** `run_command` and
+  `run_ffmpeg` were, until this phase, the *only* two agent tools that didn't
+  return an `"ok"` boolean - every other tool (`list_dir`, `write_file`,
+  `stat_path`, ...) already did, and the model is conditioned to key off it.
+  They had `"launched":true` (only means the process *started*, not that it
+  finished successfully) and a numeric `exit_code` buried after ffmpeg's
+  ~2KB version/config banner - exactly the shape a smaller model reliably
+  fails to parse correctly. Root-caused, not patched: `cli/command_runner.hpp`
+  now exports `command_succeeded(const CommandRunResult&)`, the single
+  derived (never a stored, driftable field) definition of success -
+  `launched && exit_code == 0 && error_message.empty()` - replacing two
+  *pre-existing* independent copies of that same inline check found in
+  `DroidHost::install_ollama()`/`pull_ollama_model()` while fixing this. Both
+  `run_command`/`run_ffmpeg_json` (`cli/host.cpp`) now put `"ok"` first in
+  their JSON, matching every other tool, and add a `"failure_reason"` field
+  on failure - built by a new `last_nonempty_lines()` helper that extracts
+  the real diagnostic from the *end* of a verbose command's output instead
+  of leaving the model to find it inside a large blob (ffmpeg's actual error
+  is always its last line or two, after its own preamble).
+- **Human-in-the-loop approval for side-effecting tools.** `run_command`,
+  `run_ffmpeg`, `write_file`, `open_application`, `launch_connector`,
+  `stop_connector`, and `enqueue_task` are gated by
+  `tool_call_requires_approval()` (`cli/host.cpp`); read-only tools
+  (`list_dir`, `get_cwd`, `get_system_info`, `which`, ...) are not - gating
+  those would only slow the agent down for no safety benefit. The moment the
+  model requests a gated call, `DroidHost::run_agent_tool_loop` pauses
+  instead of executing it, storing the call in a single-slot
+  `PendingAgentToolCall` member (`pending_tool_call_` - single-slot because
+  only one `agent_turn`/`agent_tool_decision` call is ever in flight per
+  process, the same assumption `current_session_id_` already makes) and
+  returning `{"ok":true,"pending_tool_call":{"tool":...,"arguments_json":...}}`
+  instead of a normal reply - no side effect has happened yet. `POST
+  /api/agent/tool_decision` (body `{"approved":bool,"session_id":"...",
+  "reason":"..."}`) resolves it: executes the tool if approved, or records a
+  `"user declined: <reason>"` tool result if not, then resumes the same
+  bounded loop - which can pause again on a second gated call, or run to a
+  normal completion. The TUI surfaces a pending call as
+  `[AGENT WANTS TO] tool(args) - approve? (yes/no, or say why not)` in the
+  chat log (`PendingToolApproval` in `cli/tui.cpp`), mirroring the existing
+  `PendingOpen` "open this app?" confirmation flow rather than inventing a
+  second pattern for the same kind of interaction.
+- **Reliability safety nets in `run_agent_tool_loop`**, each bounded
+  separately from the 5-hop tool-calling budget so they cost at most one
+  extra round-trip, never an infinite loop:
+  - *Empty-response retry* - a local tool-use model occasionally returns
+    neither assistant text nor a tool call for a hop
+    (`ai::ProviderResponse::http_success` stays `true`; there's just nothing
+    to act on). Retried in-process up to twice before giving up; if still
+    empty, the raw response body (capped to 500 chars) is logged for future
+    debugging instead of vanishing silently.
+  - *Unverified-action-claim nudge* - `looks_like_unverified_action_claim()`
+    catches both future-tense narration ("I'll execute...", "hold on while I
+    process this") and past-tense fabrication ("I've successfully moved it")
+    in a tool-call-free response, and nudges the model
+    (`kUnverifiedActionClaimNudge`, a system-role message) to either actually
+    call the tool or admit it hasn't, instead of accepting the claim as
+    final. Only fires when **no tool call this turn already succeeded** - a
+    truthful summary right after a real success (`"I've successfully created
+    it"` immediately following `run_ffmpeg`'s `"ok":true`) is never
+    second-guessed.
+  - *Pending-call abandonment* - if a plain chat message arrives for a
+    session with an active `pending_tool_call_` (the user typed something
+    other than yes/no), `agent_turn` clears it and records an explicit
+    system note in the transcript, instead of leaving it orphaned forever
+    (nothing else would ever clear it) with a transcript that implies a tool
+    call with no matching tool result.
+  - Every one of the above, plus the pre-existing "no reply text"/"budget
+    exhausted" placeholder paths, now writes a `success:false` entry to
+    `logs/log.jsonl` (Phase 3's durable log) - not just the in-memory session
+    transcript reachable via `GET /api/agent/history`.
+- **System prompt hardening** (`HostConfig::system_prompt`,
+  `cli/host.hpp`): explicit instructions that `"ok"` is the only valid
+  success signal, that a tool result's `"failure_reason"`/`"error"` must be
+  relayed honestly rather than papered over, and an explicit ban on
+  inventing a file path or result never actually returned by a tool.
+
+**Explicit non-goal:** none of this makes the underlying local model smarter
+at constructing correct tool arguments (e.g. valid ffmpeg filter-graph
+syntax) - that's a model-capability ceiling this phase doesn't attempt to
+raise. What it guarantees is that when the model gets something wrong, the
+user is told the truth about it instead of a confident fabrication.
+
+**Verified:** `ctest` green (9/9). Live-replayed the exact `run_ffmpeg`
+filter-graph failure from the incident that motivated this phase against a
+real Ollama tool-use model (`llama3-groq-tool-use`) - confirmed `"ok":false`
+with a `"failure_reason"` cleanly extracting the real error
+(`"Invalid size 'h' | Error initializing filters | Invalid argument"`), and
+that the model's next response now correctly reports the failure instead of
+claiming success. Also live-verified the approval-pause/resume round trip,
+the pending-call-abandonment path (confirmed the system note lands in `GET
+/api/agent/history`), and the empty-response retry/give-up log lines.
 
 ---
 

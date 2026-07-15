@@ -228,16 +228,22 @@ bool tool_call_requires_approval(const core::String& tool_name)
 		|| tool_name == "enqueue_task";
 }
 
-// Heuristic: does `text` sound like it's promising to perform an action
-// ("I'll execute ffmpeg to create that...", "Please hold on while I process
-// this") without an accompanying tool call? Local tool-use models
-// occasionally generate this instead of a real tool_calls entry - a false
-// promise that leaves the user hanging with nothing ever happening (the
-// model narrated intent instead of acting on it). Deliberately loose - a
-// commitment phrase plus an action verb, not real NLP - since a false
-// positive here only costs one extra, bounded model round-trip (see the
-// nudge in run_agent_tool_loop), not a wrong final answer.
-bool looks_like_unfulfilled_promise(const core::String& text)
+// Heuristic: does `text` claim an action was performed, or promise one is
+// about to be, without an accompanying tool call in this same response? Two
+// related failure modes local tool-use models exhibit:
+//  - future/in-progress: "I'll execute ffmpeg...", "hold on while I process
+//    this" - narrated intent instead of a real tool_calls entry.
+//  - past-tense fabrication: "The image has been successfully created",
+//    "I've moved it to your Desktop" - the more dangerous of the two, since
+//    it asserts something already happened when nothing did (seen in
+//    practice: a model claimed a file move it never attempted, with zero
+//    tool calls anywhere in that turn).
+// Deliberately loose - a claim phrase plus an action verb, not real NLP -
+// since run_agent_tool_loop only nudges instead of accepting this as final
+// when no action this turn actually succeeded (see actions_include_success
+// below), so a false positive here costs one extra bounded model round-trip
+// at worst, never a wrong final answer reaching the user.
+bool looks_like_unverified_action_claim(const core::String& text)
 {
 	core::String lowered;
 	lowered.reserve(text.size());
@@ -246,27 +252,33 @@ bool looks_like_unfulfilled_promise(const core::String& text)
 		lowered += static_cast<char>(std::tolower(character));
 	}
 
-	static const char* const kCommitmentPhrases[] = {
+	static const char* const kClaimPhrases[] = {
+		// Future/in-progress.
 		"i'll ", "i will ", "let me ", "hold on", "one moment",
-		"give me a moment", "please wait", "processing this", "working on it"
+		"give me a moment", "please wait", "processing this", "working on it",
+		// Past-tense completion, unbacked by any tool call this turn.
+		"i've ", "i have ", "has been ", "have been ", "successfully",
+		"already ", "all done", "task is complete", "task complete"
 	};
-	bool has_commitment = false;
-	for (const char* phrase : kCommitmentPhrases)
+	bool has_claim = false;
+	for (const char* phrase : kClaimPhrases)
 	{
 		if (lowered.find(phrase) != core::String::npos)
 		{
-			has_commitment = true;
+			has_claim = true;
 			break;
 		}
 	}
-	if (!has_commitment)
+	if (!has_claim)
 	{
 		return false;
 	}
 
 	static const char* const kActionVerbs[] = {
-		"execute", "run ", "create", "generate", "transcode", "convert",
-		"save", "make ", "launch", "open ", "write", "delete", "start "
+		"execute", "run ", "create", "created", "creating", "generate",
+		"transcode", "convert", "save", "saved", "make", "made", "launch",
+		"open", "write", "wrote", "delete", "deleted", "start", "move",
+		"moved", "moving"
 	};
 	for (const char* verb : kActionVerbs)
 	{
@@ -278,11 +290,76 @@ bool looks_like_unfulfilled_promise(const core::String& text)
 	return false;
 }
 
-const char* const kUnfulfilledPromiseNudge =
-	"You just said you would perform an action but did not call any tool in that same response. "
-	"If you intend to do something, call the matching tool right now instead of describing it - "
-	"a promise with no tool call never happens. If you're missing information needed to act, "
-	"ask a clarifying question instead of claiming you're already doing it.";
+// Returns the last up to `max_lines` non-empty, \r-trimmed lines of `text`,
+// joined by " | " - used to surface the actual diagnostic buried at the end
+// of a verbose command's output. ffmpeg is the main offender: its real error
+// always lands in the last line or two, after a wall of build-config and
+// stream-probe banner noise the model has no reason to read through to find
+// it (a real case: "Invalid size 'h'" - the actual problem - was buried
+// under ~2KB of ffmpeg's own version/config preamble).
+core::String last_nonempty_lines(const core::String& text, const size_t max_lines)
+{
+	core::Array<core::String> lines;
+	size_t start = 0;
+	while (start <= text.size())
+	{
+		const size_t newline = text.find('\n', start);
+		core::String line = text.substr(start, newline == core::String::npos ? core::String::npos : newline - start);
+		while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+		{
+			line.pop_back();
+		}
+		if (!line.empty())
+		{
+			lines.push_back(line);
+		}
+		if (newline == core::String::npos)
+		{
+			break;
+		}
+		start = newline + 1;
+	}
+
+	const size_t take = lines.size() < max_lines ? lines.size() : max_lines;
+	core::String joined;
+	for (size_t index = lines.size() - take; index < lines.size(); ++index)
+	{
+		if (!joined.empty())
+		{
+			joined += " | ";
+		}
+		joined += lines[index];
+	}
+	return joined;
+}
+
+// A short, unambiguous explanation of why a command_succeeded()==false
+// CommandRunResult failed - prefers error_message (spawn failure, timeout),
+// then stderr's tail (where a well-behaved program puts errors), then
+// stdout's tail (ffmpeg, notably, writes everything - including its actual
+// error - there in this codebase's capture).
+core::String summarize_command_failure(const CommandRunResult& result)
+{
+	if (!result.error_message.empty())
+	{
+		return result.error_message;
+	}
+	const core::String stderr_tail = last_nonempty_lines(result.stderr_text, 3);
+	if (!stderr_tail.empty())
+	{
+		return stderr_tail;
+	}
+	return last_nonempty_lines(result.stdout_text, 3);
+}
+
+const char* const kUnverifiedActionClaimNudge =
+	"Your last response claimed an action was done or about to be done, but no tool call backs "
+	"that up anywhere in this conversation turn - nothing has actually happened. If you intend to "
+	"do something, call the matching tool right now instead of describing it or claiming it's "
+	"already finished. Only report an action as successful when you can point to a tool result "
+	"whose \"ok\" field is true - if \"ok\" is false or you never called the tool, say so honestly "
+	"and explain the actual problem instead of asserting success. If you're missing information "
+	"needed to act, ask a clarifying question instead of claiming you're already doing it.";
 
 } // namespace
 
@@ -840,7 +917,7 @@ core::String DroidHost::install_ollama()
 	const CommandRunResult result = run_command_once(
 		"winget install --id Ollama.Ollama -e --source winget --accept-package-agreements --accept-source-agreements",
 		"", 300000);
-	const bool ok = result.launched && result.exit_code == 0;
+	const bool ok = command_succeeded(result);
 	append_app_log("ollama", "out", ok ? "installed Ollama via winget" : "winget install failed", ok);
 
 	std::ostringstream stream;
@@ -926,7 +1003,7 @@ core::String DroidHost::pull_ollama_model(const core::String& body)
 	}
 
 	const CommandRunResult result = run_command_once("ollama pull " + model, "", 600000);
-	const bool ok = result.launched && result.exit_code == 0;
+	const bool ok = command_succeeded(result);
 	append_app_log("ollama", "out", ok ? ("pulled model: " + model) : ("pull failed: " + model), ok);
 
 	if (ok)
@@ -1257,7 +1334,8 @@ core::String DroidHost::run_command(const core::String& body)
 
 	if (command.empty())
 	{
-		return "{" + net::json_bool_field("launched", false) + ","
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_bool_field("launched", false) + ","
 			+ "\"exit_code\":0,"
 			+ net::json_string_field("stdout", "") + ","
 			+ net::json_string_field("stderr", "") + ","
@@ -1265,15 +1343,38 @@ core::String DroidHost::run_command(const core::String& body)
 	}
 
 	const CommandRunResult result = run_command_once(command, work_dir, timeout_ms);
-	append_app_log("run", "out", command, result.error_message.empty());
+	const bool ok = command_succeeded(result);
+	// Previously logged on error_message.empty() alone, which missed a
+	// nonzero exit code (error_message is only set for a spawn failure or
+	// timeout, not a normal-but-failing run) - the exact same gap that let
+	// a failed ffmpeg invocation get reported to the user as a success.
+	append_app_log("run", "out", command, ok);
 
 	std::ostringstream stream;
 	stream << '{';
+	// "ok" first and always present - every other agent tool already
+	// returns this as its primary success signal (list_dir, write_file,
+	// stat_path, ...); run_command/run_ffmpeg were the two exceptions,
+	// leaving the model to infer success from "launched":true (which only
+	// means the process started, not that it finished successfully) and a
+	// numeric exit_code easy to miss under a large stdout dump. This is
+	// what let a failed ffmpeg run (exit_code 22, a filter-graph syntax
+	// error) get reported to the user as "successfully created."
+	stream << net::json_bool_field("ok", ok) << ',';
 	stream << net::json_bool_field("launched", result.launched) << ',';
 	stream << "\"exit_code\":" << result.exit_code << ',';
 	stream << net::json_string_field("stdout", result.stdout_text) << ',';
 	stream << net::json_string_field("stderr", result.stderr_text) << ',';
 	stream << net::json_string_field("error", result.error_message);
+	if (!ok)
+	{
+		// Spelled out in plain language, not just a raw exit code, since
+		// the model has already shown it won't reliably notice a nonzero
+		// exit_code buried in a large JSON blob on its own.
+		stream << ',' << net::json_string_field("failure_reason",
+			"Command failed (exit_code=" + std::to_string(result.exit_code) + "): "
+			+ summarize_command_failure(result));
+	}
 	stream << '}';
 	return stream.str();
 }
@@ -1287,7 +1388,8 @@ core::String DroidHost::run_ffmpeg_json(const core::String& body)
 
 	if (args.empty())
 	{
-		return "{" + net::json_bool_field("launched", false) + ","
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_bool_field("launched", false) + ","
 			+ "\"exit_code\":0,"
 			+ net::json_string_field("stdout", "") + ","
 			+ net::json_string_field("stderr", "") + ","
@@ -1295,15 +1397,23 @@ core::String DroidHost::run_ffmpeg_json(const core::String& body)
 	}
 
 	const CommandRunResult result = run_ffmpeg(args, work_dir, timeout_ms);
-	append_app_log("ffmpeg", "out", args, result.error_message.empty());
+	const bool ok = command_succeeded(result);
+	append_app_log("ffmpeg", "out", args, ok);
 
 	std::ostringstream stream;
 	stream << '{';
+	stream << net::json_bool_field("ok", ok) << ',';
 	stream << net::json_bool_field("launched", result.launched) << ',';
 	stream << "\"exit_code\":" << result.exit_code << ',';
 	stream << net::json_string_field("stdout", result.stdout_text) << ',';
 	stream << net::json_string_field("stderr", result.stderr_text) << ',';
 	stream << net::json_string_field("error", result.error_message);
+	if (!ok)
+	{
+		stream << ',' << net::json_string_field("failure_reason",
+			"ffmpeg failed (exit_code=" + std::to_string(result.exit_code) + "): "
+			+ summarize_command_failure(result));
+	}
 	stream << '}';
 	return stream.str();
 }
@@ -2118,17 +2228,35 @@ core::String DroidHost::run_agent_tool_loop(
 
 		if (response.tool_calls.empty())
 		{
-			// Caught a promise-without-a-tool-call and there's still hop
-			// budget left to give the model one more shot at actually
-			// calling it - nudge and loop back to the top instead of
-			// treating the narration as the final answer. On the last hop
-			// there's no room for a follow-up, so fall through as usual.
-			if (hop < kMaxHops - 1 && looks_like_unfulfilled_promise(response.assistant_message))
+			// Caught an unverified action claim (a promise never followed
+			// through, or a past-tense "I've done X" with nothing to back
+			// it up) and there's still hop budget left to give the model
+			// one more shot at either actually calling the tool or being
+			// honest about not having done so - nudge and loop back to the
+			// top instead of treating the claim as the final answer. Only
+			// nudges when no action *this turn* actually succeeded yet -
+			// a truthful summary of a tool call that already ran earlier
+			// in the same turn ("I've successfully created it" right after
+			// run_ffmpeg returned ok:true) must not be second-guessed. On
+			// the last hop there's no room for a follow-up, so fall
+			// through as usual.
+			bool a_tool_call_already_succeeded_this_turn = false;
+			for (const PendingToolActionRecord& action : actions)
+			{
+				bool action_ok = false;
+				if (net::extract_json_bool_field(action.result_json, "ok", action_ok) && action_ok)
+				{
+					a_tool_call_already_succeeded_this_turn = true;
+					break;
+				}
+			}
+			if (hop < kMaxHops - 1 && !a_tool_call_already_succeeded_this_turn
+				&& looks_like_unverified_action_claim(response.assistant_message))
 			{
 				append_app_log("chat", "out",
-					"hop " + std::to_string(hop) + ": assistant promised an action without calling a tool, nudging it to follow through",
+					"hop " + std::to_string(hop) + ": assistant claimed an action with no successful tool call to back it up, nudging it to correct itself",
 					false, session_id);
-				record_agent_message(session_id, ai::ChatRole::System, kUnfulfilledPromiseNudge);
+				record_agent_message(session_id, ai::ChatRole::System, kUnverifiedActionClaimNudge);
 				continue;
 			}
 			final_assistant_text = response.assistant_message;

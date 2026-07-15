@@ -50,7 +50,16 @@ struct HostConfig {
 		"'hold on, processing' without actually calling the tool in that exact same response - "
 		"a sentence describing an action is not the action, and the user is left with nothing "
 		"having happened. If you have enough information to act, call the tool now; if you don't, "
-		"ask the specific question you need answered instead of claiming you're already acting.";
+		"ask the specific question you need answered instead of claiming you're already acting. "
+		"Every tool result has an \"ok\" field - that is the ONLY thing that tells you whether the "
+		"action actually succeeded, never assume success from a tool simply having run, from the "
+		"presence of output, or from a plausible-looking exit code deep in a JSON blob. If \"ok\" is "
+		"false, the action did NOT happen: read \"failure_reason\"/\"error\" and tell the user "
+		"honestly what went wrong, then either fix the call and retry or ask them how to proceed - "
+		"never report success anyway, and never invent a file path, output location, or result you "
+		"did not get back from a tool. If you have not called a tool for something, you have not "
+		"done it, no matter how confident that sounds - use get_cwd/list_dir/stat_path to check "
+		"where something actually landed rather than guessing or making up a plausible-sounding path.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's
