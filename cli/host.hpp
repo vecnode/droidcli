@@ -38,11 +38,14 @@ struct HostConfig {
 		"vague description of what you attempted.";
 };
 
-// DroidHost is the headless agent daemon core: it owns the session state, the
-// Ollama text-gen seam, a ConnectorRegistry (generic http_peer / launched_process
-// peer config replacing the old hardcoded adapter/media-player knowledge), a
-// TaskQueue (persistent pending/running/done/failed task pipeline), and
-// centralised process control for launched_process connectors.
+// DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's
+// zeroclaw-runtime plays - see ARCHITECTURE.md's crate comparison): it owns
+// the session state, the provider seam (ai::ollama_client today, pluggable
+// per the provider-abstraction extension plan), a ConnectorRegistry
+// (generic http_peer / launched_process peer config replacing the old
+// hardcoded adapter/media-player knowledge), a TaskQueue (persistent
+// pending/running/done/failed task pipeline), and centralised process
+// control for launched_process connectors.
 class DroidHost {
 public:
 	void configure(const HostConfig& config);

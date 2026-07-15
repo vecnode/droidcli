@@ -458,46 +458,51 @@ targets — it is a role-by-role check of what droidcli already covers, what's
 partial, and what would be genuinely new work if droidcli grew toward the
 same capability set.
 
+The diagram below is drawn in the same three-tier shape as ZeroClaw's
+(External world → Edge → Core → external providers/OS), not the old
+"portable core vs. host" split from the Roadmap section above. That
+core-vs-host line is a real, load-bearing rule for *where new code physically
+goes* inside `src/`/`cli/` (see the Golden rule in `AGENTS.md`) — but it is an
+implementation detail, not the product's architecture, and conflating the two
+made droidcli look like it had no Core/Edge shape at all. It has one; `src/`
+and `cli/` are just how that shape is currently split across translation
+units, not where the tier boundaries are.
+
 ```mermaid
 flowchart LR
     subgraph EXT["External world"]
-        TUI_CLIENT["Interactive user\n(FTXUI TUI, in-process)"]
-        HTTP_CLIENT["HTTP clients\ncurl / scripts / future dashboards"]
-        OLLAMA["Ollama\nlocal LLM, :11434"]
-        OS["OS: filesystem, processes,\ninstalled apps, open windows"]
+        CLIENTS["CLI / TUI client · HTTP clients\n(curl, scripts, future dashboards)\nfuture: chat platforms, once a channel exists"]
     end
 
-    subgraph HOST["cli/ — droidcli host (transport, process, auth)"]
-        ENTRY["droidcli.cpp\nentrypoint, CLI flags, token resolution"]
-        DHOST["DroidHost\nagent_turn loop · tool dispatch ·\nConnectorRegistry · TaskQueue"]
-        GATEWAY["tools::MiniHttpServer + http_mount\nREST, bearer-token gate"]
-        TUI["cli/tui.cpp\nFTXUI TUI"]
-        PROC["ProcessManager · app_index ·\nwindow_list · command_runner ·\nfilesystem_tools"]
-        ENTRY --> DHOST
-        DHOST --> GATEWAY
-        DHOST --> TUI
-        DHOST --> PROC
+    subgraph EDGE["Edge — talk to the outside"]
+        GATEWAY["droidcli-gateway\ntools::MiniHttpServer + http_mount\nREST, bearer-token gate"]
+        CHANNELS["droidcli-channels (planned — Phase 4)\nmessaging connectors, only once\na specific channel is requested"]
     end
 
-    subgraph CORE["src/ — portable core (no transport, no I/O)"]
-        CONNECTOR["net::Connector\ngeneric peer registry\n(http_peer | launched_process)"]
-        TASKS["app::TaskQueue\npersistent task state"]
-        AI["ai::ollama_client +\nlanguage_runtime\nsingle-provider tool-calling"]
-        INTENT["intent::open_intent\ndeterministic phrase recognizer"]
-        SESSION["session · notify · core/types"]
+    subgraph CORE["Core"]
+        RUNTIME["droidcli-runtime\nDroidHost::agent_turn loop · tool dispatch ·\nConnectorRegistry · TaskQueue"]
+        MEMORY["droidcli-memory\nagent_transcript_\n(planned: SQLite, Phase 2)"]
+        CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · droidcli_state.json"]
+        PROVIDERS["droidcli-providers\nai::ollama_client + language_runtime\n(Ollama today; pluggable via Phase 1)"]
+        TOOLS["droidcli-tools\nfilesystem_tools · command_runner ·\napp_index · window_list · intent"]
+        RUNTIME --> MEMORY
+        RUNTIME --> CONFIG
+        RUNTIME --> PROVIDERS
+        RUNTIME --> TOOLS
     end
 
-    HTTP_CLIENT --> GATEWAY
-    TUI_CLIENT --> TUI
-    GATEWAY --> CONNECTOR
-    GATEWAY --> TASKS
-    DHOST --> AI
-    DHOST --> INTENT
-    DHOST --> SESSION
-    AI --> OLLAMA
-    PROC --> OS
-    DHOST -->|"launch/stop/call"| CONNECTOR
-    CONNECTOR -->|"http_peer / launched_process"| OS
+    LLM["LLM providers\nOllama (today) ·\nfuture: Anthropic / OpenAI / ..."]
+    OS["Filesystem · shell ·\ninstalled apps · processes"]
+
+    CLIENTS --> GATEWAY
+    CLIENTS -.->|"once built"| CHANNELS
+    GATEWAY <--> RUNTIME
+    CHANNELS <-.-> RUNTIME
+    PROVIDERS --> LLM
+    TOOLS --> OS
+
+    classDef planned stroke-dasharray: 5 5;
+    class CHANNELS planned;
 ```
 
 ### Crate-by-crate mapping
@@ -564,6 +569,194 @@ intentionally out of scope — see the "No engine code" and "droidcli does not
 consume MCP servers" guardrails in `AGENTS.md`. Nothing above should be read
 as a commitment to build all five; it is a menu, ordered by how much later
 work each one unblocks, for when a specific product need asks for it.
+
+---
+
+## Extension implementation plan (ZeroClaw parity)
+
+Concrete, phased version of the ranked list above. Each phase is scoped to
+land independently — no phase requires a later one to compile, pass
+`ctest`, or be useful on its own. Do not start a phase before the previous
+one has landed; the ordering exists because each phase's interface choices
+constrain the next (the memory store in Phase 2 is keyed by whatever Phase
+1's provider abstraction settles on, the log schema in Phase 3 is the
+foundation Phase 5's attribution rides on).
+
+### Phase 1 — Provider abstraction
+
+**Goal:** make `ollama_client.cpp` an implementation of an interface rather
+than the only possible shape `agent_turn` can talk to, so a second LLM
+backend is additive.
+
+**Deliverables:**
+- New `src/ai/model_provider.hpp`: an abstract interface (`ModelProvider`)
+  with the shape `agent_turn` actually needs — build a request from
+  `(transcript, tools)`, parse a response into `(assistant_text, tool_calls,
+  error)`. Keep it minimal; do not pre-build fields no current caller uses.
+- `ai::ollama_client` reimplemented as `OllamaProvider : ModelProvider` —
+  `build_ollama_chat_request`/`parse_ollama_chat_response` become the private
+  guts of that class, not a change to their logic.
+- `DroidHost` holds a `std::unique_ptr<ai::ModelProvider>` (or a
+  `core::Array` of them once Phase 1.5 below is relevant) instead of calling
+  `ai::build_ollama_chat_request`/`ai::parse_ollama_chat_response` directly
+  in `agent_turn` (`cli/host.cpp`).
+- `tests/model_provider_test.cpp`: the existing `ollama_client_test.cpp`
+  assertions still apply, now exercised through the `ModelProvider`
+  interface — this phase should not change what's tested, only how it's
+  reached. (Note: `ollama_client_test` currently has a real, pre-existing
+  bug — the tool-role message content isn't showing up in the built request
+  body, see the standalone task filed for it. Fix that independently of this
+  phase; don't let this refactor inherit or mask it.)
+
+**Explicit non-goal:** do not add a second provider (Anthropic/OpenAI) in
+this phase. The interface should be validated against the one real
+implementation (Ollama) first — adding a second provider before the
+interface has been proven against one real caller (`agent_turn`) risks
+designing the trait around two APIs' lowest common denominator instead of
+what droidcli actually needs.
+
+**Acceptance:** `ctest` green, `agent_turn` behavior unchanged (same
+requests/responses over `/api/agent/turn`), `HostConfig` gains no new
+required fields (Ollama stays the default/only configured provider).
+
+### Phase 2 — Persistent memory (SQLite)
+
+**Goal:** `agent_transcript_` survives a restart, and is queryable, without
+adding a runtime dependency droidcli doesn't already accept.
+
+**Why SQLite, matching `zeroclaw-infra`'s choice:** it is a single header +
+source amalgamation (no separate service, no network port), which fits the
+"no Python runtime, no node_modules, no sidecar interpreter" distribution
+constraint in the Roadmap section above better than any client/server store
+would.
+
+**Deliverables:**
+- `third_party/sqlite/` (amalgamation, vendored like FFmpeg is — git-ignored
+  build artifacts, but the amalgamation source itself can be committed since
+  it's public-domain and small, unlike FFmpeg).
+- `src/app/memory_store.hpp`/`.cpp`: `MemoryStore` wrapping a SQLite
+  connection, schema `(session_id, hop_index, role, content, created_at)`.
+  Pure-ish core module in spirit, but this is real file I/O — per the golden
+  rule in `AGENTS.md`, the SQLite calls themselves belong behind a host
+  callback (`MemoryTransportCallbacks` mirroring
+  `LanguageAiTransportCallbacks`'s pattern) so `src/` stays link-free of the
+  SQLite library; the host (`cli/`) owns the actual `sqlite3_open`/exec
+  calls.
+- `DroidHost::agent_turn` appends to the store on every hop instead of (or
+  in addition to, during a transition period) `agent_transcript_`; `clear:
+  true` in the request body becomes "start a new session_id" rather than
+  wiping in-memory state.
+- New route: `GET /api/agent/history?session_id=...` (or the default/current
+  session if omitted) for inspecting past turns — this is the "queryable"
+  half of the goal, and it's what makes this phase worth doing on its own
+  rather than bundled with Phase 3.
+- `tests/memory_store_test.cpp`: open an in-memory SQLite DB
+  (`:memory:`, no filesystem I/O, keeps this network/GPU/file-free like the
+  rest of `tests/`), append/read a transcript, verify ordering and content.
+
+**Explicit non-goal:** no embeddings, no vector retrieval. That is
+meaningfully separate work (an embedding model dependency) and nothing in
+droidcli today needs semantic recall over old conversations — only durability
+across restarts and the ability to inspect history.
+
+**Acceptance:** killing and restarting `droidcli` mid-conversation and
+sending another `/api/agent/turn` with the same `session_id` continues the
+same transcript; `ctest` green including the new memory test.
+
+### Phase 3 — Structured JSONL logging
+
+**Goal:** replace `append_app_log()`'s plain-text `logs/log.txt` lines with
+a structured record any tool can parse, matching `zeroclaw-log`'s shape
+without adopting Rust macros droidcli has no equivalent for.
+
+**Deliverables:**
+- `AppLogEntry` (`cli/host.hpp`) gains a stable schema written as one JSON
+  object per line: `{"ts":"...", "channel":"...", "direction":"...",
+  "summary":"...", "success":bool, "session_id":"...", "hop":N}` — the last
+  two fields are why this phase comes after Phase 2, not before: attribution
+  to a specific memory-store session is only meaningful once sessions exist.
+- `append_app_log()`'s body changes to build this JSON line instead of the
+  current `[timestamp] [channel] [direction] summary` format; the in-memory
+  `app_log_`/`/api/app/log` JSON response shape is unaffected (it already
+  returns structured fields — only the *file* format changes).
+- The TUI's `log_view` (`cli/tui.cpp`) already renders from the same
+  in-memory `AppLogEntry` list via `/api/app/log`, not by re-parsing
+  `logs/log.txt` — so this phase does not touch TUI rendering at all,
+  confirm that stays true rather than accidentally coupling them.
+- `logs/log.txt` becomes `logs/log.jsonl` (rename, since the format
+  changed); update the `logs/README.md` git-ignore note.
+
+**Explicit non-goal:** no `Observer` trait/bridge yet — that's a
+consumer-side abstraction (something subscribing to log events) with no
+concrete subscriber to build it against yet. Land the schema first; add a
+subscription mechanism when something (a future dashboard, a future channel)
+actually needs to observe log events instead of polling `/api/app/log`.
+
+**Acceptance:** `logs/log.jsonl` is valid JSONL (each line parses standalone
+with a standard JSON parser); `ctest` green; no behavior change visible in
+the TUI or `/api/app/log`.
+
+### Phase 4 — Channel-as-connector (only once a channel is actually wanted)
+
+**Goal:** prove that a messaging channel (Discord/Slack/Telegram/…) fits as
+a `Connector` kind rather than a parallel subsystem, without building one
+speculatively.
+
+**Do not start this phase until a specific channel is actually requested.**
+Unlike Phases 1–3 and 5, this phase has no value in the abstract — building
+"channel support" with no channel to validate it against risks designing
+around imagined requirements instead of a real integration's actual
+constraints (auth flow, message framing, rate limits all differ per
+platform).
+
+**When it is requested, the shape is:**
+- A new `Connector::kind` value (e.g. `"messaging_peer"`) in
+  `net::connector.hpp`/`.cpp` — config carries whatever that platform's
+  client library needs (bot token, workspace ID), stored the same
+  never-echo-back way as any other secret (`CLAUDE.md`).
+- Inbound: a webhook route in `cli/http_mount.cpp` (e.g.
+  `POST /api/channels/{id}/webhook`) that maps an incoming platform message
+  to an `agent_turn` call and posts the reply back via that platform's send
+  API — reusing `agent_turn`'s existing tool-calling loop rather than a
+  second one.
+- Outbound-only platforms (no webhook, poll-based) become a `TaskQueue`
+  producer instead — a recurring task that polls the platform's API and
+  enqueues an `agent_turn`-shaped unit of work, reusing Phase-2's
+  session/history model to keep each external conversation as its own
+  `session_id`.
+
+**Acceptance (once a channel is chosen):** the new connector kind requires
+no changes to `DroidHost::agent_turn`, `execute_agent_tool`, or the core
+`Connector` struct's existing fields — only a new `kind` branch in whatever
+dispatch already switches on `kind` (`launch_connector`/`call_connector` in
+`cli/host.cpp`). If it requires more than that, the abstraction from this
+plan was wrong and needs revisiting before writing a second channel.
+
+### Phase 5 — Spawn attribution
+
+**Goal:** every background `std::thread` in the codebase (the TUI's
+poller/chat-worker threads today; more will exist once Phase 4 adds
+poll-based channel producers) is tagged with what spawned it and why, and
+that tag shows up in the Phase-3 structured log.
+
+**Deliverables:**
+- `src/core/spawn.hpp`: a thin `droidcli::spawn(name, fn)` wrapper around
+  `std::thread` construction — not a thread pool, not a scheduler, just a
+  named-thread constructor that logs "spawned"/"joined"/"threw" against the
+  Phase-3 JSONL schema's `channel`/`summary` fields under a new `"thread"`
+  channel value.
+- Replace the two `std::thread` constructions in `cli/tui.cpp` (`poller`,
+  `chat_worker`) with `droidcli::spawn("tui.poller", ...)` /
+  `droidcli::spawn("tui.chat_worker", ...)`. No behavior change — the
+  existing hand-off patterns (`PolledState`, `ChatWork`) stay exactly as
+  they are; this phase only wraps the construction call.
+
+**Explicit non-goal:** no thread pool, no work-stealing, no async runtime.
+droidcli's threading is deliberately minimal (one poller, one chat worker at
+a time) — this phase adds visibility, not a new concurrency model.
+
+**Acceptance:** `logs/log.jsonl` shows a `"thread"`-channel entry for every
+poller/chat-worker start and stop; `ctest` green; TUI behavior unchanged.
 
 ---
 

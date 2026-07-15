@@ -47,7 +47,15 @@ core::String strip_leading_courtesy(core::String message)
 		const core::String lower_message = to_lower_ascii(message);
 		static const char* kCourtesyPrefixes[] = {
 			"could you please ", "can you please ", "would you please ",
-			"could you ", "can you ", "would you ", "please ", "hey "};
+			"could you ", "can you ", "would you ", "please ", "hey ",
+			// Real-world lead-ins observed in practice - "Ok I want you to
+			// open Blender" should recognize the same intent as "open
+			// Blender" once these are peeled off one at a time (the outer
+			// while loop above re-runs this whole list after each strip, so
+			// "ok " then "i want you to " both fire in turn).
+			"i want you to ", "i would like you to ", "i'd like you to ",
+			"i want to ", "i would like to ", "i'd like to ",
+			"so, ", "so ", "okay, ", "okay ", "ok, ", "ok ", "well, ", "well "};
 		for (const char* prefix : kCourtesyPrefixes)
 		{
 			const core::String prefix_str(prefix);
