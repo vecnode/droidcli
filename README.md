@@ -15,14 +15,14 @@ Core capabilities:
 - Generic connectors (http_peer or launched_process, PID-tracked) and a persistent task queue
 - Structured JSONL application log, with session and background-thread attribution
 - Bearer-token authentication on the whole HTTP API by default
-- Media decode (FFmpeg-backed)
+- Media decode [FFmpeg](https://www.ffmpeg.org/)
 
 Full design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
  Working in the repo as an agent: [AGENTS.md](./AGENTS.md).
 
 ## Build
 
-Requires CMake 3.20+ and Git. FFmpeg is downloaded automatically on first configure.
+Requires CMake 3.20+ and Git. [FFmpeg](https://www.ffmpeg.org/) is downloaded automatically on first configure.
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release

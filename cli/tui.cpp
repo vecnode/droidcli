@@ -149,6 +149,31 @@ std::vector<TaskRow> parse_tasks(const std::string& json)
 	return rows;
 }
 
+struct ToolRow {
+	std::string name;
+	std::string description;
+};
+
+// The agent's fixed tool set (GET /api/agent/tools) - fetched once at
+// startup, not polled like tasks/connectors, since it never changes while
+// droidcli is running (agent_tool_definitions() is a fixed list built at
+// call time from DroidHost's own methods, not runtime state).
+std::vector<ToolRow> parse_tools(const std::string& json)
+{
+	std::vector<ToolRow> rows;
+	for (const std::string& object : extract_json_object_array(json, "tools"))
+	{
+		ToolRow row;
+		row.name = net::extract_json_string_field(object, "name");
+		row.description = net::extract_json_string_field(object, "description");
+		if (!row.name.empty())
+		{
+			rows.push_back(row);
+		}
+	}
+	return rows;
+}
+
 std::vector<std::string> parse_log_lines(const std::string& json)
 {
 	std::vector<std::string> lines;
@@ -252,19 +277,41 @@ struct ChatWork {
 	// (resuming a session across a restart - see "Persistent memory" in
 	// ARCHITECTURE.md). Empty means "no update this round", not "clear it".
 	std::string session_id;
+	// Set whenever a response carries a "pending_tool_call" - drained into
+	// the UI thread's pending_tool_approval the same way session_id is, so
+	// the TUI shows the proposal and waits for a yes/no instead of treating
+	// the turn as finished. See PendingToolApproval below.
+	bool has_pending_tool_call = false;
+	std::string pending_tool_name;
+	std::string pending_tool_args;
 };
 
-// Extracts DroidHost::agent_turn()'s response ({"ok":bool,"assistant":"...",
-// "session_id":"...","actions":[{"tool":"...","arguments_json":"...",
-// "result_json":"..."}],"error":"..."}) into chat lines: the assistant's
-// reply plus one line per tool call made along the way. out_session_id is
-// set whenever the response carries one (including on some error paths -
-// see agent_turn()'s doc comment in cli/host.hpp) so the caller can persist
-// it for resuming this conversation later.
-std::vector<ChatEntry> parse_agent_turn_response(const std::string& json, std::string& out_session_id)
+// Extracts DroidHost::agent_turn()/agent_tool_decision()'s response
+// ({"ok":bool,"assistant":"...","session_id":"...","actions":[{"tool":"...",
+// "arguments_json":"...","result_json":"..."}],"pending_tool_call":
+// {"tool":"...","arguments_json":"..."},"error":"..."}) into chat lines: one
+// line per tool call already executed this turn, plus either the assistant's
+// final reply or (if the loop paused instead of finishing) a proposal line
+// asking the user to approve/decline the pending call - never both, since a
+// paused response carries no "assistant" text yet. out_session_id is set
+// whenever the response carries one (including on some error paths - see
+// agent_turn()'s doc comment in cli/host.hpp) so the caller can persist it
+// for resuming this conversation later. out_has_pending_tool_call/
+// out_pending_tool_name/out_pending_tool_args are set only when the loop
+// paused - the caller (run_chat_turn/run_tool_decision below) stages them
+// into ChatWork so the UI thread can start a PendingToolApproval.
+std::vector<ChatEntry> parse_agent_turn_response(
+	const std::string& json,
+	std::string& out_session_id,
+	bool& out_has_pending_tool_call,
+	std::string& out_pending_tool_name,
+	std::string& out_pending_tool_args)
 {
 	std::vector<ChatEntry> entries;
 	out_session_id = net::extract_json_string_field(json, "session_id");
+	out_has_pending_tool_call = false;
+	out_pending_tool_name.clear();
+	out_pending_tool_args.clear();
 
 	bool ok = false;
 	net::extract_json_bool_field(json, "ok", ok);
@@ -280,6 +327,24 @@ std::vector<ChatEntry> parse_agent_turn_response(const std::string& json, std::s
 		const std::string tool = net::extract_json_string_field(action, "tool");
 		const std::string args = net::extract_json_string_field(action, "arguments_json");
 		entries.push_back(ChatEntry{"tool", "called " + tool + "(" + args + ")"});
+	}
+
+	// build_pending_tool_call_response() (cli/host.cpp) always writes
+	// "pending_tool_call" before "actions" in the response, so slicing from
+	// its key onward and taking the first "tool"/"arguments_json" match
+	// lands on the pending call's own fields, not a later action's -
+	// matches this file's existing first-occurrence JSON field lookups
+	// (extract_json_object_array et al.), not a real parser.
+	const size_t pending_index = json.find("\"pending_tool_call\":");
+	if (pending_index != std::string::npos)
+	{
+		const std::string pending_object = json.substr(pending_index);
+		out_has_pending_tool_call = true;
+		out_pending_tool_name = net::extract_json_string_field(pending_object, "tool");
+		out_pending_tool_args = net::extract_json_string_field(pending_object, "arguments_json");
+		entries.push_back(ChatEntry{"info",
+			"[AGENT WANTS TO] " + out_pending_tool_name + "(" + out_pending_tool_args + ") - approve? (yes/no, or say why not)"});
+		return entries;
 	}
 
 	const std::string assistant = net::extract_json_string_field(json, "assistant");
@@ -362,6 +427,21 @@ std::string describe_pending_open_prompt(const PendingOpen& pending)
 	return "'" + pending.app_name + "' isn't in the installed-apps index, but I can still try to open it "
 		"directly by that name. Open it? (yes/no)";
 }
+
+// Mirrors DroidHost::agent_turn()/agent_tool_decision()'s "pending_tool_call"
+// field - set whenever the agent's tool-calling loop pauses on a
+// side-effecting tool (run_command, run_ffmpeg, write_file,
+// open_application, launch/stop_connector, enqueue_task; see
+// tool_call_requires_approval in cli/host.cpp) instead of running it. The
+// TUI holds this the same way it holds PendingOpen: the next Enter is
+// treated as the yes/no (or free-text decline reason) that resolves it,
+// not as a new chat message.
+struct PendingToolApproval {
+	bool active = false;
+	std::string session_id;
+	std::string tool;
+	std::string arguments_json;
+};
 
 // Parses a plain JSON array of strings, e.g. {"models":["a","b"]}. Distinct
 // from extract_json_object_array above, which walks an array of {...}
@@ -635,10 +715,13 @@ bool try_resolve_model_selection(
 }
 
 // Where the TUI remembers which agent_turn session to resume next launch -
-// repo-root-relative like droidcli_state.json/droidcli_memory.sqlite3,
-// git-ignored (see .gitignore). Plain text, one line: just the session id,
-// no JSON needed for a single scalar.
-const char* kLastSessionIdFile = "droidcli_last_session.txt";
+// alongside droidcli_state.json/droidcli_memory.sqlite3 in db/ (see
+// db/README.md), git-ignored (see .gitignore). db/ is created by
+// DroidHost::initialize(), called before run_tui() (see main() in
+// cli/droidcli.cpp), so it already exists by the time this is touched.
+// JSON, matching every other piece of droidcli's persisted state, rather
+// than a bare .txt with an implicit one-line format.
+const char* kLastSessionIdFile = "db/droidcli_last_session.json";
 
 std::string read_last_session_id()
 {
@@ -647,9 +730,9 @@ std::string read_last_session_id()
 	{
 		return {};
 	}
-	std::string line;
-	std::getline(file, line);
-	return trim(line);
+	std::ostringstream buffer;
+	buffer << file.rdbuf();
+	return trim(net::extract_json_string_field(buffer.str(), "session_id"));
 }
 
 void write_last_session_id(const std::string& session_id)
@@ -657,7 +740,7 @@ void write_last_session_id(const std::string& session_id)
 	std::ofstream file(kLastSessionIdFile, std::ios::trunc);
 	if (file)
 	{
-		file << session_id << std::endl;
+		file << '{' << net::json_string_field("session_id", session_id) << '}' << std::endl;
 	}
 }
 
@@ -724,11 +807,21 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	std::vector<std::string> connector_entries;
 	int selected_connector = 0;
 	std::vector<TaskRow> tasks;
+	// Fetched once here (not part of PolledState's periodic refresh) since
+	// the tool set is fixed for the process lifetime - see parse_tools().
+	const std::vector<ToolRow> tools = parse_tools(host.build_agent_tools_json());
 	std::vector<std::string> log_lines;
 	std::vector<ChatEntry> chat_entries;
+	// Resizable-split pane widths (columns) - mutated directly by
+	// ResizableSplitLeft/Right on mouse drag, see the split construction below.
+	int left_pane_width = 36;
+	int right_pane_width = 30;
 	std::string chat_input_text;
 	bool agent_turn_in_flight = false;
 	PendingOpen pending_open;
+	// Set whenever an agent_turn()/agent_tool_decision() response pauses on
+	// a side-effecting tool call - see PendingToolApproval above.
+	PendingToolApproval pending_tool_approval;
 	// The active agent_turn session (see "Persistent memory" in
 	// ARCHITECTURE.md) - included in every real chat request once known, so
 	// a restarted TUI resumes the same conversation instead of silently
@@ -843,6 +936,26 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return vbox(rows) | frame | flex;
 	});
 
+	Component tools_view = Renderer([&]() -> Element
+	{
+		Elements rows;
+		for (const ToolRow& tool : tools)
+		{
+			rows.push_back(hbox({
+				text(tool.name) | bold | size(WIDTH, EQUAL, 20),
+				paragraph(tool.description) | flex,
+			}));
+		}
+		if (tools.empty())
+		{
+			rows.push_back(text("(no tools reported)") | dim);
+		}
+		return vbox(rows) | frame | flex;
+	});
+
+	// Not currently mounted in the layout (see right_column below, reserved
+	// for future functionality) - kept defined since the App Log view is the
+	// obvious first thing to place there once that pane's purpose is decided.
 	Component log_view = Renderer([&]() -> Element
 	{
 		// paragraph() (not text()) so a long log line wraps within the panel's
@@ -945,6 +1058,39 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// "error" chat entry, never propagate out - an uncaught exception on a
 	// detached thread calls std::terminate() immediately and takes the whole
 	// process down, which is exactly the crash this replaces.
+
+	// Shared tail for both a normal chat turn (run_chat_turn below) and a
+	// tool-approval decision (run_tool_decision below): parses one
+	// agent_turn()/agent_tool_decision() response into chat entries and
+	// stages its session_id/pending-tool-call fields into chat_work, so the
+	// two call sites don't duplicate that logic.
+	auto ingest_agent_response = [&](const std::string& response_json, std::vector<ChatEntry>& results)
+	{
+		std::string response_session_id;
+		bool has_pending_tool_call = false;
+		std::string pending_tool_name;
+		std::string pending_tool_args;
+		for (const ChatEntry& entry : parse_agent_turn_response(
+			response_json, response_session_id, has_pending_tool_call, pending_tool_name, pending_tool_args))
+		{
+			results.push_back(entry);
+		}
+		if (!response_session_id.empty() || has_pending_tool_call)
+		{
+			std::lock_guard<std::mutex> lock(chat_work.mutex);
+			if (!response_session_id.empty())
+			{
+				chat_work.session_id = response_session_id;
+			}
+			if (has_pending_tool_call)
+			{
+				chat_work.has_pending_tool_call = true;
+				chat_work.pending_tool_name = pending_tool_name;
+				chat_work.pending_tool_args = pending_tool_args;
+			}
+		}
+	};
+
 	auto run_chat_turn = [&](std::string message, bool start_new_session)
 	{
 		std::vector<ChatEntry> results;
@@ -1105,18 +1251,51 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				}
 				request_body << '}';
 				const std::string response_json = host.agent_turn(request_body.str());
-
-				std::string response_session_id;
-				for (const ChatEntry& entry : parse_agent_turn_response(response_json, response_session_id))
-				{
-					results.push_back(entry);
-				}
-				if (!response_session_id.empty())
-				{
-					std::lock_guard<std::mutex> lock(chat_work.mutex);
-					chat_work.session_id = response_session_id;
-				}
+				ingest_agent_response(response_json, results);
 			}
+		}
+		catch (const std::exception& e)
+		{
+			results.push_back(ChatEntry{"error", std::string("internal error: ") + e.what()});
+		}
+		catch (...)
+		{
+			results.push_back(ChatEntry{"error", "internal error: unknown exception"});
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(chat_work.mutex);
+			for (ChatEntry& entry : results)
+			{
+				chat_work.pending_entries.push_back(std::move(entry));
+			}
+			chat_work.clear_in_flight = true;
+		}
+		screen.PostEvent(Event::Custom);
+	};
+
+	// Resolves a pending tool-call approval (POST /api/agent/tool_decision) -
+	// the same background-thread/try-catch/drain-to-chat_work shape as
+	// run_chat_turn above, since executing an approved tool (or resuming the
+	// model afterward) can block just as long as a normal chat turn.
+	auto run_tool_decision = [&](bool approved, std::string reason, std::string decision_session_id)
+	{
+		std::vector<ChatEntry> results;
+		try
+		{
+			std::ostringstream request_body;
+			request_body << '{' << net::json_bool_field("approved", approved);
+			if (!reason.empty())
+			{
+				request_body << ',' << net::json_string_field("reason", reason);
+			}
+			if (!decision_session_id.empty())
+			{
+				request_body << ',' << net::json_string_field("session_id", decision_session_id);
+			}
+			request_body << '}';
+			const std::string response_json = host.agent_tool_decision(request_body.str());
+			ingest_agent_response(response_json, results);
 		}
 		catch (const std::exception& e)
 		{
@@ -1145,6 +1324,44 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		{
 			if (agent_turn_in_flight)
 			{
+				return true;
+			}
+
+			// A gated tool call awaiting approval takes priority over
+			// everything else the next Enter could mean - the agent's loop is
+			// paused server-side and cannot continue until this is resolved.
+			// "yes"/"y" approves; anything else declines, using the reply
+			// text itself as the reason fed back to the model (empty for a
+			// bare "no"/"n"/"cancel", so the model just sees a plain refusal).
+			if (pending_tool_approval.active)
+			{
+				const std::string reply = trim(chat_input_text);
+				chat_input_text.clear();
+				if (!reply.empty())
+				{
+					chat_entries.push_back(ChatEntry{"user", reply});
+				}
+				const std::string lower_reply = to_lower(reply);
+				const bool approved = lower_reply == "yes" || lower_reply == "y";
+				const bool bare_decline = lower_reply == "no" || lower_reply == "n" || lower_reply == "cancel";
+				const std::string reason = (approved || bare_decline) ? std::string() : reply;
+				const std::string decision_session_id = pending_tool_approval.session_id;
+
+				chat_entries.push_back(ChatEntry{"info",
+					approved ? "Approved. Running..." : "Declined."});
+
+				agent_turn_in_flight = true;
+				pending_tool_approval = PendingToolApproval{};
+
+				if (chat_worker.joinable())
+				{
+					chat_worker.join();
+				}
+				chat_worker = droidcli::core::spawn(
+					"tui.chat_worker",
+					[run_tool_decision, approved, reason, decision_session_id]()
+					{ run_tool_decision(approved, reason, decision_session_id); },
+					thread_event_sink);
 				return true;
 			}
 
@@ -1289,32 +1506,53 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	});
 
 	// Only connector_menu and chat_input are focusable (Menu/Input); Tab
-	// cycles between them. Renderer-only panels (tasks/log/chat_log) never
-	// take focus, so they're rendered but not part of this container.
-	Component interactive = Container::Vertical({ connector_menu, chat_input });
-	Component root_container = interactive;
-
-	Component full_ui = Renderer(root_container, [&]() -> Element
+	// cycles between them. Renderer-only panels (tasks/tools/log/chat_log)
+	// never take focus. Each focusable component is wrapped in its own
+	// single-child Renderer(component, fn) below so it stays the sole
+	// focusable descendant of its pane - FTXUI's default ActiveChild()/
+	// Focusable() walk just passes through a single-child wrapper, so
+	// TakeFocus()/Focused() work the same as before despite the extra
+	// nesting the resizable-split layout introduces.
+	Component left_column = Renderer(connector_menu, [&]() -> Element
 	{
 		Element connectors_panel = window(text(" Connectors  (l=launch, s=stop) "), connector_menu->Render()) | flex;
 		Element tasks_panel = window(text(" Tasks "), tasks_view->Render()) | flex;
-		Element log_panel = window(text(" App Log "), log_view->Render()) | flex;
-		Element chat_panel = window(text(" Agent Chat  (Tab/Esc to leave, Enter to send) "),
-			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() })) | flex;
+		Element tools_panel = window(text(" Agent Tools "), tools_view->Render()) | flex;
+		return vbox({ connectors_panel, tasks_panel, tools_panel });
+	});
 
+	Component chat_column = Renderer(chat_input, [&]() -> Element
+	{
+		return window(text(" Agent Chat  (Tab/Esc to leave, Enter to send) "),
+			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() }));
+	});
+
+	// Reserved for future functionality - deliberately empty for now.
+	Component right_column = Renderer([]() -> Element
+	{
+		return window(text(" Reserved "), text("(future functionality)") | dim | center);
+	});
+
+	// Mouse-draggable panes: left column | chat (middle, gets remaining
+	// space) | right column. left_pane_width/right_pane_width are live state
+	// FTXUI mutates directly as the user drags a divider - must outlive
+	// screen.Loop() below, hence declared in this same function scope.
+	Component split = chat_column;
+	split = ResizableSplitLeft(left_column, split, &left_pane_width);
+	split = ResizableSplitRight(right_column, split, &right_pane_width);
+
+	Component full_ui = Renderer(split, [&]() -> Element
+	{
 		const std::string focus_hint = chat_input->Focused()
 			? "chat focused - Tab/Esc: to connectors   Enter: send   Ctrl+C: quit anytime"
-			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   j/k/arrows: move   y: copy chat";
+			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   j/k/arrows: move   y: copy chat   drag borders to resize";
 		const std::string session_line = current_session_id.empty()
 			? "session: (none yet - starts on your first message)"
 			: "session: " + current_session_id;
 		return vbox({
 			text(status_line) | bold,
 			text(session_line) | dim,
-			hbox({
-				vbox({ connectors_panel, tasks_panel }) | flex,
-				vbox({ log_panel, chat_panel }) | flex,
-			}) | flex,
+			split->Render() | flex,
 			text(focus_hint) | dim,
 		});
 	});
@@ -1342,6 +1580,17 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				current_session_id = chat_work.session_id;
 				write_last_session_id(current_session_id);
 				chat_work.session_id.clear();
+			}
+			if (chat_work.has_pending_tool_call)
+			{
+				pending_tool_approval.active = true;
+				// current_session_id was just updated above (if this response
+				// carried one) - the pending call always belongs to whichever
+				// session the turn that produced it just ran under.
+				pending_tool_approval.session_id = current_session_id;
+				pending_tool_approval.tool = chat_work.pending_tool_name;
+				pending_tool_approval.arguments_json = chat_work.pending_tool_args;
+				chat_work.has_pending_tool_call = false;
 			}
 			if (chat_work.clear_in_flight)
 			{

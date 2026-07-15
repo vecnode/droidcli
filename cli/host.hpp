@@ -8,6 +8,8 @@
 #include "app_index.hpp"
 #include "memory_store.hpp"
 #include "window_list.hpp"
+#include "system_info.hpp"
+#include "ffmpeg_tool.hpp"
 
 #include <ctime>
 #include <fstream>
@@ -32,8 +34,16 @@ struct HostConfig {
 		"sure of the exact name first, call find_application to resolve it, then open it - do "
 		"not stop to ask permission for an action the user already requested, only ask when a "
 		"search returns multiple ambiguous matches. Use list_open_windows to check what's "
-		"already running, run_command for one-shot shell work, and the filesystem tools "
-		"(read_file/write_file/list_dir/stat_path/get_cwd/which) for anything touching disk. "
+		"already running, run_command for one-shot shell work, run_ffmpeg for media "
+		"transcode/convert/clip/extract/thumbnail work (it resolves the ffmpeg binary for "
+		"you - always pass -y since there's no interactive prompt to answer), and the "
+		"filesystem tools (read_file/write_file/list_dir/stat_path/get_cwd/which) for "
+		"anything touching disk. Some tools (run_command, run_ffmpeg, write_file, "
+		"open_application, launch_connector, stop_connector, enqueue_task) are side-effecting, "
+		"so the host itself pauses and shows the user the exact call before running it - this "
+		"happens automatically, you don't need to ask permission yourself first. If a tool "
+		"result says the user declined, don't just retry the same call - explain what you were "
+		"trying to do and ask what they'd prefer instead. "
 		"Prefer acting over narrating: when a tool call can answer the question, call it, then "
 		"report the concrete result (e.g. a PID, a file's contents, a match list) rather than a "
 		"vague description of what you attempted.";
@@ -120,6 +130,13 @@ public:
 	// {"command":"...","work_dir":"...","timeout_ms":...}.
 	core::String run_command(const core::String& body);
 
+	// The ffmpeg actuator (POST /api/ffmpeg/run) - resolves the ffmpeg binary
+	// (see ffmpeg_tool.hpp) and runs it with `args` as a single raw
+	// argument string. body: {"args":"...","work_dir":"...","timeout_ms":...}
+	// (timeout_ms defaults to 120000, longer than run_command's, since
+	// encodes routinely run past 30s).
+	core::String run_ffmpeg_json(const core::String& body);
+
 	// Detached, fire-and-forget application launch (POST /api/open) - for
 	// GUI apps that don't exit on their own, distinct from run_command which
 	// blocks for completion. body: {"path_or_name":"...","args":"...","work_dir":"..."}.
@@ -167,6 +184,21 @@ public:
 	// body: {"name":"..."}. Resolves an executable against PATH.
 	core::String which_executable_json(const core::String& body);
 
+	// The host machine droidcli is actually running on (GET /api/system) -
+	// os_name/os_version/architecture/hostname/username/cwd, queried once at
+	// initialize() and cached (see system_info_). Distinct from
+	// build_status_json (droidcli's own session state), this is about the
+	// environment droidcli lives in.
+	core::String build_system_info_json() const;
+
+	// The fixed tool set agent_turn() can call (GET /api/agent/tools) - name,
+	// description, and JSON Schema parameters for every tool in
+	// agent_tool_definitions(), so a caller (the TUI's Tools panel, or any
+	// other channel) can list what the agent is capable of without
+	// duplicating that list. No arguments. Returns {"tools":[{"name":...,
+	// "description":...,"parameters_json_schema":...}]}.
+	core::String build_agent_tools_json() const;
+
 	// The tool-calling agent turn (POST /api/agent/turn). body is
 	// {"message":"...","clear":bool,"session_id":"..."}. Drives a bounded
 	// Ollama tool-calling loop against the fixed tool set declared in
@@ -180,7 +212,31 @@ public:
 	// brand new session id, ignoring any session_id in the same request.
 	// The response's "session_id" field is what a caller should hold onto
 	// to resume this conversation later.
+	//
+	// Side-effecting tools (see tool_call_requires_approval in host.cpp -
+	// run_command, run_ffmpeg, write_file, open_application, launch/
+	// stop_connector, enqueue_task) are gated: the moment the model requests
+	// one, the loop pauses instead of executing it and the response carries
+	// "pending_tool_call":{"tool":...,"arguments_json":...} instead of (or
+	// alongside an empty) "assistant" text - no side effect has happened
+	// yet. A caller resolves it via agent_tool_decision() before the
+	// conversation can continue. Read-only tools (list_dir, get_cwd,
+	// get_system_info, which, etc.) still auto-run without a pause.
 	core::String agent_turn(const core::String& body);
+
+	// Resolves the tool call agent_turn() is currently paused on (POST
+	// /api/agent/tool_decision). body: {"approved":bool,"session_id":"...",
+	// "reason":"..."} - session_id is optional (defaults to whichever call is
+	// pending) but recommended so a stale/mismatched approval from an old
+	// screen doesn't land on a newer pending call; reason is an optional
+	// free-text explanation fed back to the model when approved is false.
+	// Executes the tool (if approved) or records a "user declined" tool
+	// result (if not), then resumes the same bounded loop agent_turn() runs -
+	// the response has the same shape agent_turn() would return: either a
+	// normal completion, or another "pending_tool_call" if the model asks
+	// for a second gated tool before it's done. Returns {"ok":false,
+	// "error":"no tool call is awaiting a decision"} if nothing is pending.
+	core::String agent_tool_decision(const core::String& body);
 
 	// Loads one session's persisted message history (GET
 	// /api/agent/history?session_id=...) - session_id defaults to the
@@ -226,6 +282,59 @@ private:
 	// the JSON result text to feed back to the model as a "tool" message.
 	core::String execute_agent_tool(const core::String& tool_name, const core::String& arguments_json);
 
+	// One already-resolved tool call this turn, recorded for the final
+	// "actions" array in agent_turn()/agent_tool_decision()'s response -
+	// mirrors what used to be built directly into a JSON string in-line,
+	// but needs to be a real value type now since it has to survive a
+	// pause/resume round-trip through pending_tool_call_.
+	struct PendingToolActionRecord {
+		core::String tool;
+		core::String arguments_json;
+		core::String result_json;
+	};
+
+	// The single tool call agent_turn()'s loop is currently paused on,
+	// awaiting a decision via agent_tool_decision() - see run_agent_tool_loop.
+	// Single-slot (not a per-session map) because only one agent_turn/
+	// agent_tool_decision call is ever in flight at a time in this process,
+	// same assumption current_session_id_ already makes.
+	struct PendingAgentToolCall {
+		bool active = false;
+		core::String session_id;
+		int hop = 0;
+		// The full tool_calls list the model returned for `hop`; call_index
+		// is the offset of the call awaiting a decision - everything before
+		// it in this list already executed and is in `actions`.
+		core::Array<ai::ToolCall> tool_calls;
+		size_t call_index = 0;
+		core::Array<PendingToolActionRecord> actions;
+	};
+
+	// Shared tail of agent_turn() and agent_tool_decision(): drives the
+	// bounded (kMaxHops) tool-calling loop against `provider`/`tools`,
+	// starting at `hop`. resume_calls/resume_call_index/actions let a caller
+	// resume mid-hop after a decision was just made - pass an empty
+	// resume_calls (the default for a fresh agent_turn()) to start hop 0
+	// clean. Pauses and populates pending_tool_call_ instead of executing
+	// the moment it hits a call tool_call_requires_approval() gates.
+	core::String run_agent_tool_loop(
+		const core::String& session_id,
+		const core::Array<ai::ToolDefinition>& tools,
+		const ai::ModelProvider& provider,
+		int hop,
+		core::Array<ai::ToolCall> resume_calls,
+		size_t resume_call_index,
+		core::Array<PendingToolActionRecord> actions);
+
+	// Builds the same-shaped response agent_turn()/agent_tool_decision()
+	// return once they hit a gated call: "ok":true (nothing has failed - the
+	// turn is just paused) plus "pending_tool_call" naming the call awaiting
+	// a decision, and any "actions" already executed earlier in this turn.
+	static core::String build_pending_tool_call_response(
+		const core::String& session_id,
+		const ai::ToolCall& call,
+		const core::Array<PendingToolActionRecord>& actions_so_far);
+
 	// A short, sortable-enough id ("2026-07-15T12-30-00-4f2a") - readable in
 	// logs/history listings without needing a UUID library dependency.
 	static core::String generate_session_id();
@@ -245,6 +354,10 @@ private:
 	net::ConnectorRegistry connectors_;
 	app::TaskQueue tasks_;
 	core::Array<InstalledApp> installed_apps_;
+
+	// The host machine's OS/hostname/architecture, queried once in
+	// initialize() (see system_info.hpp) - not meant to change during a run.
+	SystemInfo system_info_;
 
 	// Persistent agent-turn history (see "Persistent memory" in
 	// ARCHITECTURE.md's extension plan) - memory_store_ is the durable
@@ -275,6 +388,10 @@ private:
 	// response and doesn't model a tool_calls -> tool-result -> follow-up
 	// hop cycle).
 	core::Array<ai::ChatMessage> agent_transcript_;
+
+	// Set only while a gated tool call is awaiting the user's decision - see
+	// PendingAgentToolCall and run_agent_tool_loop.
+	PendingAgentToolCall pending_tool_call_;
 
 	mutable std::mutex mutex_;
 };

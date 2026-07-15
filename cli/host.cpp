@@ -210,6 +210,24 @@ bool extract_json_int_field(const core::String& json, const core::String& field_
 	return true;
 }
 
+// Whether the agent-turn loop must pause and get the user's explicit
+// approval before executing this tool, rather than auto-running it. Only
+// side-effecting tools are gated - anything read-only (list_dir, get_cwd,
+// get_system_info, which, list_connectors, list_tasks, list_open_windows,
+// find_application, connector_status, read_file, stat_path, call_connector)
+// keeps auto-running, since gating those would only make the agent slower
+// to answer plain questions for no safety benefit.
+bool tool_call_requires_approval(const core::String& tool_name)
+{
+	return tool_name == "run_command"
+		|| tool_name == "run_ffmpeg"
+		|| tool_name == "write_file"
+		|| tool_name == "open_application"
+		|| tool_name == "launch_connector"
+		|| tool_name == "stop_connector"
+		|| tool_name == "enqueue_task";
+}
+
 } // namespace
 
 void DroidHost::configure(const HostConfig& config)
@@ -224,6 +242,12 @@ void DroidHost::initialize()
 		std::lock_guard<std::mutex> lock(mutex_);
 
 		droidcli::initialize_defaults();
+
+		// Queried once, up front, so every route/tool/log line that reports
+		// "where droidcli is running" (build_system_info_json, the
+		// get_system_info agent tool, the system prompt below) agrees with
+		// each other instead of re-querying the OS independently.
+		system_info_ = get_system_info();
 
 		// Durable session log: logs/log.jsonl accumulates across restarts so
 		// a crash or a bug report can be diagnosed after the fact, not just
@@ -240,6 +264,13 @@ void DroidHost::initialize()
 		if (log_file_)
 		{
 			log_file_ << "{" << net::json_string_field("event", "session_started") << ","
+				<< net::json_string_field("ts", make_full_log_timestamp()) << "}" << std::endl;
+			log_file_ << "{" << net::json_string_field("event", "system_detected") << ","
+				<< net::json_string_field("os_name", system_info_.os_name) << ","
+				<< net::json_string_field("os_version", system_info_.os_version) << ","
+				<< net::json_string_field("architecture", system_info_.architecture) << ","
+				<< net::json_string_field("hostname", system_info_.hostname) << ","
+				<< net::json_string_field("cwd", system_info_.cwd) << ","
 				<< net::json_string_field("ts", make_full_log_timestamp()) << "}" << std::endl;
 		}
 
@@ -272,7 +303,16 @@ void DroidHost::initialize()
 			language_ai_.set_ollama_config(ollama_config);
 			if (!config_.system_prompt.empty())
 			{
-				language_ai_.set_system_prompt(config_.system_prompt);
+				// Appended rather than baked into HostConfig::system_prompt's
+				// static default text, since system_info_ is only known once
+				// initialize() actually queries the OS.
+				const core::String prompt_with_system_info = config_.system_prompt
+					+ " You are currently running on " + system_info_.os_name
+					+ " " + system_info_.os_version + " (" + system_info_.architecture
+					+ "), hostname " + system_info_.hostname
+					+ ", working directory " + system_info_.cwd
+					+ " - call get_system_info if you need these details again mid-conversation.";
+				language_ai_.set_system_prompt(prompt_with_system_info);
 			}
 		}
 		else
@@ -297,9 +337,11 @@ void DroidHost::initialize()
 		// record_agent_message()/history routes degrade to in-memory-only
 		// behavior rather than crashing the daemon over it.
 		current_session_id_ = generate_session_id();
-		if (!memory_store_.open("droidcli_memory.sqlite3"))
+		std::error_code db_dir_error;
+		std::filesystem::create_directories("db", db_dir_error);
+		if (!memory_store_.open("db/droidcli_memory.sqlite3"))
 		{
-			append_app_log("host", "event", "warning: could not open droidcli_memory.sqlite3 - agent history will not persist across restarts", false);
+			append_app_log("host", "event", "warning: could not open db/droidcli_memory.sqlite3 - agent history will not persist across restarts", false);
 		}
 	}
 
@@ -1180,6 +1222,36 @@ core::String DroidHost::run_command(const core::String& body)
 	return stream.str();
 }
 
+core::String DroidHost::run_ffmpeg_json(const core::String& body)
+{
+	const core::String args = net::extract_json_string_field(body, "args");
+	const core::String work_dir = net::extract_json_string_field(body, "work_dir");
+	int32_t timeout_ms = 120000;
+	extract_json_int_field(body, "timeout_ms", timeout_ms);
+
+	if (args.empty())
+	{
+		return "{" + net::json_bool_field("launched", false) + ","
+			+ "\"exit_code\":0,"
+			+ net::json_string_field("stdout", "") + ","
+			+ net::json_string_field("stderr", "") + ","
+			+ net::json_string_field("error", "missing args") + "}";
+	}
+
+	const CommandRunResult result = run_ffmpeg(args, work_dir, timeout_ms);
+	append_app_log("ffmpeg", "out", args, result.error_message.empty());
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("launched", result.launched) << ',';
+	stream << "\"exit_code\":" << result.exit_code << ',';
+	stream << net::json_string_field("stdout", result.stdout_text) << ',';
+	stream << net::json_string_field("stderr", result.stderr_text) << ',';
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+}
+
 core::String DroidHost::open_application(const core::String& body)
 {
 	const core::String path_or_name = net::extract_json_string_field(body, "path_or_name");
@@ -1405,6 +1477,18 @@ core::String DroidHost::get_cwd_json() const
 	return "{" + net::json_string_field("cwd", get_current_working_directory()) + "}";
 }
 
+core::String DroidHost::build_system_info_json() const
+{
+	return "{"
+		+ net::json_string_field("os_name", system_info_.os_name) + ","
+		+ net::json_string_field("os_version", system_info_.os_version) + ","
+		+ net::json_string_field("architecture", system_info_.architecture) + ","
+		+ net::json_string_field("hostname", system_info_.hostname) + ","
+		+ net::json_string_field("username", system_info_.username) + ","
+		+ net::json_string_field("cwd", system_info_.cwd)
+		+ "}";
+}
+
 core::String DroidHost::which_executable_json(const core::String& body)
 {
 	const core::String name = net::extract_json_string_field(body, "name");
@@ -1537,6 +1621,20 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"\"name\":{\"type\":\"string\",\"description\":\"executable name, e.g. 'git' or 'python'\"}"
 		"},\"required\":[\"name\"]}"});
 
+	tools.push_back(ai::ToolDefinition{
+		"run_ffmpeg",
+		"Run the ffmpeg CLI for media transcode/convert/clip/extract/thumbnail work - the binary is resolved automatically (PATH, then $DROIDCLI_FFMPEG_ROOT), you don't need to know where it lives. args is the raw ffmpeg argument string exactly as you'd type it after 'ffmpeg', e.g. '-y -i input.mp4 -vf scale=1280:-1 output.mp4' or '-i in.wav -ar 16000 out.wav'. Always pass -y to overwrite outputs without prompting, since there is no interactive terminal to answer that prompt. Runs synchronously and returns captured stdout/stderr/exit_code - encodes can take a while, so raise timeout_ms for large files (default 120000ms).",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"args\":{\"type\":\"string\",\"description\":\"ffmpeg arguments, e.g. '-y -i input.mp4 output.webm'\"},"
+		"\"work_dir\":{\"type\":\"string\",\"description\":\"optional working directory\"},"
+		"\"timeout_ms\":{\"type\":\"integer\",\"description\":\"optional timeout in milliseconds, default 120000\"}"
+		"},\"required\":[\"args\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"get_system_info",
+		"Get the host machine droidcli is actually running on right now: OS name, OS version/build, CPU architecture, hostname, username, and current working directory. This was already queried once at startup and is in your system prompt, but call this if you need to double-check or report it precisely (e.g. the user asks 'what machine/OS is this'). Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
 	return tools;
 }
 
@@ -1614,9 +1712,43 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	{
 		return which_executable_json(arguments_json);
 	}
+	if (tool_name == "get_system_info")
+	{
+		return build_system_info_json();
+	}
+	if (tool_name == "run_ffmpeg")
+	{
+		return run_ffmpeg_json(arguments_json);
+	}
 
 	return "{" + net::json_bool_field("ok", false) + ","
 		+ net::json_string_field("error", "unknown tool: " + tool_name) + "}";
+}
+
+core::String DroidHost::build_agent_tools_json() const
+{
+	const core::Array<ai::ToolDefinition> tools = agent_tool_definitions();
+
+	std::ostringstream stream;
+	stream << "{\"tools\":[";
+	for (size_t index = 0; index < tools.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const ai::ToolDefinition& tool = tools[index];
+		stream << '{';
+		stream << net::json_string_field("name", tool.name) << ',';
+		stream << net::json_string_field("description", tool.description) << ',';
+		// Embedded as a raw JSON schema object (not string-escaped) since
+		// parameters_json_schema is already well-formed JSON - matches how
+		// Ollama receives it in the "tools" request field.
+		stream << "\"parameters\":" << (tool.parameters_json_schema.empty() ? "{}" : tool.parameters_json_schema);
+		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
 }
 
 core::String DroidHost::agent_turn(const core::String& body)
@@ -1708,15 +1840,116 @@ core::String DroidHost::agent_turn(const core::String& body)
 	const ai::OllamaProvider ollama_provider(ollama_config);
 	const ai::ModelProvider& provider = ollama_provider;
 
-	std::ostringstream actions_stream;
-	actions_stream << '[';
-	bool first_action = true;
+	return run_agent_tool_loop(session_id, tools, provider, 0, {}, 0, {});
+}
 
+core::String DroidHost::agent_tool_decision(const core::String& body)
+{
+	bool approved = false;
+	net::extract_json_bool_field(body, "approved", approved);
+	const core::String reason = net::extract_json_string_field(body, "reason");
+	const core::String requested_session_id = net::extract_json_string_field(body, "session_id");
+
+	core::String session_id;
+	ai::ToolCall decided_call;
+	core::Array<ai::ToolCall> tool_calls;
+	size_t call_index = 0;
+	int hop = 0;
+	core::Array<PendingToolActionRecord> actions;
+
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (!pending_tool_call_.active
+			|| (!requested_session_id.empty() && requested_session_id != pending_tool_call_.session_id))
+		{
+			return "{" + net::json_bool_field("ok", false) + ","
+				+ net::json_string_field("error", "no tool call is awaiting a decision") + "}";
+		}
+		session_id = pending_tool_call_.session_id;
+		tool_calls = pending_tool_call_.tool_calls;
+		call_index = pending_tool_call_.call_index;
+		hop = pending_tool_call_.hop;
+		actions = pending_tool_call_.actions;
+		decided_call = tool_calls[call_index];
+		pending_tool_call_ = PendingAgentToolCall{};
+	}
+
+	const core::String tool_result = approved
+		? execute_agent_tool(decided_call.name, decided_call.arguments_json)
+		: "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", reason.empty() ? "user declined this action" : "user declined: " + reason) + "}";
+
+	append_app_log("chat", "out",
+		core::String(approved ? "tool " : "tool declined ") + decided_call.name + "(" + decided_call.arguments_json + ") -> " + tool_result,
+		approved, session_id);
+	record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
+	actions.push_back(PendingToolActionRecord{decided_call.name, decided_call.arguments_json, tool_result});
+
+	ai::OllamaConfig ollama_config;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		ollama_config.base_url = config_.ollama_url;
+		ollama_config.model = config_.ollama_model;
+		ollama_config.enabled = true;
+	}
+	const core::Array<ai::ToolDefinition> tools = agent_tool_definitions();
+	const ai::OllamaProvider ollama_provider(ollama_config);
+	const ai::ModelProvider& provider = ollama_provider;
+
+	// resume_call_index is call_index + 1: the decision for tool_calls[call_index]
+	// is already resolved above (executed or declined, recorded, appended to
+	// actions) - run_agent_tool_loop's resume path continues with whatever
+	// comes after it in this hop, or moves on to the next hop if that was the
+	// last call.
+	return run_agent_tool_loop(session_id, tools, provider, hop, tool_calls, call_index + 1, actions);
+}
+
+core::String DroidHost::run_agent_tool_loop(
+	const core::String& session_id,
+	const core::Array<ai::ToolDefinition>& tools,
+	const ai::ModelProvider& provider,
+	int hop,
+	core::Array<ai::ToolCall> resume_calls,
+	size_t resume_call_index,
+	core::Array<PendingToolActionRecord> actions)
+{
+	constexpr int kMaxHops = 5;
 	core::String final_assistant_text;
 	bool budget_exhausted = false;
-	constexpr int kMaxHops = 5;
 
-	for (int hop = 0; hop < kMaxHops; ++hop)
+	// A non-empty resume_calls means we're continuing a hop that was already
+	// fetched from the model before an earlier call in it paused for
+	// approval - finish whatever's left in it before asking the model for
+	// anything new. A fresh agent_turn() always passes an empty array here,
+	// so this block is skipped entirely on a normal first call.
+	if (!resume_calls.empty())
+	{
+		for (size_t call_index = resume_call_index; call_index < resume_calls.size(); ++call_index)
+		{
+			const ai::ToolCall& call = resume_calls[call_index];
+			if (tool_call_requires_approval(call.name))
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				pending_tool_call_ = PendingAgentToolCall{true, session_id, hop, resume_calls, call_index, actions};
+				return build_pending_tool_call_response(session_id, call, actions);
+			}
+
+			const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
+			append_app_log("chat", "out",
+				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true, session_id);
+			record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
+			actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, tool_result});
+		}
+
+		if (hop == kMaxHops - 1)
+		{
+			budget_exhausted = true;
+			append_app_log("chat", "out", "tool-call budget exhausted after " + std::to_string(kMaxHops) + " hops", false, session_id);
+		}
+		++hop;
+	}
+
+	for (; hop < kMaxHops; ++hop)
 	{
 		core::Array<ai::ChatMessage> transcript_copy;
 		{
@@ -1761,24 +1994,29 @@ core::String DroidHost::agent_turn(const core::String& body)
 			break;
 		}
 
-		for (const ai::ToolCall& call : response.tool_calls)
+		bool paused = false;
+		size_t call_index = 0;
+		for (; call_index < response.tool_calls.size(); ++call_index)
 		{
+			const ai::ToolCall& call = response.tool_calls[call_index];
+			if (tool_call_requires_approval(call.name))
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				pending_tool_call_ = PendingAgentToolCall{true, session_id, hop, response.tool_calls, call_index, actions};
+				paused = true;
+				break;
+			}
+
 			const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
 			append_app_log("chat", "out",
 				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true, session_id);
-
 			record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
+			actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, tool_result});
+		}
 
-			if (!first_action)
-			{
-				actions_stream << ',';
-			}
-			first_action = false;
-			actions_stream << '{';
-			actions_stream << net::json_string_field("tool", call.name) << ',';
-			actions_stream << net::json_string_field("arguments_json", call.arguments_json) << ',';
-			actions_stream << net::json_string_field("result_json", tool_result);
-			actions_stream << '}';
+		if (paused)
+		{
+			return build_pending_tool_call_response(session_id, response.tool_calls[call_index], actions);
 		}
 
 		if (hop == kMaxHops - 1)
@@ -1788,8 +2026,6 @@ core::String DroidHost::agent_turn(const core::String& body)
 			append_app_log("chat", "out", "tool-call budget exhausted after " + std::to_string(kMaxHops) + " hops", false, session_id);
 		}
 	}
-
-	actions_stream << ']';
 
 	// A model can legitimately return an empty assistant_message with no
 	// tool_calls (seen in practice with a local Ollama model on some
@@ -1815,8 +2051,52 @@ core::String DroidHost::agent_turn(const core::String& body)
 	{
 		stream << net::json_bool_field("budget_exhausted", true) << ',';
 	}
-	stream << "\"actions\":" << actions_stream.str();
-	stream << '}';
+	stream << "\"actions\":[";
+	for (size_t index = 0; index < actions.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const PendingToolActionRecord& action = actions[index];
+		stream << '{';
+		stream << net::json_string_field("tool", action.tool) << ',';
+		stream << net::json_string_field("arguments_json", action.arguments_json) << ',';
+		stream << net::json_string_field("result_json", action.result_json);
+		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
+}
+
+core::String DroidHost::build_pending_tool_call_response(
+	const core::String& session_id,
+	const ai::ToolCall& call,
+	const core::Array<PendingToolActionRecord>& actions_so_far)
+{
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", true) << ',';
+	stream << net::json_string_field("session_id", session_id) << ',';
+	stream << "\"pending_tool_call\":{";
+	stream << net::json_string_field("tool", call.name) << ',';
+	stream << net::json_string_field("arguments_json", call.arguments_json);
+	stream << "},";
+	stream << "\"actions\":[";
+	for (size_t index = 0; index < actions_so_far.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const PendingToolActionRecord& action = actions_so_far[index];
+		stream << '{';
+		stream << net::json_string_field("tool", action.tool) << ',';
+		stream << net::json_string_field("arguments_json", action.arguments_json) << ',';
+		stream << net::json_string_field("result_json", action.result_json);
+		stream << '}';
+	}
+	stream << "]}";
 	return stream.str();
 }
 
