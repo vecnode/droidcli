@@ -124,14 +124,21 @@ registry entries under HKLM native + WOW6432Node + HKCU, resolving each
 entry's `DisplayIcon` or a shallow `InstallLocation` scan to an actual
 `.exe`; scanned once at `DroidHost::initialize()` and cached, not re-scanned
 per lookup - covers apps that never registered on PATH or in App Paths at
-all, e.g. Blender or KiCad - `POST /api/apps/find`), **`filesystem_tools`**
+all, e.g. Blender or KiCad - `POST /api/apps/find`), **`window_list`**
+(`list_open_windows()`, `EnumWindows` filtered to visible/titled top-level
+windows with owning process name + PID via `QueryFullProcessImageNameA` -
+the same set Alt+Tab shows; a live, uncached snapshot re-enumerated every
+call, unlike `app_index`'s scan-once - `GET /api/apps/open`),
+**`filesystem_tools`**
 (`read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/
 `which_executable`, `std::filesystem`-backed, no external dependency - `POST
 /api/fs/*`), and **`DroidHost::agent_turn`** (a bounded Ollama tool-calling
 loop over a fixed tool set - connectors, tasks, shell commands, app launches,
-and filesystem primitives - each tool implemented by calling back into
-`DroidHost`'s own methods, self-contained rather than delegating to another
-process or MCP server - `POST /api/agent/turn`).
+open-window queries, and filesystem primitives - each tool implemented by
+calling back into `DroidHost`'s own methods, self-contained rather than
+delegating to another process or MCP server; every hop (user message, tool
+call + result, final reply, and failure paths) is logged via
+`append_app_log()` under the `chat` channel - `POST /api/agent/turn`).
 
 ---
 
@@ -214,6 +221,7 @@ over HTTP, so it never needs the token.
 | `POST` | `/api/run` `[auth]` | Run a one-shot shell command — body `{"command":"...","work_dir":"...","timeout_ms":30000}` |
 | `POST` | `/api/open` `[auth]` | Launch a GUI application, detached (no wait, no output capture) — body `{"path_or_name":"...","args":"...","work_dir":"..."}` |
 | `POST` | `/api/apps/find` `[auth]` | Search the installed-apps index (scanned at startup) — body `{"query":"..."}`, returns `{"matches":[{"name":...,"path":...}]}` |
+| `GET` | `/api/apps/open` `[auth]` | Live snapshot of currently open windows — `{"windows":[{"title":...,"process_name":...,"pid":...}]}`, re-enumerated fresh on every call |
 | `POST` | `/api/fs/read` `[auth]` | Read a file — body `{"path":"...","max_bytes":65536}`, response reports `truncated` |
 | `POST` | `/api/fs/write` `[auth]` | Write/append a file — body `{"path":"...","content":"...","append":false}` |
 | `POST` | `/api/fs/list` `[auth]` | Non-recursive directory listing — body `{"path":"..."}` (omit for cwd) |

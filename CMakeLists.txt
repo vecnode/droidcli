@@ -95,6 +95,7 @@ add_executable(droidcli
     cli/http_mount.cpp
     cli/process_manager.cpp
     cli/tui.cpp
+    cli/window_list.cpp
     tools/mini_http_server.cpp
     tools/sync_http_client.cpp
 )

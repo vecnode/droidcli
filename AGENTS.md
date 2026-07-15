@@ -235,8 +235,26 @@ falls back to `DROIDCLI_API_TOKEN`, then a generated-and-printed random
 token — see README.md "Security"), `--daemon` (documented no-op — always runs
 in the foreground; use a process supervisor for true background operation),
 and `--headless` (skip the default FTXUI TUI, run the plain foreground
-daemon+HTTP-API loop only). The Ollama URL/model are runtime-editable via
-`POST /api/config` / `POST /api/ollama/config`.
+daemon+HTTP-API loop only). `--help`/`-h` prints usage and exits; `--version`/`-v`
+prints the version and exits - both short-circuit before any host/server
+setup. The Ollama URL/model are runtime-editable via `POST /api/config` /
+`POST /api/ollama/config`.
+
+**State persistence**: runtime-registered connectors (via `POST
+/api/connectors` or the agent, not `--config`) are saved to
+`droidcli_state.json` (repo-root-relative, git-ignored) on clean exit and
+reloaded on the next start, before `--config` is applied - `--config` entries
+win over a stale saved entry with the same id (`register_connector` replaces
+by id). Only a graceful exit (SIGINT/SIGTERM, or the TUI's `q`/Ctrl+C) reaches
+the save call at the end of `main()`; a forced kill loses unsaved state, same
+as any other daemon.
+
+**Durable logging**: every `append_app_log()` call (the same one behind
+`/api/app/log`) also writes to `logs/log.txt` (created automatically,
+git-ignored except `logs/README.md`), with a full date+time timestamp and a
+`=== droidcli session started ===` marker per run - unlike the in-memory,
+capped, per-session `app_log_`, this persists across restarts and crashes for
+after-the-fact debugging.
 
 **Centralised process control** lives in `cli/process_manager.{hpp,cpp}`
 (Windows Job Object / POSIX process group, so stop kills the whole tree; bare

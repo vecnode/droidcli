@@ -6,8 +6,10 @@
 #include "process_manager.hpp"
 #include "filesystem_tools.hpp"
 #include "app_index.hpp"
+#include "window_list.hpp"
 
 #include <ctime>
+#include <fstream>
 #include <mutex>
 
 namespace droidcli::cli {
@@ -111,6 +113,12 @@ public:
 	// body: {"query":"..."}. Returns {"matches":[{"name":...,"path":...}]}.
 	core::String find_applications_json(const core::String& body) const;
 
+	// Live snapshot of currently open windows and their PIDs (GET
+	// /api/apps/open) - re-enumerated fresh on every call, not cached like
+	// the installed-apps index, since "open right now" changes constantly.
+	// No arguments. Returns {"windows":[{"title":...,"process_name":...,"pid":...}]}.
+	core::String list_open_windows_json() const;
+
 	// Filesystem-aware agent tools (POST /api/fs/*) - droidcli executes these
 	// itself, no external process or MCP server involved.
 	// body: {"path":"...","max_bytes":...}. Caps read size (default 65536).
@@ -135,6 +143,10 @@ public:
 private:
 	void append_app_log(const core::String& channel, const core::String& direction, const core::String& summary, bool success);
 	static core::String make_log_timestamp();
+	// Full date+time (not just HH:MM:SS like make_log_timestamp) - the
+	// console/in-memory log only ever covers one running session, but
+	// logs/log.txt accumulates across restarts, so entries need a date too.
+	static core::String make_full_log_timestamp();
 	static bool should_emit_periodic_log(std::time_t now_utc, std::time_t& last_emit_utc, int32_t min_interval_seconds);
 
 	core::Array<ai::ToolDefinition> agent_tool_definitions() const;
@@ -163,6 +175,11 @@ private:
 	};
 
 	core::Array<AppLogEntry> app_log_;
+	// Durable session log (logs/log.txt) - every append_app_log() call also
+	// writes here, flushed immediately, so a crash doesn't lose history the
+	// in-memory app_log_ (capped, gone on restart) can't provide. Opened once
+	// in initialize(); a closed/never-opened stream is silently skipped.
+	std::ofstream log_file_;
 
 	// Dedicated multi-turn transcript for the agent tool-calling loop, kept
 	// separate from language_ai_ (LanguageAiRuntime is single-shot request/

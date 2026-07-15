@@ -199,10 +199,78 @@ void load_connectors_from_config(const std::string& path, droidcli::cli::DroidHo
 	}
 }
 
+// Runtime state (currently: registered connectors) persisted across
+// restarts, separately from --config: --config is operator-authored and
+// reloaded verbatim every run, this file is droidcli's own save of whatever
+// was registered at runtime (via POST /api/connectors or the agent) so it
+// isn't lost the moment the process exits. Same JSON shape as --config
+// ({"connectors":[...]}), so it reuses load_connectors_from_config() -
+// loaded first, with --config applied on top (register_connector replaces
+// by id, so --config entries win over a stale saved state for the same id).
+constexpr const char* kStateFilePath = "droidcli_state.json";
+
+void load_state_if_present(droidcli::cli::DroidHost& host)
+{
+	std::ifstream check(kStateFilePath);
+	if (!check.good())
+	{
+		return; // No prior state (e.g. first run) - not an error.
+	}
+	check.close();
+	load_connectors_from_config(kStateFilePath, host);
+	std::cout << "droidcli: restored saved state from " << kStateFilePath << std::endl;
+}
+
+void save_state(droidcli::cli::DroidHost& host)
+{
+	std::ofstream out(kStateFilePath, std::ios::trunc);
+	if (!out)
+	{
+		std::cerr << "droidcli: could not save state to " << kStateFilePath << std::endl;
+		return;
+	}
+	out << host.list_connectors_json();
+}
+
+void print_usage()
+{
+	std::cout <<
+		"droidcli " << droidcli::version_string << " - a self-contained CLI agent daemon\n"
+		"\n"
+		"Usage: droidcli [options]\n"
+		"\n"
+		"Options:\n"
+		"  --port <N>             HTTP listen port (default 30080)\n"
+		"  --config <path>        JSON file with a top-level \"connectors\" array, loaded at startup\n"
+		"  --token <value>        Bearer token for the HTTP API (else DROIDCLI_API_TOKEN env var, else generated)\n"
+		"  --no-ai                 Disable Ollama / /ai/chat and the agent tool-calling loop\n"
+		"  --ollama-url <url>      Ollama base URL (default http://127.0.0.1:11434)\n"
+		"  --ollama-model <name>   Ollama model name (default llama3.2)\n"
+		"  --headless              Skip the interactive TUI; run the plain foreground daemon loop only\n"
+		"  --daemon                Documented no-op - use a process supervisor for background operation\n"
+		"  --help, -h              Show this help and exit\n"
+		"  --version, -v           Show the version and exit\n"
+		"\n"
+		"Runtime-registered connectors are saved to " << kStateFilePath << " on exit and\n"
+		"restored on the next start; the durable session log is written to logs/log.txt.\n"
+		<< std::endl;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+	if (has_flag(argc, argv, "--help") || has_flag(argc, argv, "-h"))
+	{
+		print_usage();
+		return 0;
+	}
+	if (has_flag(argc, argv, "--version") || has_flag(argc, argv, "-v"))
+	{
+		std::cout << "droidcli " << droidcli::version_string << std::endl;
+		return 0;
+	}
+
 	droidcli::initialize_defaults();
 
 	const int port = parse_port(argc, argv, 30080);
@@ -232,6 +300,7 @@ int main(int argc, char** argv)
 	host.configure(host_config);
 	host.initialize();
 
+	load_state_if_present(host);
 	if (!config_path.empty())
 	{
 		load_connectors_from_config(config_path, host);
@@ -270,7 +339,7 @@ int main(int argc, char** argv)
 	std::cout << "  GET  /api/connectors/{id}/status   POST .../launch  .../stop  .../call   [Bearer token required]" << std::endl;
 	std::cout << "  GET  /api/tasks   POST /api/tasks   GET /api/tasks/{id}          [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/run                          [Bearer token required]" << std::endl;
-	std::cout << "  POST /api/open   POST /api/apps/find    [Bearer token required]" << std::endl;
+	std::cout << "  POST /api/open   POST /api/apps/find   GET /api/apps/open    [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/fs/read  /api/fs/write  /api/fs/list  /api/fs/stat  /api/fs/which  GET /api/fs/cwd   [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/agent/turn                   [Bearer token required]" << std::endl;
 	std::cout << "  GET  /api/ollama/setup-status          [Bearer token required]" << std::endl;
@@ -364,6 +433,7 @@ int main(int argc, char** argv)
 		}
 	}
 
+	save_state(host);
 	server.stop();
 	std::cout << "droidcli stopped." << std::endl;
 	return 0;

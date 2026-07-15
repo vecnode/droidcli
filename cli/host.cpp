@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -163,6 +164,21 @@ void DroidHost::initialize()
 		std::lock_guard<std::mutex> lock(mutex_);
 
 		droidcli::initialize_defaults();
+
+		// Durable session log: logs/log.txt accumulates across restarts so a
+		// crash or a bug report can be diagnosed after the fact, not just
+		// while the process happens to still be up. Created relative to the
+		// working directory droidcli was launched from - if that directory
+		// isn't writable, log_file_ just stays closed and append_app_log()
+		// silently skips the file write (console/in-memory logging still
+		// works either way).
+		std::error_code log_dir_error;
+		std::filesystem::create_directories("logs", log_dir_error);
+		log_file_.open("logs/log.txt", std::ios::app);
+		if (log_file_)
+		{
+			log_file_ << "=== droidcli session started " << make_full_log_timestamp() << " ===" << std::endl;
+		}
 
 		session_.active = true;
 		session_.map_name = "droidcli";
@@ -377,6 +393,13 @@ void DroidHost::append_app_log(
 	{
 		std::cerr << line << std::endl;
 	}
+
+	if (log_file_)
+	{
+		log_file_ << "[" << make_full_log_timestamp() << "] ["
+			<< entry.channel << "] [" << entry.direction << "] "
+			<< (success ? "ok " : "ERROR ") << entry.summary << std::endl;
+	}
 }
 
 core::String DroidHost::make_log_timestamp()
@@ -391,6 +414,21 @@ core::String DroidHost::make_log_timestamp()
 
 	char buffer[32] {};
 	std::strftime(buffer, sizeof(buffer), "%H:%M:%S", &local_time);
+	return buffer;
+}
+
+core::String DroidHost::make_full_log_timestamp()
+{
+	std::time_t raw_time = std::time(nullptr);
+	std::tm local_time {};
+#if defined(_WIN32)
+	localtime_s(&local_time, &raw_time);
+#else
+	localtime_r(&raw_time, &local_time);
+#endif
+
+	char buffer[32] {};
+	std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &local_time);
 	return buffer;
 }
 
@@ -1096,6 +1134,29 @@ core::String DroidHost::find_applications_json(const core::String& body) const
 	return stream.str();
 }
 
+core::String DroidHost::list_open_windows_json() const
+{
+	const core::Array<OpenWindowInfo> windows = cli::list_open_windows();
+
+	std::ostringstream stream;
+	stream << "{\"windows\":[";
+	for (size_t index = 0; index < windows.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const OpenWindowInfo& window = windows[index];
+		stream << '{';
+		stream << net::json_string_field("title", window.title) << ',';
+		stream << net::json_string_field("process_name", window.process_name) << ',';
+		stream << "\"pid\":" << window.pid;
+		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
+}
+
 core::String DroidHost::read_file(const core::String& body)
 {
 	const core::String path = net::extract_json_string_field(body, "path");
@@ -1262,6 +1323,11 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"},\"required\":[\"query\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
+		"list_open_windows",
+		"List every currently open, visible window on this machine right now - title, owning process name, and PID - the same set Alt+Tab would show. Use this to check whether an app is already running/open before deciding to launch it again, to find the PID of something the user is referring to, or to answer questions like 'what's open right now' or 'is <app> running'. This is a live snapshot (re-checked every call), not the installed-apps index (find_application) or the connector list.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
 		"open_application",
 		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. path_or_name is resolved against the Windows App Paths registry, then PATH, then the installed-apps index (find_application's data source) as a fallback, then as a direct path. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches from find_application, or a prior call failed to resolve it), ask the user to confirm rather than guessing.",
 		"{\"type\":\"object\",\"properties\":{"
@@ -1358,6 +1424,10 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	{
 		return find_applications_json(arguments_json);
 	}
+	if (tool_name == "list_open_windows")
+	{
+		return list_open_windows_json();
+	}
 	if (tool_name == "open_application")
 	{
 		return open_application(arguments_json);
@@ -1409,8 +1479,11 @@ core::String DroidHost::agent_turn(const core::String& body)
 			+ net::json_string_field("error", "missing message") + "}";
 	}
 
+	append_app_log("chat", "in", "user: " + user_message, true);
+
 	if (!config_.enable_ai)
 	{
+		append_app_log("chat", "out", "rejected: AI is disabled (--no-ai)", false);
 		return "{" + net::json_bool_field("ok", false) + ","
 			+ net::json_string_field("error", "AI is disabled (--no-ai)") + "}";
 	}
@@ -1450,6 +1523,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 		const ai::OllamaOutboundRequest request = ai::build_ollama_chat_request(ollama_config, transcript_copy, tools);
 		if (!request.valid)
 		{
+			append_app_log("chat", "out", "request build failed: " + request.error_message, false);
 			return "{" + net::json_bool_field("ok", false) + ","
 				+ net::json_string_field("error", request.error_message) + "}";
 		}
@@ -1463,9 +1537,10 @@ core::String DroidHost::agent_turn(const core::String& body)
 		const ai::OllamaChatResponse response = ai::parse_ollama_chat_response(status_code, response_body, transport_ok);
 		if (!response.transport_ok || !response.http_success)
 		{
+			const core::String error = response.error_message.empty() ? "Ollama request failed" : response.error_message;
+			append_app_log("chat", "out", "hop " + std::to_string(hop) + " failed: " + error, false);
 			return "{" + net::json_bool_field("ok", false) + ","
-				+ net::json_string_field("error", response.error_message.empty()
-					? "Ollama request failed" : response.error_message) + "}";
+				+ net::json_string_field("error", error) + "}";
 		}
 
 		{
@@ -1482,6 +1557,8 @@ core::String DroidHost::agent_turn(const core::String& body)
 		for (const ai::ToolCall& call : response.tool_calls)
 		{
 			const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
+			append_app_log("chat", "out",
+				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true);
 
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
@@ -1504,10 +1581,13 @@ core::String DroidHost::agent_turn(const core::String& body)
 		{
 			budget_exhausted = true;
 			final_assistant_text = response.assistant_message;
+			append_app_log("chat", "out", "tool-call budget exhausted after " + std::to_string(kMaxHops) + " hops", false);
 		}
 	}
 
 	actions_stream << ']';
+
+	append_app_log("chat", "out", "assistant: " + final_assistant_text, true);
 
 	std::ostringstream stream;
 	stream << '{';
