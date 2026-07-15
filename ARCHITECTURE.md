@@ -587,21 +587,23 @@ flowchart LR
 | `zeroclaw-plugins` | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
 | `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | GPIO/I2C/SPI/USB, specialized hardware | None | **Not planned** — engine/hardware code was explicitly removed at 0.2.0 (`AGENTS.md` guardrails) |
 | `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); no debouncer/watchdog abstraction yet |
-| `zeroclaw-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.txt` | **Partial** — plain-text lines with channel/direction/summary, not JSONL; no attribution model, no Observer bridge |
+| `zeroclaw-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.jsonl` | **Have JSONL + partial attribution** — one JSON object per line, `session_id` attribution on `"chat"`-channel entries (Phase 3, done); no `record!`/`scope!`-equivalent macros (C++ has no direct analog), no Observer bridge |
 | `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | Raw `std::thread` in `cli/tui.cpp`/`cli/host.cpp` | **Missing** — no wrapper, no attribution; each background thread is hand-rolled with its own hand-off pattern (see the `PolledState`/`ChatWork` comments in `cli/tui.cpp`) |
 | `zeroclaw-macros` | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |
 | `zerocode` | Terminal UI | `cli/tui.cpp` (FTXUI) | **Have** |
 
 ### What this means for droidcli
 
-The honest read, as of Phases 1–2 landing: droidcli now has a real provider
-abstraction and durable, queryable session memory - the two biggest
-structural gaps against ZeroClaw's Core tier. What's left is **no Edge tier**
-(no `channels`, a minimal `gateway`) and no observability layer
-(`zeroclaw-log`'s structured logging, `zeroclaw-spawn`'s attribution). That's
-consistent with what droidcli actually is right now — a single-machine,
-single-operator daemon reached over localhost HTTP or an in-process TUI, not
-yet a multi-channel assistant reachable from Discord/Slack/email.
+The honest read, as of Phases 1–3 landing: droidcli now has a real provider
+abstraction, durable/queryable session memory, and structured JSONL logging -
+the biggest structural gaps against ZeroClaw's Core tier are closed. What's
+left is **no Edge tier** (no `channels`, a minimal `gateway`) and
+`zeroclaw-spawn`'s thread-attribution idea, which only earns its keep once
+there's more than one kind of background thread to distinguish in the log.
+That's consistent with what droidcli actually is right now — a
+single-machine, single-operator daemon reached over localhost HTTP or an
+in-process TUI, not yet a multi-channel assistant reachable from
+Discord/Slack/email.
 
 Extension work, roughly in the order it would need to land to close the gap,
 without pretending a crate-per-crate port is the right target for a C++
@@ -621,11 +623,11 @@ static library:
    droidcli mid-conversation, resume with the same `session_id`, the history
    is still there. See "Phase 2" below - embeddings/vector retrieval remain
    explicitly out of scope.
-3. **Structured (JSONL) logging with attribution** — `zeroclaw-log`'s shape
-   is directly portable to `append_app_log()`: same call site, richer
-   record. Low-risk, mechanical work, and now more valuable than when this
-   was first scoped: memory sessions and provider selection are both things
-   worth being able to query the log for.
+3. ✅ **Structured (JSONL) logging** — `append_app_log()` (`cli/host.cpp`)
+   writes `logs/log.jsonl` now, one JSON object per line, with `session_id`
+   attribution on `"chat"`-channel entries so a log line correlates with a
+   `MemoryStore` session. See "Phase 3" below - `hop_index` and an `Observer`
+   subscription mechanism remain deliberately out of scope for now.
 4. **A `Channel` concept, only once a channel is actually wanted** — do not
    build `zeroclaw-channels`-equivalent plumbing speculatively. `Connector`
    already generalizes "a peer droidcli talks to"; a messaging channel is a
@@ -767,38 +769,52 @@ there, killed the process, restarted it, and confirmed `GET
 /api/agent/history?session_id=<the old id>` still returned both messages
 byte-for-byte - the acceptance criterion below, met.
 
-### Phase 3 — Structured JSONL logging
+### Phase 3 — Structured JSONL logging ✅ implemented
 
 **Goal:** replace `append_app_log()`'s plain-text `logs/log.txt` lines with
 a structured record any tool can parse, matching `zeroclaw-log`'s shape
 without adopting Rust macros droidcli has no equivalent for.
 
-**Deliverables:**
-- `AppLogEntry` (`cli/host.hpp`) gains a stable schema written as one JSON
-  object per line: `{"ts":"...", "channel":"...", "direction":"...",
-  "summary":"...", "success":bool, "session_id":"...", "hop":N}` — the last
-  two fields are why this phase comes after Phase 2, not before: attribution
-  to a specific memory-store session is only meaningful once sessions exist.
-- `append_app_log()`'s body changes to build this JSON line instead of the
-  current `[timestamp] [channel] [direction] summary` format; the in-memory
-  `app_log_`/`/api/app/log` JSON response shape is unaffected (it already
-  returns structured fields — only the *file* format changes).
-- The TUI's `log_view` (`cli/tui.cpp`) already renders from the same
-  in-memory `AppLogEntry` list via `/api/app/log`, not by re-parsing
-  `logs/log.txt` — so this phase does not touch TUI rendering at all,
-  confirm that stays true rather than accidentally coupling them.
-- `logs/log.txt` becomes `logs/log.jsonl` (rename, since the format
-  changed); update the `logs/README.md` git-ignore note.
+**What shipped:**
+- `append_app_log()` (`cli/host.cpp`) now writes one JSON object per line to
+  `logs/log.jsonl`: `{"ts":"...","channel":"...","direction":"...",
+  "summary":"...","success":bool}`, plus `"session_id"` when the caller
+  passes one (currently only the `"chat"` channel does, from `agent_turn`'s
+  local `session_id` — see "Persistent memory" above). Console/stderr output
+  is unchanged: still the human-readable bracketed-text line, since that's
+  for a person watching the terminal, not for durable structured storage.
+- Each session's start is also a JSON line —
+  `{"event":"session_started","ts":"..."}` — instead of a `=== ... ===`
+  marker, so the whole file is uniformly parseable JSONL, not JSONL with one
+  non-JSON marker line mixed in.
+- `logs/log.txt` renamed to `logs/log.jsonl`; `logs/README.md` updated to
+  describe the schema.
+- The in-memory `app_log_`/`GET /api/app/log` shape, and the TUI's `log_view`
+  (which renders from that in-memory list, not by re-parsing the file), are
+  both unchanged — confirmed by inspection, this phase only touches the file
+  write.
 
-**Explicit non-goal:** no `Observer` trait/bridge yet — that's a
+**Deviation from the original plan below:** `hop_index` (the exact position
+within a session's transcript) was scoped in the original plan but dropped —
+`MemoryStore`'s `GET /api/agent/history` already gives an ordered,
+`hop_index`-indexed view of a session, so threading a second copy of that
+number through every `append_app_log()` call site added a parameter with no
+caller currently needing it. `session_id` alone is enough to correlate a log
+line with `GET /api/agent/history?session_id=...` for the full ordered
+detail. Revisit if a concrete need for `hop_index` in the log itself shows
+up.
+
+**Explicit non-goal, unchanged:** no `Observer` trait/bridge yet — that's a
 consumer-side abstraction (something subscribing to log events) with no
-concrete subscriber to build it against yet. Land the schema first; add a
-subscription mechanism when something (a future dashboard, a future channel)
-actually needs to observe log events instead of polling `/api/app/log`.
+concrete subscriber to build it against yet. The schema landed first;
+add a subscription mechanism when something (a future dashboard, a future
+channel) actually needs to observe log events instead of polling `/api/app/log`.
 
-**Acceptance:** `logs/log.jsonl` is valid JSONL (each line parses standalone
-with a standard JSON parser); `ctest` green; no behavior change visible in
-the TUI or `/api/app/log`.
+**Verified:** `ctest` green (7/7, excluding the tracked `ollama_client_test`
+issue); ran droidcli, inspected `logs/log.jsonl` by hand to confirm every
+line parses as standalone JSON, including the `session_started` marker and a
+`"chat"`-channel entry carrying `session_id`; confirmed `GET /api/app/log`'s
+response shape is byte-identical to before this phase.
 
 ### Phase 4 — Channel-as-connector (only once a channel is actually wanted)
 
