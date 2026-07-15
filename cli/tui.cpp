@@ -937,12 +937,16 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return false;
 	});
 
-	// Show what to do first without making the user type anything: if Ollama
-	// isn't ready yet, greet them with the same prompt describe_setup_prompt()
-	// would give after a failed attempt - e.g. the numbered list of already-
-	// pulled models - so "type a number to pick one, or a name to pull a new
-	// one" is visible the moment the TUI opens. Safe to touch chat_entries
-	// directly here (single-threaded, before screen.Loop() starts).
+	// Greet the user unconditionally the moment the TUI opens, then - if
+	// Ollama isn't ready yet - follow up with the same prompt
+	// describe_setup_prompt() would give after a failed attempt (e.g. the
+	// numbered list of already-pulled models), so "type a number to pick
+	// one, or a name to pull a new one" is visible without typing anything
+	// first. Safe to touch chat_entries directly here (single-threaded,
+	// before screen.Loop() starts).
+	chat_entries.push_back(ChatEntry{"info",
+		"Welcome to droidcli " + std::string(version_string) + ". Type a message below and press Enter to chat."});
+
 	try
 	{
 		const OllamaSetupStatus initial_status = parse_ollama_setup_status(host.ollama_setup_status_json());
