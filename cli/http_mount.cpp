@@ -119,6 +119,40 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.run_command(request.body));
 			return true;
 		}
+
+		// Filesystem-aware agent tools - droidcli executes these itself, no
+		// external process or MCP server involved.
+		if (is_post && path == "/api/fs/read")
+		{
+			set_json(response, host.read_file(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/fs/write")
+		{
+			set_json(response, host.write_file(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/fs/list")
+		{
+			set_json(response, host.list_dir(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/fs/stat")
+		{
+			set_json(response, host.stat_path(request.body));
+			return true;
+		}
+		if (is_get && path == "/api/fs/cwd")
+		{
+			set_json(response, host.get_cwd_json());
+			return true;
+		}
+		if (is_post && path == "/api/fs/which")
+		{
+			set_json(response, host.which_executable_json(request.body));
+			return true;
+		}
+
 		if (is_post && path == "/api/agent/turn")
 		{
 			set_json(response, host.agent_turn(request.body));

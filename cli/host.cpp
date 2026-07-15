@@ -975,6 +975,108 @@ core::String DroidHost::run_command(const core::String& body)
 	return stream.str();
 }
 
+core::String DroidHost::read_file(const core::String& body)
+{
+	const core::String path = net::extract_json_string_field(body, "path");
+	int32_t max_bytes = 65536;
+	extract_json_int_field(body, "max_bytes", max_bytes);
+
+	const FileReadResult result = cli::read_file(path, max_bytes);
+	append_app_log("fs", "in", "read " + path, result.ok);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", result.ok) << ',';
+	stream << net::json_string_field("content", result.content) << ',';
+	stream << "\"size_bytes\":" << result.size_bytes << ',';
+	stream << net::json_bool_field("truncated", result.truncated) << ',';
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+}
+
+core::String DroidHost::write_file(const core::String& body)
+{
+	const core::String path = net::extract_json_string_field(body, "path");
+	const core::String content = net::extract_json_string_field(body, "content");
+	bool append_mode = false;
+	net::extract_json_bool_field(body, "append", append_mode);
+
+	const FileWriteResult result = cli::write_file(path, content, append_mode);
+	append_app_log("fs", "out", (append_mode ? "append " : "write ") + path, result.ok);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", result.ok) << ',';
+	stream << "\"bytes_written\":" << result.bytes_written << ',';
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+}
+
+core::String DroidHost::list_dir(const core::String& body)
+{
+	const core::String path = net::extract_json_string_field(body, "path");
+	const ListDirResult result = cli::list_dir(path);
+	append_app_log("fs", "in", "list " + (path.empty() ? core::String(".") : path), result.ok);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", result.ok) << ',';
+	stream << "\"entries\":[";
+	for (size_t index = 0; index < result.entries.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		const DirEntryInfo& entry = result.entries[index];
+		stream << '{';
+		stream << net::json_string_field("name", entry.name) << ',';
+		stream << net::json_bool_field("is_dir", entry.is_dir) << ',';
+		stream << "\"size_bytes\":" << entry.size_bytes;
+		stream << '}';
+	}
+	stream << "],";
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+}
+
+core::String DroidHost::stat_path(const core::String& body)
+{
+	const core::String path = net::extract_json_string_field(body, "path");
+	const StatResult result = cli::stat_path(path);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", result.ok) << ',';
+	stream << net::json_bool_field("exists", result.exists) << ',';
+	stream << net::json_bool_field("is_dir", result.is_dir) << ',';
+	stream << net::json_bool_field("is_file", result.is_file) << ',';
+	stream << "\"size_bytes\":" << result.size_bytes << ',';
+	stream << net::json_string_field("error", result.error_message);
+	stream << '}';
+	return stream.str();
+}
+
+core::String DroidHost::get_cwd_json() const
+{
+	return "{" + net::json_string_field("cwd", get_current_working_directory()) + "}";
+}
+
+core::String DroidHost::which_executable_json(const core::String& body)
+{
+	const core::String name = net::extract_json_string_field(body, "name");
+	const WhichResult result = which_executable(name);
+
+	return "{"
+		+ net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("path", result.resolved_path) + ","
+		+ net::json_string_field("error", result.error_message)
+		+ "}";
+}
+
 core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 {
 	core::Array<ai::ToolDefinition> tools;
@@ -1031,6 +1133,49 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"\"work_dir\":{\"type\":\"string\",\"description\":\"optional working directory\"}"
 		"},\"required\":[\"command\"]}"});
 
+	tools.push_back(ai::ToolDefinition{
+		"read_file",
+		"Read a file's contents from the local filesystem. Caps the read at max_bytes (default 65536) to avoid overloading context - the result reports whether the file was truncated.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"path\":{\"type\":\"string\",\"description\":\"file path, absolute or relative to droidcli's working directory\"},"
+		"\"max_bytes\":{\"type\":\"integer\",\"description\":\"optional read cap, default 65536\"}"
+		"},\"required\":[\"path\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"write_file",
+		"Write content to a file on the local filesystem, creating parent directories if needed. Overwrites by default - use only for tasks the user actually asked for.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"path\":{\"type\":\"string\",\"description\":\"file path to write\"},"
+		"\"content\":{\"type\":\"string\",\"description\":\"text to write\"},"
+		"\"append\":{\"type\":\"boolean\",\"description\":\"append instead of overwrite, default false\"}"
+		"},\"required\":[\"path\",\"content\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"list_dir",
+		"List the entries (name, is_dir, size_bytes) of a directory, one level deep. Omit path to list droidcli's current working directory.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"path\":{\"type\":\"string\",\"description\":\"directory path, optional (defaults to the current working directory)\"}"
+		"}}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"stat_path",
+		"Check whether a path exists and whether it's a file or directory, without reading its content.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"path\":{\"type\":\"string\",\"description\":\"path to check\"}"
+		"},\"required\":[\"path\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"get_cwd",
+		"Get droidcli's current working directory as an absolute path. Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"which",
+		"Resolve an executable name to its full path by searching PATH, the same lookup a shell does before running a bare command name. Use this to check whether a tool is installed before trying to run it.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"name\":{\"type\":\"string\",\"description\":\"executable name, e.g. 'git' or 'python'\"}"
+		"},\"required\":[\"name\"]}"});
+
 	return tools;
 }
 
@@ -1071,6 +1216,30 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "run_command")
 	{
 		return run_command(arguments_json);
+	}
+	if (tool_name == "read_file")
+	{
+		return read_file(arguments_json);
+	}
+	if (tool_name == "write_file")
+	{
+		return write_file(arguments_json);
+	}
+	if (tool_name == "list_dir")
+	{
+		return list_dir(arguments_json);
+	}
+	if (tool_name == "stat_path")
+	{
+		return stat_path(arguments_json);
+	}
+	if (tool_name == "get_cwd")
+	{
+		return get_cwd_json();
+	}
+	if (tool_name == "which")
+	{
+		return which_executable_json(arguments_json);
 	}
 
 	return "{" + net::json_bool_field("ok", false) + ","
