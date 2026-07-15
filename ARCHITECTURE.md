@@ -75,11 +75,12 @@ metaagent/                        (repository directory name unchanged)
 │   ├── notify/                    Notify body parsing
 │   ├── session/                   RuntimeSession + status strings
 │   ├── app/                       tasks (persistent task queue)
-│   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime
+│   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime + ModelProvider interface
 │   └── intent/                    Deterministic "open X" phrase recognizer (no LLM, no I/O)
-├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, HTTP route mount, entrypoint
+├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, MemoryStore (SQLite), HTTP route mount, entrypoint
 ├── tools/                         mini_http_server + sync_http_client (raw-socket HTTP, WinHTTP for https://)
 ├── tests/                         One *_test.cpp per core module
+├── third_party/sqlite/            Vendored SQLite amalgamation (committed - see third_party/README.md)
 ├── config/                         Example connector config (connectors.example.json)
 ├── distribute/                    Dist templates (run_all.bat, README)
 ├── CMakeLists.txt
@@ -105,6 +106,7 @@ Public entry point: `#include "droidcli_core.h"`.
 | `app/tasks`               | **Persistent task queue**: `Task` (incl. `result_json`), `TaskQueue` (enqueue/claim_next/complete/fail/find/list), JSON build/parse |
 | `ai/ollama_client`        | Ollama request/response shaping, incl. **tool-calling**: `ToolDefinition`/`ToolCall`, `"tools"` request field, `message.tool_calls` response parsing, `ChatRole::Tool` |
 | `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from any connector-registered inference peer. Single-shot (no tool-calling) - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
+| `ai/model_provider`       | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`) + `OllamaProvider` adapter over `ai/ollama_client`. `DroidHost::agent_turn` is coded against the interface - see "Provider abstraction" in the extension plan |
 | `intent/open_intent`      | Deterministic "open X" phrase recognizer (pure string scanning, no LLM, no I/O) - backs `POST /api/apps/quick_open`, see "Quick-open" below |
 
 The droidcli host (`cli/`) additionally owns: the config store, the
@@ -134,13 +136,18 @@ call, unlike `app_index`'s scan-once - `GET /api/apps/open`),
 **`filesystem_tools`**
 (`read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/
 `which_executable`, `std::filesystem`-backed, no external dependency - `POST
-/api/fs/*`), and **`DroidHost::agent_turn`** (a bounded Ollama tool-calling
-loop over a fixed tool set - connectors, tasks, shell commands, app launches,
-open-window queries, and filesystem primitives - each tool implemented by
-calling back into `DroidHost`'s own methods, self-contained rather than
-delegating to another process or MCP server; every hop (user message, tool
-call + result, final reply, and failure paths) is logged via
-`append_app_log()` under the `chat` channel - `POST /api/agent/turn`).
+/api/fs/*`), **`memory_store`** (`MemoryStore`, SQLite-backed persistent
+agent-turn history keyed by session id - see "Persistent memory" below -
+`GET /api/agent/history`, `GET /api/agent/sessions`), and
+**`DroidHost::agent_turn`** (a bounded tool-calling loop, against a
+`ai::ModelProvider` - Ollama today - over a fixed tool set - connectors,
+tasks, shell commands, app launches, open-window queries, and filesystem
+primitives - each tool implemented by calling back into `DroidHost`'s own
+methods, self-contained rather than delegating to another process or MCP
+server; every hop (user message, tool call + result, final reply, and
+failure paths) is logged via `append_app_log()` under the `chat` channel and
+persisted via `record_agent_message()` to `memory_store` - `POST
+/api/agent/turn`).
 
 ---
 
@@ -231,7 +238,9 @@ over HTTP, so it never needs the token.
 | `POST` | `/api/fs/stat` `[auth]` | Check existence/type/size of a path — body `{"path":"..."}` |
 | `GET` | `/api/fs/cwd` `[auth]` | droidcli's current working directory |
 | `POST` | `/api/fs/which` `[auth]` | Resolve an executable against `PATH` — body `{"name":"..."}` |
-| `POST` | `/api/agent/turn` `[auth]` | Tool-calling agent turn — body `{"message":"...","clear":false}` |
+| `POST` | `/api/agent/turn` `[auth]` | Tool-calling agent turn — body `{"message":"...","clear":false,"session_id":"..."}`, response includes `"session_id"` (see "Persistent memory" below) |
+| `GET` | `/api/agent/history` `[auth]` | One session's persisted message history — `?session_id=...` (defaults to the current session), returns `{"session_id":"...","messages":[{"hop_index":N,"role":"...","content":"...","created_at":"..."}]}` |
+| `GET` | `/api/agent/sessions` `[auth]` | Every session id with persisted history, most recently active first — `{"current_session_id":"...","session_ids":[...]}` |
 | `GET` | `/api/ollama/status` `[auth]` | Ollama text-gen endpoint status + model list |
 | `POST` | `/api/ollama/config` `[auth]` | Update Ollama model at runtime |
 | `GET` | `/api/process/status` `[auth]` | PID + running state of every launched connector process |
@@ -302,13 +311,62 @@ the Uninstall-registry scan alone could never find them. Name matching
 spacing/punctuation-insensitive, so "NotePad", "NOTEPAD", and "note pad" all
 resolve identically.
 
+### Persistent memory (SQLite) — `cli/memory_store.cpp`
+
+droidcli's Core-tier "memory" role (see the ZeroClaw crate comparison below).
+Every message `DroidHost::agent_turn` adds to a session's transcript - the
+system prompt, the user's message, the model's replies, tool results - is
+also appended to a SQLite-backed `MemoryStore` (`cli/memory_store.hpp`/`.cpp`,
+schema: `memory_entries(session_id, hop_index, role, content, created_at)`),
+not just the in-process `agent_transcript_` `std::vector` that existed
+before. This is real file I/O, so it lives in `cli/` (host), linked against
+the vendored SQLite amalgamation (`third_party/sqlite/`, see
+`third_party/README.md`) - never in the portable `droidcli_core` library, per
+`AGENTS.md`'s Golden rule. The database file (`droidcli_memory.sqlite3`,
+repo-root-relative, git-ignored like `droidcli_state.json`) is opened once at
+`DroidHost::initialize()`; a failed open leaves the store closed and
+`record_agent_message()`/the history routes degrade to in-memory-only
+behavior rather than crashing the daemon over it.
+
+**Sessions, not one global transcript.** `DroidHost` tracks a
+`current_session_id_`, freshly generated every process start (a short
+timestamp + disambiguator, e.g. `20260715T121525-e3f4` - no auto-resume by
+default). `POST /api/agent/turn`'s body may include `"session_id"`:
+
+- Omitted → continues whatever session this process is currently on.
+- A previously-returned id → **resumes that session**, including across a
+  restart: its persisted history is replayed from `MemoryStore` into
+  `agent_transcript_` before the new message is appended. This is what makes
+  "killed and restarted droidcli mid-conversation, sent the same
+  `session_id` again" actually continue the same transcript - verified by
+  hand: a system+user message pair persisted, the process was killed and
+  restarted, and `GET /api/agent/history?session_id=...` still returned both
+  messages afterward.
+- `"clear": true` always starts a **brand new** session id (old history isn't
+  deleted, just no longer active), ignoring any `session_id` in the same
+  request.
+
+Every `agent_turn` response includes the active `"session_id"` - a caller
+that wants to resume a conversation later needs to hold onto it (the TUI
+doesn't do this yet; see the "Persistent memory" phase in the extension plan
+below for what's still ahead of this).
+
+**Deliberately minimal**: no embeddings, no vector retrieval, no eviction
+policy. Durability (survive a restart) and queryability (`GET
+/api/agent/history`, `GET /api/agent/sessions`) are the whole scope - the
+extension plan below is explicit that semantic recall is separate,
+meaningfully bigger work that nothing in droidcli needs yet.
+
 ### The agent turn (`POST /api/agent/turn`)
 
-Drives a bounded (5-hop) Ollama tool-calling loop: the model sees a fixed tool
-set (`list_connectors`, `connector_status`, `launch_connector`,
+Drives a bounded (5-hop) tool-calling loop against a `ai::ModelProvider`
+(Ollama today via `ai::OllamaProvider` - see "Provider abstraction" in the
+extension plan below and `src/ai/model_provider.hpp`): the model sees a fixed
+tool set (`list_connectors`, `connector_status`, `launch_connector`,
 `stop_connector`, `call_connector`, `enqueue_task`, `list_tasks`,
 `run_command`) and can call any of them against this `DroidHost` instance
-before replying in natural language.
+before replying in natural language. Every message added to the transcript is
+also persisted via `MemoryStore` (see "Persistent memory" above).
 
 ```sh
 curl -X POST http://127.0.0.1:30080/api/agent/turn \
@@ -323,6 +381,7 @@ Response shape:
 {
   "ok": true,
   "assistant": "You have 2 connectors registered: ...",
+  "session_id": "20260715T121525-e3f4",
   "actions": [
     {"tool": "list_connectors", "arguments_json": "{}", "result_json": "{\"connectors\":[...]}"}
   ]
@@ -332,7 +391,14 @@ Response shape:
 If Ollama is disabled or unreachable, or the transcript budget (5 hops) runs
 out before a final natural-language reply, the response is still valid JSON
 (`ok:false` with an `error`, or `ok:true` with `budget_exhausted:true` and the
-last assistant text) rather than a crash.
+last assistant text) rather than a crash. The model also never gets a blank
+`"assistant"` field - a genuinely empty model response is replaced with a
+visible placeholder rather than surfaced as silence. An `ok:false` response
+from a failed provider call still includes `"session_id"` - the user's
+message was persisted before the call was attempted, so a caller can find it
+via `GET /api/agent/history` even though the turn itself failed. (The two
+earliest failure paths - missing `"message"`, AI disabled entirely - return
+before any session is touched, so they have no `session_id` to report.)
 
 ### One-shot commands (`POST /api/run`)
 
@@ -481,9 +547,9 @@ flowchart LR
 
     subgraph CORE["Core"]
         RUNTIME["droidcli-runtime\nDroidHost::agent_turn loop · tool dispatch ·\nConnectorRegistry · TaskQueue"]
-        MEMORY["droidcli-memory\nagent_transcript_\n(planned: SQLite, Phase 2)"]
+        MEMORY["droidcli-memory\nMemoryStore (SQLite) ·\nsessions, history, resume-after-restart"]
         CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · droidcli_state.json"]
-        PROVIDERS["droidcli-providers\nai::ollama_client + language_runtime\n(Ollama today; pluggable via Phase 1)"]
+        PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOllamaProvider (today; a second\nprovider implements the same interface)"]
         TOOLS["droidcli-tools\nfilesystem_tools · command_runner ·\napp_index · window_list · intent"]
         RUNTIME --> MEMORY
         RUNTIME --> CONFIG
@@ -511,16 +577,16 @@ flowchart LR
 | --- | --- | --- | --- |
 | `zeroclaw-runtime` | Agent loop, security policy, SOP engine, cron, SubAgents, RPC | `DroidHost::agent_turn` (`cli/host.cpp`) — one bounded tool-calling loop | **Partial** — no security-policy layer beyond the bearer token, no SOP engine, no cron scheduler (`TaskQueue` is a dispatch queue, not a scheduler), no SubAgents/RPC |
 | `zeroclaw-config` | TOML schema, secrets encryption, autonomy levels, workspace resolution | `HostConfig` (`cli/host.hpp`) + CLI flags + `connectors.json` | **Partial** — flat JSON/CLI flags not TOML, token is plaintext (env var or CLI arg, never echoed back — see `CLAUDE.md`), no autonomy levels, no workspace concept |
-| `zeroclaw-api` | Public traits: `ModelProvider`, `Channel`, `Tool`, `Memory`, `Observer`, `RuntimeAdapter`, `Peripheral` (kernel ABI) | `net::Connector` is the closest thing to a provider/channel abstraction; `ai::ToolDefinition`/`ToolCall` is the Tool ABI | **Partial** — one concrete abstraction (`Connector`) covers what ZeroClaw splits into `ModelProvider`+`Channel`+`Peripheral`; no formal interface/trait layer, no `Memory`/`Observer` abstractions |
-| `zeroclaw-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai/ollama_client.cpp` | **Missing multi-provider** — Ollama only, no router, no retry wrapper |
+| `zeroclaw-api` | Public traits: `ModelProvider`, `Channel`, `Tool`, `Memory`, `Observer`, `RuntimeAdapter`, `Peripheral` (kernel ABI) | `ai::ModelProvider` (`src/ai/model_provider.hpp`) is the `ModelProvider` equivalent; `net::Connector` is the closest thing to a `Channel`/`Peripheral` abstraction; `ai::ToolDefinition`/`ToolCall` is the Tool ABI | **Partial** — `ModelProvider` now exists as a real interface (Phase 1, done); `Connector` still covers what ZeroClaw splits into `Channel`+`Peripheral`; no `Memory`/`Observer` trait abstractions (though `MemoryStore` now exists as a concrete class, see `zeroclaw-memory` below) |
+| `zeroclaw-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai::ModelProvider` interface + `ai::OllamaProvider` (`src/ai/model_provider.{hpp,cpp}`, adapting the tested `ai/ollama_client.cpp`) | **Have the abstraction, one implementation** — `agent_turn` (`cli/host.cpp`) is coded against `ai::ModelProvider`, not Ollama directly (Phase 1, done); adding Anthropic/OpenAI means implementing the interface, no router/retry wrapper yet since there's nothing to route between |
 | `zeroclaw-channels` | 30+ messaging integrations (Discord, Slack, Telegram, …) | None | **Missing entirely** — `Connector` generalizes the concept but nothing implements a messaging-channel connector yet |
 | `zeroclaw-gateway` | HTTP/WebSocket gateway, web dashboard, webhook ingress | `tools::MiniHttpServer` + `cli/http_mount.cpp` | **Partial** — REST exists; no WebSocket, no dashboard UI, webhook auth is the same bearer-token gate as everything else |
 | `zeroclaw-tools` | Callable tool implementations (browser, HTTP, PDF, hardware probes) | `filesystem_tools.cpp`, `command_runner.cpp`, `window_list.cpp`, `app_index.cpp`, `intent/open_intent.cpp` | **Have**, functionally — not split into a separate module boundary, all linked straight into `cli/`/`src/` |
 | `zeroclaw-tool-call-parser` | Model-side tool-call syntax parsing/normalization | `ai::ollama_client`'s `tool_calls` JSON parsing | **Partial** — handles Ollama's native tool-call format only, nothing to normalize across providers since there's only one |
-| `zeroclaw-memory` | Conversation memory, embeddings, vector retrieval | `agent_transcript_` (`cli/host.hpp`) | **Missing** — in-process `std::vector`, cleared on `clear:true`, no persistence, no embeddings/vector retrieval |
+| `zeroclaw-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); no embeddings, no vector retrieval - deliberately out of scope, see the extension plan below |
 | `zeroclaw-plugins` | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
 | `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | GPIO/I2C/SPI/USB, specialized hardware | None | **Not planned** — engine/hardware code was explicitly removed at 0.2.0 (`AGENTS.md` guardrails) |
-| `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — flat-file, not SQLite; no debouncer/watchdog abstraction |
+| `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); no debouncer/watchdog abstraction yet |
 | `zeroclaw-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.txt` | **Partial** — plain-text lines with channel/direction/summary, not JSONL; no attribution model, no Observer bridge |
 | `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | Raw `std::thread` in `cli/tui.cpp`/`cli/host.cpp` | **Missing** — no wrapper, no attribution; each background thread is hand-rolled with its own hand-off pattern (see the `PolledState`/`ChatWork` comments in `cli/tui.cpp`) |
 | `zeroclaw-macros` | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |
@@ -528,36 +594,45 @@ flowchart LR
 
 ### What this means for droidcli
 
-The honest read: droidcli today is architecturally closest to ZeroClaw's
-**Core** tier (`runtime` + `config` + a single `providers` entry + `tools`),
-with **no Edge tier** (no `channels`, a minimal `gateway`) and **no memory
-persistence**. That's consistent with what droidcli actually is right now —
-a single-machine, single-operator daemon reached over localhost HTTP or an
-in-process TUI, not a multi-channel assistant reachable from Discord/Slack/
-email.
+The honest read, as of Phases 1–2 landing: droidcli now has a real provider
+abstraction and durable, queryable session memory - the two biggest
+structural gaps against ZeroClaw's Core tier. What's left is **no Edge tier**
+(no `channels`, a minimal `gateway`) and no observability layer
+(`zeroclaw-log`'s structured logging, `zeroclaw-spawn`'s attribution). That's
+consistent with what droidcli actually is right now — a single-machine,
+single-operator daemon reached over localhost HTTP or an in-process TUI, not
+yet a multi-channel assistant reachable from Discord/Slack/email.
 
 Extension work, roughly in the order it would need to land to close the gap,
 without pretending a crate-per-crate port is the right target for a C++
 static library:
 
-1. **A real provider abstraction**, even before adding a second LLM backend
-   — an `ai::ModelProvider`-shaped interface that `ollama_client` implements,
-   so a future Anthropic/OpenAI client is additive rather than a rewrite of
-   `agent_turn`'s Ollama-specific request building.
-2. **Persistent, queryable memory** — `agent_transcript_` surviving a
-   restart (SQLite, matching `zeroclaw-infra`'s choice, is a more honest fit
-   for droidcli's "no Python runtime" packaging constraint than a new
-   dependency) before embeddings/vector retrieval are worth adding at all.
+1. ✅ **A real provider abstraction** — `ai::ModelProvider` (`src/ai/model_provider.hpp`)
+   exists; `agent_turn` (`cli/host.cpp`) is coded against the interface, not
+   `ai::ollama_client` directly. A second LLM backend (Anthropic/OpenAI/...)
+   is now additive: implement the interface, construct it instead of
+   `OllamaProvider` where it's selected. See "Phase 1" below for what
+   shipped and what's deliberately still out of scope (no router, no
+   multi-provider selection logic - nothing to route between yet).
+2. ✅ **Persistent, queryable memory** — `MemoryStore` (`cli/memory_store.hpp`,
+   SQLite-backed, matching `zeroclaw-infra`'s choice) now persists every
+   `agent_turn` message per-session; `GET /api/agent/history`/`GET
+   /api/agent/sessions` make it queryable. Verified: kill and restart
+   droidcli mid-conversation, resume with the same `session_id`, the history
+   is still there. See "Phase 2" below - embeddings/vector retrieval remain
+   explicitly out of scope.
 3. **Structured (JSONL) logging with attribution** — `zeroclaw-log`'s shape
    is directly portable to `append_app_log()`: same call site, richer
-   record. This is low-risk, mechanical work and should probably happen
-   before anything else on this list, since every other feature benefits
-   from better observability immediately.
+   record. Low-risk, mechanical work, and now more valuable than when this
+   was first scoped: memory sessions and provider selection are both things
+   worth being able to query the log for.
 4. **A `Channel` concept, only once a channel is actually wanted** — do not
    build `zeroclaw-channels`-equivalent plumbing speculatively. `Connector`
    already generalizes "a peer droidcli talks to"; a messaging channel is a
    new `Connector` kind (`kind: "messaging_peer"` or similar) plus inbound
-   webhook handling in `http_mount.cpp`, not a new subsystem.
+   webhook handling in `http_mount.cpp`, not a new subsystem. `MemoryStore`'s
+   session model (Phase 2) is what would key each external conversation's
+   history once this lands.
 5. **`zeroclaw-spawn`'s attribution idea, not its `tokio` mechanism** — a
    thin wrapper around `std::thread` construction that tags each background
    thread with what spawned it and why, surfaced in the structured log from
@@ -582,86 +657,115 @@ constrain the next (the memory store in Phase 2 is keyed by whatever Phase
 1's provider abstraction settles on, the log schema in Phase 3 is the
 foundation Phase 5's attribution rides on).
 
-### Phase 1 — Provider abstraction
+### Phase 1 — Provider abstraction ✅ implemented
 
 **Goal:** make `ollama_client.cpp` an implementation of an interface rather
 than the only possible shape `agent_turn` can talk to, so a second LLM
 backend is additive.
 
-**Deliverables:**
-- New `src/ai/model_provider.hpp`: an abstract interface (`ModelProvider`)
-  with the shape `agent_turn` actually needs — build a request from
-  `(transcript, tools)`, parse a response into `(assistant_text, tool_calls,
-  error)`. Keep it minimal; do not pre-build fields no current caller uses.
-- `ai::ollama_client` reimplemented as `OllamaProvider : ModelProvider` —
-  `build_ollama_chat_request`/`parse_ollama_chat_response` become the private
-  guts of that class, not a change to their logic.
-- `DroidHost` holds a `std::unique_ptr<ai::ModelProvider>` (or a
-  `core::Array` of them once Phase 1.5 below is relevant) instead of calling
-  `ai::build_ollama_chat_request`/`ai::parse_ollama_chat_response` directly
-  in `agent_turn` (`cli/host.cpp`).
-- `tests/model_provider_test.cpp`: the existing `ollama_client_test.cpp`
-  assertions still apply, now exercised through the `ModelProvider`
-  interface — this phase should not change what's tested, only how it's
-  reached. (Note: `ollama_client_test` currently has a real, pre-existing
-  bug — the tool-role message content isn't showing up in the built request
-  body, see the standalone task filed for it. Fix that independently of this
-  phase; don't let this refactor inherit or mask it.)
+**What shipped:**
+- `src/ai/model_provider.hpp`/`.cpp`: an abstract `ModelProvider` interface —
+  `build_request(transcript, tools) -> ProviderRequest`,
+  `parse_response(status_code, body, transport_ok) -> ProviderResponse`.
+  Deliberately narrower than `OllamaChatResponse`/`OllamaOutboundRequest` -
+  only the fields `agent_turn`'s loop actually reads.
+- `ai::OllamaProvider : ModelProvider` adapts the existing, tested
+  `build_ollama_chat_request`/`parse_ollama_chat_response` free functions
+  (`ai/ollama_client.cpp`) - it holds no request/response-shaping logic of
+  its own, purely a thin wrapper.
+- `DroidHost::agent_turn` (`cli/host.cpp`) constructs `const
+  ai::OllamaProvider ollama_provider(ollama_config)` and binds it to `const
+  ai::ModelProvider& provider` - everything below that line is coded against
+  the interface. A second provider means constructing a different concrete
+  type at that one call site; nothing else in `agent_turn` changes. (No
+  `std::unique_ptr`/heap allocation needed yet — one call site, one
+  provider, a stack-local reference to the base class is enough to prove the
+  abstraction. Revisit if/when provider *selection* at runtime is added.)
+- `tests/model_provider_test.cpp`: exercises `OllamaProvider` through the
+  `ModelProvider&` base reference (not its own concrete type), covering the
+  same request/response/tool-calling assertions `ollama_client_test.cpp`
+  already had - proving the abstraction actually works, not just that the
+  adapter compiles.
 
-**Explicit non-goal:** do not add a second provider (Anthropic/OpenAI) in
-this phase. The interface should be validated against the one real
-implementation (Ollama) first — adding a second provider before the
-interface has been proven against one real caller (`agent_turn`) risks
-designing the trait around two APIs' lowest common denominator instead of
-what droidcli actually needs.
+**Deliberately not done:** no second provider (Anthropic/OpenAI) yet, no
+router, no runtime provider-selection config field - there's nothing to
+route between until a second implementation exists, and adding one
+speculatively risks shaping the interface around a provider nobody's using.
+The pre-existing `ollama_client_test` bug (tool-role message content missing
+from the built request body) was left untouched here, per the plan below —
+it's tracked as a separate fix so this refactor doesn't inherit or mask it.
 
-**Acceptance:** `ctest` green, `agent_turn` behavior unchanged (same
-requests/responses over `/api/agent/turn`), `HostConfig` gains no new
-required fields (Ollama stays the default/only configured provider).
+**Verified:** full test suite green (`ctest`, 7/7 excluding the tracked
+`ollama_client_test` bug); `/api/agent/turn` end-to-end smoke-tested through
+the new path (`{"ok":false,"error":"AI is disabled (--no-ai)"}` and a real
+Ollama-unreachable transport error both behave identically to before).
 
-### Phase 2 — Persistent memory (SQLite)
+### Phase 2 — Persistent memory (SQLite) ✅ implemented
 
 **Goal:** `agent_transcript_` survives a restart, and is queryable, without
 adding a runtime dependency droidcli doesn't already accept.
 
-**Why SQLite, matching `zeroclaw-infra`'s choice:** it is a single header +
-source amalgamation (no separate service, no network port), which fits the
-"no Python runtime, no node_modules, no sidecar interpreter" distribution
-constraint in the Roadmap section above better than any client/server store
-would.
+**Why SQLite, matching `zeroclaw-infra`'s choice:** a single header + source
+amalgamation (no separate service, no network port), fitting the "no Python
+runtime, no node_modules, no sidecar interpreter" distribution constraint in
+the Roadmap section above better than any client/server store would.
 
-**Deliverables:**
-- `third_party/sqlite/` (amalgamation, vendored like FFmpeg is — git-ignored
-  build artifacts, but the amalgamation source itself can be committed since
-  it's public-domain and small, unlike FFmpeg).
-- `src/app/memory_store.hpp`/`.cpp`: `MemoryStore` wrapping a SQLite
-  connection, schema `(session_id, hop_index, role, content, created_at)`.
-  Pure-ish core module in spirit, but this is real file I/O — per the golden
-  rule in `AGENTS.md`, the SQLite calls themselves belong behind a host
-  callback (`MemoryTransportCallbacks` mirroring
-  `LanguageAiTransportCallbacks`'s pattern) so `src/` stays link-free of the
-  SQLite library; the host (`cli/`) owns the actual `sqlite3_open`/exec
-  calls.
-- `DroidHost::agent_turn` appends to the store on every hop instead of (or
-  in addition to, during a transition period) `agent_transcript_`; `clear:
-  true` in the request body becomes "start a new session_id" rather than
-  wiping in-memory state.
-- New route: `GET /api/agent/history?session_id=...` (or the default/current
-  session if omitted) for inspecting past turns — this is the "queryable"
-  half of the goal, and it's what makes this phase worth doing on its own
-  rather than bundled with Phase 3.
-- `tests/memory_store_test.cpp`: open an in-memory SQLite DB
-  (`:memory:`, no filesystem I/O, keeps this network/GPU/file-free like the
-  rest of `tests/`), append/read a transcript, verify ordering and content.
+**What shipped:**
+- `third_party/sqlite/` — the SQLite amalgamation (v3.45.0), vendored and
+  **committed** (unlike FFmpeg: small, public domain, no license reason to
+  auto-download). Compiled as its own tiny static library
+  (`droidcli_sqlite3` in `CMakeLists.txt`, warnings suppressed since it's
+  unmodified third-party C) linked only into the `droidcli` executable
+  target, never `droidcli_core` — real file I/O is a host concern per
+  `AGENTS.md`'s Golden rule.
+- `cli/memory_store.hpp`/`.cpp`: `MemoryStore`, a thin RAII wrapper around a
+  `sqlite3*` connection with `open()`/`append()`/`load_session()`/
+  `list_session_ids()`. Schema: `memory_entries(session_id, hop_index, role,
+  content, created_at)`, indexed on `(session_id, hop_index)`. **Deviation
+  from the original plan below:** the plan called for a
+  `MemoryTransportCallbacks` indirection (mirroring
+  `LanguageAiTransportCallbacks`) to keep the SQLite calls out of `src/`.
+  That indirection turned out to be unnecessary complexity - `MemoryStore`
+  already lives entirely in `cli/` (host) and never gets linked into
+  `droidcli_core`, so the Golden rule is satisfied by *where the class is*,
+  not by adding a callback layer on top of it. `app_index.cpp`,
+  `command_runner.cpp`, and `process_manager.cpp` already establish this
+  precedent - host-only classes with real I/O, no callback indirection.
+- `DroidHost` gained `current_session_id_` (freshly generated every process
+  start - no auto-resume by default) and `record_agent_message()`, the
+  single call site every `agent_transcript_` mutation in `agent_turn` now
+  goes through, so the in-memory transcript and the persisted log can never
+  drift apart. `agent_turn`'s request body gained an optional `"session_id"`
+  (resume/switch sessions, replaying persisted history into
+  `agent_transcript_`) and `"clear":true` now generates a fresh session id
+  instead of just wiping in-memory state (old history isn't deleted, just no
+  longer active). The response gained a `"session_id"` field.
+- Two new routes: `GET /api/agent/history?session_id=...` and `GET
+  /api/agent/sessions` — the "queryable" half of the goal.
+- **Deviation from the original plan below:** no `tests/memory_store_test.cpp`
+  under `ctest`. `MemoryStore` is real file I/O against a host-owned SQLite
+  connection, in `cli/` — consistent with every other `cli/` class
+  (`ProcessManager`, `app_index`, `command_runner`), none of which have
+  `ctest` coverage either, since `tests/` only links the network/file/GPU-
+  free `droidcli_core` library by design (see "Build" above). Verified by
+  hand instead (see below); worth reconsidering if `cli/` ever grows an
+  integration-test convention of its own.
 
-**Explicit non-goal:** no embeddings, no vector retrieval. That is
+**Explicit non-goal, unchanged:** no embeddings, no vector retrieval. That's
 meaningfully separate work (an embedding model dependency) and nothing in
-droidcli today needs semantic recall over old conversations — only durability
-across restarts and the ability to inspect history.
+droidcli today needs semantic recall over old conversations — only
+durability across restarts and the ability to inspect history. **This is the
+part flagged as considerably important and expected to grow a lot over
+time** — the schema and `MemoryStore` interface here are the foundation, not
+the final word.
 
-**Acceptance:** killing and restarting `droidcli` mid-conversation and
-sending another `/api/agent/turn` with the same `session_id` continues the
-same transcript; `ctest` green including the new memory test.
+**Verified by hand:** started droidcli pointed at an unreachable Ollama URL,
+sent one `agent_turn` (the system prompt + user message persist even though
+the Ollama call itself fails, since recording happens before the HTTP call),
+confirmed via `GET /api/agent/history` that both messages were
+there, killed the process, restarted it, and confirmed `GET
+/api/agent/history?session_id=<the old id>` still returned both messages
+byte-for-byte - the acceptance criterion below, met.
 
 ### Phase 3 — Structured JSONL logging
 
