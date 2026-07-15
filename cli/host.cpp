@@ -352,6 +352,56 @@ core::String summarize_command_failure(const CommandRunResult& result)
 	return last_nonempty_lines(result.stdout_text, 3);
 }
 
+// The model has the real Desktop path in its system prompt (see
+// system_info_.desktop_path, injected in DroidHost::initialize()) but has
+// been observed - repeatedly and reproducibly, not a one-off - writing a
+// bare relative "desktop/..." or "desktop\..." token instead of using it
+// (e.g. "-y ... desktop/red.png"), which can never succeed: no such
+// directory exists relative to droidcli's own working directory. Rather
+// than let a command that's guaranteed to fail reach the shell/ffmpeg,
+// substitute the real resolved Desktop path in for a bare "desktop" token
+// wherever one starts a path (preceded by whitespace, a quote, or nothing).
+// Deliberately does NOT touch an already-correct absolute path like
+// "C:\Users\...\Desktop\..." - there the character immediately before
+// "Desktop" is a path separator, not a word boundary, so it never matches.
+core::String substitute_bare_desktop_token(const core::String& args, const core::String& desktop_path)
+{
+	if (desktop_path.empty())
+	{
+		return args;
+	}
+
+	core::String lowered;
+	lowered.reserve(args.size());
+	for (const unsigned char character : args)
+	{
+		lowered += static_cast<char>(std::tolower(character));
+	}
+
+	core::String result;
+	result.reserve(args.size() + desktop_path.size());
+	size_t cursor = 0;
+	while (cursor < args.size())
+	{
+		const bool at_word_boundary = cursor == 0
+			|| args[cursor - 1] == ' ' || args[cursor - 1] == '"' || args[cursor - 1] == '\'';
+		const bool matches_slash = lowered.compare(cursor, 8, "desktop/") == 0;
+		const bool matches_backslash = lowered.compare(cursor, 8, "desktop\\") == 0;
+
+		if (at_word_boundary && (matches_slash || matches_backslash))
+		{
+			result += desktop_path;
+			result += matches_slash ? '/' : '\\';
+			cursor += 8;
+			continue;
+		}
+
+		result += args[cursor];
+		++cursor;
+	}
+	return result;
+}
+
 const char* const kUnverifiedActionClaimNudge =
 	"Your last response claimed an action was done or about to be done, but no tool call backs "
 	"that up anywhere in this conversation turn - nothing has actually happened. If you intend to "
@@ -444,6 +494,11 @@ void DroidHost::initialize()
 					+ " " + system_info_.os_version + " (" + system_info_.architecture
 					+ "), hostname " + system_info_.hostname
 					+ ", working directory " + system_info_.cwd
+					+ (system_info_.desktop_path.empty()
+						? core::String()
+						: ", the user's Desktop folder is at " + system_info_.desktop_path
+							+ " - use this exact path when a request mentions \"the Desktop\", "
+							"never guess a \"C:\\Users\\<name>\\Desktop\"-style path yourself")
 					+ " - call get_system_info if you need these details again mid-conversation.";
 				language_ai_.set_system_prompt(prompt_with_system_info);
 			}
@@ -1327,12 +1382,12 @@ core::String DroidHost::build_process_status_json()
 
 core::String DroidHost::run_command(const core::String& body)
 {
-	const core::String command = net::extract_json_string_field(body, "command");
+	const core::String requested_command = net::extract_json_string_field(body, "command");
 	const core::String work_dir = net::extract_json_string_field(body, "work_dir");
 	int32_t timeout_ms = 30000;
 	extract_json_int_field(body, "timeout_ms", timeout_ms);
 
-	if (command.empty())
+	if (requested_command.empty())
 	{
 		return "{" + net::json_bool_field("ok", false) + ","
 			+ net::json_bool_field("launched", false) + ","
@@ -1342,6 +1397,7 @@ core::String DroidHost::run_command(const core::String& body)
 			+ net::json_string_field("error", "missing command") + "}";
 	}
 
+	const core::String command = substitute_bare_desktop_token(requested_command, system_info_.desktop_path);
 	const CommandRunResult result = run_command_once(command, work_dir, timeout_ms);
 	const bool ok = command_succeeded(result);
 	// Previously logged on error_message.empty() alone, which missed a
@@ -1366,6 +1422,15 @@ core::String DroidHost::run_command(const core::String& body)
 	stream << net::json_string_field("stdout", result.stdout_text) << ',';
 	stream << net::json_string_field("stderr", result.stderr_text) << ',';
 	stream << net::json_string_field("error", result.error_message);
+	if (command != requested_command)
+	{
+		// The command you (the model) requested referenced a bare "desktop"
+		// path that can never resolve relative to droidcli's own working
+		// directory - substituted the real Desktop path automatically.
+		// Report the actual location back to the user from this field, not
+		// from what you originally asked for.
+		stream << ',' << net::json_string_field("resolved_command", command);
+	}
 	if (!ok)
 	{
 		// Spelled out in plain language, not just a raw exit code, since
@@ -1381,12 +1446,12 @@ core::String DroidHost::run_command(const core::String& body)
 
 core::String DroidHost::run_ffmpeg_json(const core::String& body)
 {
-	const core::String args = net::extract_json_string_field(body, "args");
+	const core::String requested_args = net::extract_json_string_field(body, "args");
 	const core::String work_dir = net::extract_json_string_field(body, "work_dir");
 	int32_t timeout_ms = 120000;
 	extract_json_int_field(body, "timeout_ms", timeout_ms);
 
-	if (args.empty())
+	if (requested_args.empty())
 	{
 		return "{" + net::json_bool_field("ok", false) + ","
 			+ net::json_bool_field("launched", false) + ","
@@ -1396,6 +1461,7 @@ core::String DroidHost::run_ffmpeg_json(const core::String& body)
 			+ net::json_string_field("error", "missing args") + "}";
 	}
 
+	const core::String args = substitute_bare_desktop_token(requested_args, system_info_.desktop_path);
 	const CommandRunResult result = run_ffmpeg(args, work_dir, timeout_ms);
 	const bool ok = command_succeeded(result);
 	append_app_log("ffmpeg", "out", args, ok);
@@ -1408,6 +1474,15 @@ core::String DroidHost::run_ffmpeg_json(const core::String& body)
 	stream << net::json_string_field("stdout", result.stdout_text) << ',';
 	stream << net::json_string_field("stderr", result.stderr_text) << ',';
 	stream << net::json_string_field("error", result.error_message);
+	if (args != requested_args)
+	{
+		// The args you (the model) requested referenced a bare "desktop"
+		// path that can never resolve relative to droidcli's own working
+		// directory - substituted the real Desktop path automatically.
+		// Report the actual location back to the user from this field, not
+		// from what you originally asked for.
+		stream << ',' << net::json_string_field("resolved_args", args);
+	}
 	if (!ok)
 	{
 		stream << ',' << net::json_string_field("failure_reason",
@@ -1651,7 +1726,8 @@ core::String DroidHost::build_system_info_json() const
 		+ net::json_string_field("architecture", system_info_.architecture) + ","
 		+ net::json_string_field("hostname", system_info_.hostname) + ","
 		+ net::json_string_field("username", system_info_.username) + ","
-		+ net::json_string_field("cwd", system_info_.cwd)
+		+ net::json_string_field("cwd", system_info_.cwd) + ","
+		+ net::json_string_field("desktop_path", system_info_.desktop_path)
 		+ "}";
 }
 
@@ -1717,7 +1793,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"run_command",
-		"Run a one-shot shell command synchronously and capture its stdout/stderr/exit code. This executes arbitrary shell commands on the host machine - use only for tasks the user actually asked for.",
+		"Run a one-shot shell command synchronously and capture its stdout/stderr/exit code. This executes arbitrary shell commands on the host machine - use only for tasks the user actually asked for. If your command contains a bare relative \"desktop/...\" path, it's automatically replaced with the real Desktop folder (see get_system_info's desktop_path) before running - the result includes a \"resolved_command\" field when that happened, report the location from there, not from what you originally typed.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"command\":{\"type\":\"string\",\"description\":\"the shell command to run\"},"
 		"\"work_dir\":{\"type\":\"string\",\"description\":\"optional working directory\"}"
@@ -1789,7 +1865,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"run_ffmpeg",
-		"Run the ffmpeg CLI for media transcode/convert/clip/extract/thumbnail work - the binary is resolved automatically (PATH, then $DROIDCLI_FFMPEG_ROOT), you don't need to know where it lives. args is the raw ffmpeg argument string exactly as you'd type it after 'ffmpeg', e.g. '-y -i input.mp4 -vf scale=1280:-1 output.mp4' or '-i in.wav -ar 16000 out.wav'. Always pass -y to overwrite outputs without prompting, since there is no interactive terminal to answer that prompt. Runs synchronously and returns captured stdout/stderr/exit_code - encodes can take a while, so raise timeout_ms for large files (default 120000ms).",
+		"Run the ffmpeg CLI for media transcode/convert/clip/extract/thumbnail work - the binary is resolved automatically (PATH, then $DROIDCLI_FFMPEG_ROOT), you don't need to know where it lives. args is the raw ffmpeg argument string exactly as you'd type it after 'ffmpeg', e.g. '-y -i input.mp4 -vf scale=1280:-1 output.mp4' or '-i in.wav -ar 16000 out.wav'. Always pass -y to overwrite outputs without prompting, since there is no interactive terminal to answer that prompt. To generate a single static image from nothing (a solid color, a test pattern, etc.) rather than transcode an existing file, use the lavfi virtual input with -frames:v 1 and -update 1 - both are required or the image2 muxer rejects a plain (non-%d-pattern) output filename with 'does not contain an image sequence pattern': '-y -f lavfi -i color=red:s=512x512 -frames:v 1 -update 1 output.png'. If your args contain a bare relative \"desktop/...\" path, it's automatically replaced with the real Desktop folder (see get_system_info's desktop_path) before running - the result includes a \"resolved_args\" field when that happened, report the location from there, not from what you originally typed. Runs synchronously and returns captured stdout/stderr/exit_code - encodes can take a while, so raise timeout_ms for large files (default 120000ms).",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"args\":{\"type\":\"string\",\"description\":\"ffmpeg arguments, e.g. '-y -i input.mp4 output.webm'\"},"
 		"\"work_dir\":{\"type\":\"string\",\"description\":\"optional working directory\"},"
@@ -1798,7 +1874,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"get_system_info",
-		"Get the host machine droidcli is actually running on right now: OS name, OS version/build, CPU architecture, hostname, username, and current working directory. This was already queried once at startup and is in your system prompt, but call this if you need to double-check or report it precisely (e.g. the user asks 'what machine/OS is this'). Takes no arguments.",
+		"Get the host machine droidcli is actually running on right now: OS name, OS version/build, CPU architecture, hostname, username, current working directory, and desktop_path (the user's actual Desktop folder, resolved via the OS - not a guess, use this instead of constructing a 'C:\\Users\\<name>\\Desktop'-style path yourself, which breaks for a redirected or localized Desktop folder). This was already queried once at startup and is in your system prompt, but call this if you need to double-check or report it precisely (e.g. the user asks 'what machine/OS is this' or 'where is my Desktop'). Takes no arguments.",
 		"{\"type\":\"object\",\"properties\":{}}"});
 
 	return tools;
