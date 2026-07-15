@@ -2,6 +2,7 @@
 
 #include "app_index.hpp"
 #include "command_runner.hpp"
+#include "intent/open_intent.hpp"
 #include "tools/sync_http_client.hpp"
 
 #include <algorithm>
@@ -16,42 +17,100 @@
 namespace droidcli::cli {
 namespace {
 
-core::String to_lower_ascii(const core::String& value)
+// Lowercases and strips everything but letters/digits, so "Note Pad",
+// "note-pad", and "NOTEPAD" all normalize to the same "notepad" key - name
+// matching should be resilient to case and to spacing/punctuation variants a
+// user (or a model paraphrasing the user) might type, not just case.
+core::String normalize_for_match(const core::String& value)
 {
-	core::String result = value;
-	std::transform(result.begin(), result.end(), result.begin(),
-		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	core::String result;
+	result.reserve(value.size());
+	for (const unsigned char c : value)
+	{
+		if (std::isalnum(c))
+		{
+			result += static_cast<char>(std::tolower(c));
+		}
+	}
 	return result;
 }
 
-// Best-effort case-insensitive match of `query` against the installed-apps
-// index: exact name match first, then a substring match either direction
-// (so "chrome" matches "Google Chrome" and "kicad" matches "KiCad 8.0").
-// Returns an empty path if nothing plausible is found.
+// Best-effort match of `query` against the installed-apps index, insensitive
+// to case and to spacing/punctuation: exact normalized match first, then a
+// substring match either direction (so "chrome" matches "Google Chrome",
+// "kicad" matches "KiCad 8.0", and "note pad" / "NotePad" both match
+// "Notepad"). Returns an empty path if nothing plausible is found.
 core::String find_installed_app_match(const core::Array<InstalledApp>& apps, const core::String& query)
 {
 	if (query.empty())
 	{
 		return {};
 	}
-	const core::String lower_query = to_lower_ascii(query);
+	const core::String normalized_query = normalize_for_match(query);
+	if (normalized_query.empty())
+	{
+		return {};
+	}
 
 	for (const InstalledApp& app : apps)
 	{
-		if (to_lower_ascii(app.name) == lower_query)
+		if (normalize_for_match(app.name) == normalized_query)
 		{
 			return app.path;
 		}
 	}
 	for (const InstalledApp& app : apps)
 	{
-		const core::String lower_name = to_lower_ascii(app.name);
-		if (lower_name.find(lower_query) != core::String::npos || lower_query.find(lower_name) != core::String::npos)
+		const core::String normalized_name = normalize_for_match(app.name);
+		if (normalized_name.find(normalized_query) != core::String::npos
+			|| normalized_query.find(normalized_name) != core::String::npos)
 		{
 			return app.path;
 		}
 	}
 	return {};
+}
+
+// Same matching rule as find_installed_app_match, but returns every
+// plausible match (capped at max_results) instead of just the first - the
+// deterministic quick-open flow needs to know whether a query is ambiguous
+// (more than one installed app could be meant), which a single best-match
+// path can't tell it.
+core::Array<InstalledApp> collect_installed_app_matches(
+	const core::Array<InstalledApp>& apps, const core::String& query, size_t max_results)
+{
+	core::Array<InstalledApp> matches;
+	const core::String normalized_query = normalize_for_match(query);
+	if (normalized_query.empty())
+	{
+		return matches;
+	}
+
+	for (const InstalledApp& app : apps)
+	{
+		if (normalize_for_match(app.name) == normalized_query)
+		{
+			// An exact normalized-name match is unambiguous regardless of
+			// how many substring matches also exist - return it alone.
+			matches.clear();
+			matches.push_back(app);
+			return matches;
+		}
+	}
+	for (const InstalledApp& app : apps)
+	{
+		const core::String normalized_name = normalize_for_match(app.name);
+		if (normalized_name.find(normalized_query) != core::String::npos
+			|| normalized_query.find(normalized_name) != core::String::npos)
+		{
+			matches.push_back(app);
+			if (matches.size() >= max_results)
+			{
+				break;
+			}
+		}
+	}
+	return matches;
 }
 
 core::Array<core::String> parse_ollama_model_names(const core::String& tags_json)
@@ -1113,10 +1172,10 @@ core::String DroidHost::find_applications_json(const core::String& body) const
 	std::ostringstream stream;
 	stream << "{\"matches\":[";
 	bool first = true;
-	const core::String lower_query = to_lower_ascii(query);
+	const core::String normalized_query = normalize_for_match(query);
 	for (const InstalledApp& app : installed_apps_)
 	{
-		if (!query.empty() && to_lower_ascii(app.name).find(lower_query) == core::String::npos)
+		if (!normalized_query.empty() && normalize_for_match(app.name).find(normalized_query) == core::String::npos)
 		{
 			continue;
 		}
@@ -1129,6 +1188,46 @@ core::String DroidHost::find_applications_json(const core::String& body) const
 		stream << net::json_string_field("name", app.name) << ',';
 		stream << net::json_string_field("path", app.path);
 		stream << '}';
+	}
+	stream << "]}";
+	return stream.str();
+}
+
+core::String DroidHost::try_quick_open_json(const core::String& body) const
+{
+	const core::String message = net::extract_json_string_field(body, "message");
+	const intent::OpenIntent parsed = intent::parse_open_intent(message);
+
+	std::ostringstream stream;
+	stream << '{' << net::json_bool_field("matched", parsed.matched);
+	if (!parsed.matched)
+	{
+		stream << '}';
+		return stream.str();
+	}
+	stream << ',' << net::json_string_field("app_name", parsed.app_name);
+
+	core::Array<InstalledApp> candidates;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		candidates = collect_installed_app_matches(installed_apps_, parsed.app_name, 5);
+	}
+
+	stream << ',' << net::json_bool_field("ambiguous", candidates.size() > 1);
+	if (candidates.size() == 1)
+	{
+		stream << ',' << net::json_string_field("resolved_name", candidates[0].name);
+		stream << ',' << net::json_string_field("resolved_path", candidates[0].path);
+	}
+	stream << ",\"candidates\":[";
+	for (size_t index = 0; index < candidates.size(); ++index)
+	{
+		if (index > 0)
+		{
+			stream << ',';
+		}
+		stream << '{' << net::json_string_field("name", candidates[index].name) << ','
+			<< net::json_string_field("path", candidates[index].path) << '}';
 	}
 	stream << "]}";
 	return stream.str();
@@ -1317,7 +1416,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"find_application",
-		"Search the index of applications actually installed on this machine (scanned once at startup from Windows' Add/Remove Programs registry) for a name matching or containing the query. Use this BEFORE open_application when you aren't certain of an app's exact name, or after open_application fails - it tells you the exact installed name and resolved path so you don't have to guess. Returns a list of {name, path} matches; if there's more than one plausible match, ask the user which one they mean instead of picking for them.",
+		"Search the index of applications on this machine (scanned once at startup from Windows' Add/Remove Programs registry, plus built-in accessories like Notepad/Calculator/Paint/Command Prompt/PowerShell that don't appear in that registry) for a name matching or containing the query - matching ignores case and spacing, so 'notepad', 'NotePad', and 'note pad' all match 'Notepad'. Use this BEFORE open_application when you aren't certain of an app's exact name, or after open_application fails - it tells you the exact installed name and resolved path so you don't have to guess. Returns a list of {name, path} matches; if there's more than one plausible match, ask the user which one they mean instead of picking for them. An EMPTY match list does not mean the app can't be opened - open_application has its own independent PATH/App Paths lookup and can succeed even when this index has nothing, so still try open_application with the user's own wording before telling them it couldn't be found.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"query\":{\"type\":\"string\",\"description\":\"app name or partial name to search for, e.g. 'blender' or 'kicad'\"}"
 		"},\"required\":[\"query\"]}"});
@@ -1497,7 +1596,14 @@ core::String DroidHost::agent_turn(const core::String& body)
 
 		if (agent_transcript_.empty() && !config_.system_prompt.empty())
 		{
-			agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::System, config_.system_prompt});
+			// Appends the concrete count from the startup scan (see initialize())
+			// so the model is told a fact, not a capability description it might
+			// discount - "you have 74 apps indexed" is harder to hedge on than
+			// "you can look up installed apps".
+			const core::String system_prompt = config_.system_prompt
+				+ " Right now this index has " + std::to_string(installed_apps_.size())
+				+ " installed applications in it.";
+			agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::System, system_prompt});
 		}
 		agent_transcript_.push_back(ai::ChatMessage{ai::ChatRole::User, user_message});
 	}

@@ -21,5 +21,6 @@
 #include "net/connector.cpp"
 #include "notify/parse.cpp"
 #include "session/status.cpp"
+#include "intent/open_intent.cpp"
 
 #include "initialize.cpp"

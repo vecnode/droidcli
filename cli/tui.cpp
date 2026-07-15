@@ -275,6 +275,82 @@ std::vector<ChatEntry> parse_agent_turn_response(const std::string& json)
 	return entries;
 }
 
+// One installed-app candidate from DroidHost::try_quick_open_json()'s
+// "candidates" array.
+struct AppOpenCandidate {
+	std::string name;
+	std::string path;
+};
+
+// Mirrors DroidHost::try_quick_open_json()'s response shape - the
+// deterministic, LLM-free "open X" recognizer (intent::parse_open_intent)
+// plus its resolution against the installed-apps index.
+struct QuickOpenResult {
+	bool matched = false;
+	std::string app_name;
+	std::vector<AppOpenCandidate> candidates;
+};
+
+QuickOpenResult parse_quick_open_result(const std::string& json)
+{
+	QuickOpenResult result;
+	net::extract_json_bool_field(json, "matched", result.matched);
+	if (!result.matched)
+	{
+		return result;
+	}
+	result.app_name = net::extract_json_string_field(json, "app_name");
+	for (const std::string& object : extract_json_object_array(json, "candidates"))
+	{
+		AppOpenCandidate candidate;
+		candidate.name = net::extract_json_string_field(object, "name");
+		candidate.path = net::extract_json_string_field(object, "path");
+		if (!candidate.name.empty())
+		{
+			result.candidates.push_back(candidate);
+		}
+	}
+	return result;
+}
+
+// UI-thread-owned state for the quick-open confirmation flow: set once a
+// message parses as an "open X" request, cleared once the user answers
+// (yes/no, a candidate number, or "cancel"). While active, the next Enter
+// press is consumed by this flow instead of being sent to Ollama.
+struct PendingOpen {
+	bool active = false;
+	std::string app_name;
+	// Empty: not found in the installed-apps index, confirm opening
+	// app_name directly. One entry: an unambiguous index match, confirm
+	// yes/no. More than one: ambiguous, ask the user to pick a number.
+	std::vector<AppOpenCandidate> candidates;
+};
+
+std::string describe_pending_open_prompt(const PendingOpen& pending)
+{
+	if (pending.candidates.size() > 1)
+	{
+		std::ostringstream stream;
+		stream << "Multiple installed apps match '" << pending.app_name << "': ";
+		for (size_t index = 0; index < pending.candidates.size(); ++index)
+		{
+			if (index > 0)
+			{
+				stream << "  ";
+			}
+			stream << (index + 1) << ") " << pending.candidates[index].name;
+		}
+		stream << ". Type a number to open one, or 'cancel'.";
+		return stream.str();
+	}
+	if (pending.candidates.size() == 1)
+	{
+		return "Open " + pending.candidates[0].name + " (" + pending.candidates[0].path + ")? (yes/no)";
+	}
+	return "'" + pending.app_name + "' isn't in the installed-apps index, but I can still try to open it "
+		"directly by that name. Open it? (yes/no)";
+}
+
 // Parses a plain JSON array of strings, e.g. {"models":["a","b"]}. Distinct
 // from extract_json_object_array above, which walks an array of {...}
 // objects - DroidHost::ollama_setup_status_json()'s "models" field is an
@@ -566,6 +642,30 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	std::vector<ChatEntry> chat_entries;
 	std::string chat_input_text;
 	bool agent_turn_in_flight = false;
+	PendingOpen pending_open;
+
+	// Fires the actual launch for a confirmed quick-open request and reports
+	// the result - reuses DroidHost::open_application (the same path
+	// find_application/open_application tool calls go through), so a quick
+	// open gets identical PID reporting, App Paths/PATH/index resolution,
+	// and app_log auditing as an LLM-driven open would.
+	auto perform_quick_open = [&](const std::string& path_or_name, const std::string& display_name)
+	{
+		const std::string body = "{" + net::json_string_field("path_or_name", path_or_name) + "}";
+		const std::string result_json = host.open_application(body);
+		bool launched = false;
+		net::extract_json_bool_field(result_json, "launched", launched);
+		if (launched)
+		{
+			chat_entries.push_back(ChatEntry{"info", "Opened " + display_name + "."});
+		}
+		else
+		{
+			const std::string error = net::extract_json_string_field(result_json, "error");
+			chat_entries.push_back(ChatEntry{"error",
+				"Could not open " + display_name + (error.empty() ? "." : (": " + error))});
+		}
+	};
 	const std::string status_line =
 		"droidcli TUI  -  HTTP API on http://127.0.0.1:" + std::to_string(http_port);
 
@@ -606,20 +706,22 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 
 	Component tasks_view = Renderer([&]() -> Element
 	{
+		// paragraph() (not text()) on each cell so a long task/connector id
+		// wraps within its column instead of overflowing into the next one.
 		Elements rows;
 		rows.push_back(hbox({
 			text("ID") | size(WIDTH, EQUAL, 22),
 			text("CONNECTOR") | size(WIDTH, EQUAL, 16),
 			text("COMMAND") | size(WIDTH, EQUAL, 10),
-			text("STATUS"),
+			text("STATUS") | flex,
 		}) | bold);
 		for (const TaskRow& task : tasks)
 		{
 			rows.push_back(hbox({
-				text(task.id) | size(WIDTH, EQUAL, 22),
-				text(task.connector_id) | size(WIDTH, EQUAL, 16),
-				text(task.command) | size(WIDTH, EQUAL, 10),
-				text(task.status),
+				paragraph(task.id) | size(WIDTH, EQUAL, 22),
+				paragraph(task.connector_id) | size(WIDTH, EQUAL, 16),
+				paragraph(task.command) | size(WIDTH, EQUAL, 10),
+				paragraph(task.status) | flex,
 			}));
 		}
 		if (tasks.empty())
@@ -631,12 +733,14 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 
 	Component log_view = Renderer([&]() -> Element
 	{
+		// paragraph() (not text()) so a long log line wraps within the panel's
+		// width instead of overflowing off the right edge, matching chat_log_view.
 		Elements lines;
 		const size_t max_visible_lines = 200;
 		const size_t start = log_lines.size() > max_visible_lines ? log_lines.size() - max_visible_lines : 0;
 		for (size_t index = start; index < log_lines.size(); ++index)
 		{
-			lines.push_back(text(log_lines[index]));
+			lines.push_back(paragraph(log_lines[index]));
 		}
 		if (lines.empty())
 		{
@@ -678,11 +782,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		}
 		if (agent_turn_in_flight)
 		{
-			lines.push_back(text("[AGENT] (thinking...)"));
+			lines.push_back(paragraph("[AGENT] (thinking...)"));
 		}
 		if (lines.empty())
 		{
-			lines.push_back(text("(no messages yet - type below and press Enter)"));
+			lines.push_back(paragraph("(no messages yet - type below and press Enter)"));
 		}
 		return vbox(lines) | yframe | flex;
 	});
@@ -902,6 +1006,103 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			{
 				return true;
 			}
+
+			// Deterministic, LLM-free "open X" handling takes priority over
+			// both the pending-confirmation reply and the normal Ollama/
+			// agent-turn path: opening an app is common enough, and
+			// consequential enough, that it shouldn't wait on (or depend on
+			// the reliability of) a local model deciding to call a tool -
+			// see intent::parse_open_intent (src/intent/open_intent.cpp) and
+			// DroidHost::try_quick_open_json (cli/host.cpp). Every launch
+			// still requires an explicit yes/no (or a number, if ambiguous)
+			// from the user - this shortcuts recognition, not confirmation.
+			if (pending_open.active)
+			{
+				const std::string reply = trim(chat_input_text);
+				chat_input_text.clear();
+				if (!reply.empty())
+				{
+					chat_entries.push_back(ChatEntry{"user", reply});
+				}
+				const std::string lower_reply = to_lower(reply);
+
+				if (pending_open.candidates.size() > 1)
+				{
+					bool is_number = !reply.empty();
+					for (const char character : reply)
+					{
+						if (std::isdigit(static_cast<unsigned char>(character)) == 0)
+						{
+							is_number = false;
+							break;
+						}
+					}
+					if (lower_reply == "cancel" || lower_reply == "no")
+					{
+						chat_entries.push_back(ChatEntry{"info", "Cancelled."});
+						pending_open = PendingOpen{};
+					}
+					else if (is_number)
+					{
+						const int index = std::atoi(reply.c_str());
+						if (index >= 1 && static_cast<size_t>(index) <= pending_open.candidates.size())
+						{
+							const AppOpenCandidate& chosen = pending_open.candidates[static_cast<size_t>(index) - 1];
+							perform_quick_open(chosen.path, chosen.name);
+							pending_open = PendingOpen{};
+						}
+						else
+						{
+							chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+						}
+					}
+					else
+					{
+						chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+					}
+				}
+				else if (lower_reply == "yes" || lower_reply == "y")
+				{
+					if (pending_open.candidates.size() == 1)
+					{
+						perform_quick_open(pending_open.candidates[0].path, pending_open.candidates[0].name);
+					}
+					else
+					{
+						perform_quick_open(pending_open.app_name, pending_open.app_name);
+					}
+					pending_open = PendingOpen{};
+				}
+				else if (lower_reply == "no" || lower_reply == "n" || lower_reply == "cancel")
+				{
+					chat_entries.push_back(ChatEntry{"info", "Cancelled."});
+					pending_open = PendingOpen{};
+				}
+				else
+				{
+					chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+				}
+				return true;
+			}
+
+			if (!chat_input_text.empty())
+			{
+				const QuickOpenResult quick_open = parse_quick_open_result(host.try_quick_open_json(
+					"{" + net::json_string_field("message", chat_input_text) + "}"));
+				if (quick_open.matched)
+				{
+					const std::string message = chat_input_text;
+					chat_input_text.clear();
+					chat_entries.push_back(ChatEntry{"user", message});
+
+					pending_open.active = true;
+					pending_open.app_name = quick_open.app_name;
+					pending_open.candidates = quick_open.candidates;
+					chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+					return true;
+				}
+			}
+
 			if (chat_input_text.empty())
 			{
 				// Blank Enter is only meaningful (picks the default model)

@@ -68,6 +68,10 @@ add_executable(droidcli_task_queue_test tests/task_queue_test.cpp)
 target_link_libraries(droidcli_task_queue_test PRIVATE droidcli_core)
 add_test(NAME task_queue_test COMMAND droidcli_task_queue_test)
 
+add_executable(droidcli_intent_test tests/intent_test.cpp)
+target_link_libraries(droidcli_intent_test PRIVATE droidcli_core)
+add_test(NAME intent_test COMMAND droidcli_intent_test)
+
 # FTXUI powers droidcli's default interactive terminal dashboard (cli/tui.cpp).
 # Scoped to the droidcli target only via FetchContent + target_link_libraries -
 # it must never leak into the core `droidcli_core` library or the test targets.
