@@ -49,6 +49,30 @@ int main()
 		assert(intent.app_name == "VsCode");
 	}
 
+	// Real-world phrasing observed in production: "Ok I want you to open
+	// Blender" was NOT recognized before the courtesy-prefix list grew to
+	// cover "ok "/"i want you to " - it fell through to Ollama, which
+	// refused ("I don't have the capability to directly open applications")
+	// even though open_application existed and worked fine moments later
+	// for a differently-phrased request.
+	{
+		const OpenIntent intent = parse_open_intent("Ok I want you to open Blender");
+		assert(intent.matched);
+		assert(intent.app_name == "Blender");
+	}
+
+	// "so, open X" and "I'd like to open X" variants.
+	{
+		const OpenIntent intent = parse_open_intent("So, open Chrome");
+		assert(intent.matched);
+		assert(intent.app_name == "Chrome");
+	}
+	{
+		const OpenIntent intent = parse_open_intent("I'd like to open Discord");
+		assert(intent.matched);
+		assert(intent.app_name == "Discord");
+	}
+
 	// A genuine question containing "open" mid-sentence must NOT be hijacked
 	// into an app-launch confirmation - it should fall through to the full
 	// agent/LLM path instead.

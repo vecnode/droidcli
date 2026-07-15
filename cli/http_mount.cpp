@@ -2,6 +2,12 @@
 
 #include "host.hpp"
 
+// This file plus tools::MiniHttpServer is droidcli's gateway (the Edge-tier
+// role ZeroClaw's zeroclaw-gateway plays - see ARCHITECTURE.md's crate
+// comparison): the one thing external clients (curl, scripts, future
+// dashboards) talk to. A future messaging-channel connector (Phase 4 of the
+// extension plan) is the other Edge-tier piece, once one is actually
+// requested - it does not belong in this file.
 namespace droidcli::cli {
 namespace {
 

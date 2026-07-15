@@ -746,6 +746,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		{
 			lines.push_back(text("(no log entries yet)") | dim);
 		}
+		// Keep the view pinned to the newest entry, same rationale as
+		// chat_log_view below - new log lines otherwise append below the
+		// visible scroll area and the panel looks stalled.
+		lines.back() |= focus;
 		return vbox(lines) | yframe | flex;
 	});
 
@@ -788,6 +792,13 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		{
 			lines.push_back(paragraph("(no messages yet - type below and press Enter)"));
 		}
+		// Marking the last line as the frame's focused element makes yframe
+		// auto-scroll to keep it in view on every render - without this the
+		// scroll position stays wherever it last was (usually the top), so
+		// new messages append below the visible area and the panel looks
+		// stuck/empty even though chat_entries (never truncated, unbounded)
+		// still has everything.
+		lines.back() |= focus;
 		return vbox(lines) | yframe | flex;
 	});
 

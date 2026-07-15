@@ -1693,6 +1693,19 @@ core::String DroidHost::agent_turn(const core::String& body)
 
 	actions_stream << ']';
 
+	// A model can legitimately return an empty assistant_message with no
+	// tool_calls (seen in practice with a local Ollama model on some
+	// requests) - without this, the caller gets ok:true with a blank
+	// "assistant" field and nothing to show the user, which reads as the
+	// turn silently doing nothing rather than as an error. Substitute a
+	// visible placeholder instead of ever returning a blank reply.
+	if (final_assistant_text.empty())
+	{
+		final_assistant_text = budget_exhausted
+			? "(reached the tool-call limit without a final reply - try rephrasing or breaking the request into smaller steps)"
+			: "(no reply text - the model returned an empty response, try rephrasing)";
+	}
+
 	append_app_log("chat", "out", "assistant: " + final_assistant_text, true);
 
 	std::ostringstream stream;
