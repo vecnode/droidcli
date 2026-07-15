@@ -23,6 +23,54 @@ namespace droidcli::cli {
 
 #ifdef _WIN32
 
+namespace {
+
+bool looks_like_path(const core::String& value)
+{
+	return value.find('\\') != core::String::npos || value.find('/') != core::String::npos;
+}
+
+// Windows' "App Paths" registry mechanism - the same one Explorer/Win+R use
+// to resolve a bare name like "chrome" to its actual install location even
+// when the app was never added to PATH (most GUI app installers register
+// here instead of touching PATH). Checked before falling back to letting
+// CreateProcess do its own bare-name search. Returns an empty string if no
+// match is found in either hive.
+core::String resolve_app_paths_registry(const core::String& name)
+{
+	core::String key_name = name;
+	if (key_name.size() < 4 || key_name.compare(key_name.size() - 4, 4, ".exe") != 0)
+	{
+		key_name += ".exe";
+	}
+	const core::String subkey = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + key_name;
+
+	for (const HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE})
+	{
+		HKEY key = nullptr;
+		if (RegOpenKeyExA(root, subkey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
+		{
+			continue;
+		}
+
+		char buffer[MAX_PATH] = {};
+		DWORD buffer_size = sizeof(buffer);
+		DWORD type = 0;
+		const LONG query_result = RegQueryValueExA(
+			key, nullptr, nullptr, &type, reinterpret_cast<LPBYTE>(buffer), &buffer_size);
+		RegCloseKey(key);
+
+		if (query_result == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && buffer_size > 0)
+		{
+			return core::String(buffer);
+		}
+	}
+
+	return {};
+}
+
+} // namespace
+
 CommandRunResult run_command_once(
 	const core::String& command,
 	const core::String& work_dir,
@@ -139,6 +187,88 @@ CommandRunResult run_command_once(
 	CloseHandle(stdout_read);
 	CloseHandle(stderr_read);
 
+	return result;
+}
+
+LaunchAppResult launch_application(
+	const core::String& path_or_name,
+	const core::String& args,
+	const core::String& work_dir)
+{
+	LaunchAppResult result;
+	if (path_or_name.empty())
+	{
+		result.error_message = "path_or_name is empty";
+		return result;
+	}
+
+	// A bare app name (no path separator) is checked against the App Paths
+	// registry first - most installed GUI apps register there instead of
+	// touching PATH, so "chrome"/"code" etc. resolve correctly even though
+	// which_executable()'s PATH-only search wouldn't find them. If there's
+	// no registry match, resolved_target stays as the caller's original
+	// string and CreateProcess falls back to its own bare-name search
+	// (calling process's directory, current directory, system directories,
+	// PATH) - same as before this resolution step existed.
+	core::String resolved_target = path_or_name;
+	if (!looks_like_path(path_or_name))
+	{
+		const core::String registry_path = resolve_app_paths_registry(path_or_name);
+		if (!registry_path.empty())
+		{
+			resolved_target = registry_path;
+		}
+	}
+
+	// Quote the target in case it (or its resolved match) contains spaces;
+	// args are appended as given - caller's responsibility to quote
+	// individual arguments that need it.
+	core::String command_line = "\"" + resolved_target + "\"";
+	if (!args.empty())
+	{
+		command_line += " " + args;
+	}
+	std::vector<char> mutable_command_line(command_line.begin(), command_line.end());
+	mutable_command_line.push_back('\0');
+
+	STARTUPINFOA startup {};
+	startup.cb = sizeof(startup);
+
+	PROCESS_INFORMATION process {};
+	const char* cwd = work_dir.empty() ? nullptr : work_dir.c_str();
+
+	// No lpApplicationName: CreateProcess resolves a bare executable name
+	// against the same search order a shell would (calling process's
+	// directory, current directory, Windows system directories, PATH) - the
+	// same intent as which_executable(), just performed by the OS itself.
+	// No stdout/stderr redirection and no wait: this is a detached,
+	// fire-and-forget GUI/app launch, not a captured one-shot command.
+	const BOOL created = CreateProcessA(
+		nullptr,
+		mutable_command_line.data(),
+		nullptr,
+		nullptr,
+		FALSE,
+		0,
+		nullptr,
+		cwd,
+		&startup,
+		&process);
+
+	if (created == FALSE)
+	{
+		const DWORD last_error = GetLastError();
+		result.error_message = "CreateProcess failed (" + std::to_string(last_error)
+			+ ") trying to launch \"" + resolved_target + "\" - not found via App Paths registry, "
+			"PATH, or as a direct path. Ask the user for the exact executable name or full path "
+			"rather than guessing.";
+		return result;
+	}
+
+	result.launched = true;
+	result.pid = static_cast<int64_t>(process.dwProcessId);
+	CloseHandle(process.hProcess);
+	CloseHandle(process.hThread);
 	return result;
 }
 
@@ -283,6 +413,94 @@ CommandRunResult run_command_once(
 	close(stdout_pipe[0]);
 	close(stderr_pipe[0]);
 
+	return result;
+}
+
+LaunchAppResult launch_application(
+	const core::String& path_or_name,
+	const core::String& args,
+	const core::String& work_dir)
+{
+	LaunchAppResult result;
+	if (path_or_name.empty())
+	{
+		result.error_message = "path_or_name is empty";
+		return result;
+	}
+
+	// Double-fork so the launched app is fully detached and re-parented to
+	// init: a single fork()+exec() would leave `waitpid` below blocking
+	// until the *app itself* exits (exec replaces the child's image but
+	// keeps its PID), defeating fire-and-forget. The pipe hands the
+	// grandchild's PID back to this process, since fork()'s return value in
+	// the middle child isn't visible here.
+	int pid_pipe[2] = {-1, -1};
+	if (pipe(pid_pipe) != 0)
+	{
+		result.error_message = "pipe() failed";
+		return result;
+	}
+
+	const pid_t middle_pid = fork();
+	if (middle_pid < 0)
+	{
+		close(pid_pipe[0]);
+		close(pid_pipe[1]);
+		result.error_message = "fork() failed";
+		return result;
+	}
+
+	if (middle_pid == 0)
+	{
+		// Middle child: detach into its own session, fork the real
+		// grandchild, report its PID to the parent, then exit immediately -
+		// orphaning the grandchild to init rather than droidcli.
+		close(pid_pipe[0]);
+		setsid();
+
+		const pid_t app_pid = fork();
+		if (app_pid < 0)
+		{
+			_exit(1);
+		}
+		if (app_pid == 0)
+		{
+			if (!work_dir.empty() && chdir(work_dir.c_str()) != 0)
+			{
+				_exit(127);
+			}
+			core::String command_line = path_or_name;
+			if (!args.empty())
+			{
+				command_line += " " + args;
+			}
+			execl("/bin/sh", "sh", "-c", command_line.c_str(), static_cast<char*>(nullptr));
+			_exit(127);
+		}
+
+		const int64_t pid_to_report = static_cast<int64_t>(app_pid);
+		write(pid_pipe[1], &pid_to_report, sizeof(pid_to_report));
+		close(pid_pipe[1]);
+		_exit(0);
+	}
+
+	// Parent: reap the middle child (returns quickly, it exits right after
+	// forking) and read back the actual app's PID - not a blocking wait on
+	// the launched application.
+	close(pid_pipe[1]);
+	int64_t app_pid = 0;
+	const ssize_t bytes_read = read(pid_pipe[0], &app_pid, sizeof(app_pid));
+	close(pid_pipe[0]);
+
+	int status = 0;
+	waitpid(middle_pid, &status, 0);
+
+	result.launched = bytes_read == static_cast<ssize_t>(sizeof(app_pid)) && app_pid > 0;
+	result.pid = app_pid;
+	if (!result.launched)
+	{
+		result.error_message = "failed to launch " + path_or_name;
+	}
 	return result;
 }
 

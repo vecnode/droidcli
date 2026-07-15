@@ -97,6 +97,11 @@ public:
 	// {"command":"...","work_dir":"...","timeout_ms":...}.
 	core::String run_command(const core::String& body);
 
+	// Detached, fire-and-forget application launch (POST /api/open) - for
+	// GUI apps that don't exit on their own, distinct from run_command which
+	// blocks for completion. body: {"path_or_name":"...","args":"...","work_dir":"..."}.
+	core::String open_application(const core::String& body);
+
 	// Filesystem-aware agent tools (POST /api/fs/*) - droidcli executes these
 	// itself, no external process or MCP server involved.
 	// body: {"path":"...","max_bytes":...}. Caps read size (default 65536).

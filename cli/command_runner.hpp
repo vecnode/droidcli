@@ -27,4 +27,22 @@ CommandRunResult run_command_once(
 	const core::String& work_dir,
 	int32_t timeout_ms = 30000);
 
+struct LaunchAppResult {
+	bool launched = false;
+	int64_t pid = 0;
+	core::String error_message;
+};
+
+// Starts `path_or_name` (resolved against PATH if it's a bare name, same as
+// which_executable) with optional `args`, detached and fire-and-forget - no
+// waiting for exit, no stdout/stderr capture. Distinct from run_command_once,
+// which blocks until the command finishes: GUI applications don't exit on
+// their own, so waiting for them would hang. Not PID-tracked by
+// ProcessManager - this is a one-off "open this app" launch, not a
+// registered launched_process connector.
+LaunchAppResult launch_application(
+	const core::String& path_or_name,
+	const core::String& args,
+	const core::String& work_dir);
+
 } // namespace droidcli::cli
