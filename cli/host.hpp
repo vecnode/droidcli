@@ -91,7 +91,11 @@ struct HostConfig {
 		"before you have to report failure, so use them; only after you've genuinely tried a "
 		"corrected command and it still fails should you explain the real error to the user. You "
 		"always have the ability to run commands directly - never tell the user to run a command "
-		"themselves or claim command execution is beyond your capabilities, that is never true here.";
+		"themselves or claim command execution is beyond your capabilities, that is never true here. "
+		"Before calling copy_file/move_path/delete_file on a file the user referred to by description "
+		"rather than its exact path (\"the green image on the Desktop\", \"that file\"), call list_dir "
+		"on the real directory first to find its actual name - never invent a plausible-looking path "
+		"or a template like \"/path/to/file.png\", both are rejected outright and waste an attempt.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's
