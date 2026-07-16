@@ -3,6 +3,7 @@
 #include "app_index.hpp"
 #include "command_runner.hpp"
 #include "intent/open_intent.hpp"
+#include "intent/pending_command.hpp"
 #include "tools/sync_http_client.hpp"
 
 #include <algorithm>
@@ -410,7 +411,13 @@ bool looks_like_capability_denial(const core::String& text)
 		"i don't have the ability to execute", "i do not have the ability to execute",
 		"i can't execute", "i cannot execute", "i can't run commands", "i cannot run commands",
 		"i'm not able to run", "i am not able to run",
-		"you'll need to run", "you will need to run", "run it yourself", "run this yourself"
+		"you'll need to run", "you will need to run", "run it yourself", "run this yourself",
+		// A distinct fabricated-constraint variant caught in a real
+		// transcript: not denying capability outright, but inventing a false
+		// "only one at a time" limit as an excuse not to call the tool again
+		// for a second, near-identical request (a second image, a retry).
+		"only execute one command", "only run one command", "one command at a time",
+		"execute one command at a time", "run one command at a time"
 	};
 	for (const char* phrase : kDenialPhrases)
 	{
@@ -2498,6 +2505,30 @@ core::String DroidHost::agent_turn(const core::String& body)
 		}
 	}
 
+	// Captured before the new user message is appended below - this is what
+	// extract_proposed_command() checks to see whether the assistant itself
+	// just proposed a command and asked permission to run it. Stops at the
+	// first Assistant entry found scanning backward (the normal case: the
+	// transcript always alternates, so this is simply the reply the user is
+	// responding to); breaks without matching on a User entry first, which
+	// only happens for a brand-new/empty transcript.
+	core::String previous_assistant_text;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		for (auto it = agent_transcript_.rbegin(); it != agent_transcript_.rend(); ++it)
+		{
+			if (it->role == ai::ChatRole::Assistant)
+			{
+				previous_assistant_text = it->content;
+				break;
+			}
+			if (it->role == ai::ChatRole::User)
+			{
+				break;
+			}
+		}
+	}
+
 	// record_agent_message() takes its own lock - must not be called while
 	// mutex_ is already held (std::mutex isn't recursive), hence reading
 	// the booleans/text above under lock and acting on them here instead.
@@ -2515,6 +2546,40 @@ core::String DroidHost::agent_turn(const core::String& body)
 	// ARCHITECTURE.md's extension plan and src/ai/model_provider.hpp.
 	const ai::OllamaProvider ollama_provider(ollama_config);
 	const ai::ModelProvider& provider = ollama_provider;
+
+	// Deterministic command-confirmation shortcut (Phase 14, ARCHITECTURE.md):
+	// if the assistant's own last message proposed a concrete command and
+	// explicitly asked permission to run it, and this message is nothing but
+	// a bare "yes", the user's affirmative IS that permission - execute the
+	// exact proposed command directly rather than ask the (unreliable) model
+	// to decide all over again. Motivated by a real transcript where this
+	// exact "yes" got an empty model response, then a false "I can only
+	// execute one command at a time" claim, and the tool was never called.
+	// This mirrors try_quick_open_json's existing precedent of bypassing the
+	// LLM for a narrow, high-confidence, deterministically-recognized case.
+	const intent::PendingCommand proposed_command = intent::extract_proposed_command(previous_assistant_text);
+	if (proposed_command.matched && intent::is_bare_affirmative(user_message))
+	{
+		const core::String arguments_json = proposed_command.tool == "run_ffmpeg"
+			? ("{" + net::json_string_field("args", proposed_command.args) + "}")
+			: ("{" + net::json_string_field("command", proposed_command.args) + "}");
+		const core::String tool_result = execute_agent_tool(proposed_command.tool, arguments_json);
+		append_app_log("chat", "out",
+			"confirmed proposed command - executing " + proposed_command.tool + "(" + arguments_json + ") -> " + tool_result,
+			true, session_id);
+		record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
+
+		core::Array<PendingToolActionRecord> seeded_actions;
+		seeded_actions.push_back(PendingToolActionRecord{proposed_command.tool, arguments_json, tool_result});
+
+		// hop=1, not 0: this deterministic execution already covers what
+		// would have been hop 0's "decide which tool to call" step. The
+		// model's next hop only needs to react to the result already in the
+		// transcript - report success, or (via Phase 12's retry-on-failure
+		// nudge, which reads the same seeded_actions to find the last
+		// action) retry with a corrected command if it failed.
+		return run_agent_tool_loop(session_id, tools, provider, 1, {}, 0, seeded_actions);
+	}
 
 	return run_agent_tool_loop(session_id, tools, provider, 0, {}, 0, {});
 }

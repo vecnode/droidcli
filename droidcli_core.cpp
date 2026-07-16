@@ -24,5 +24,6 @@
 #include "notify/parse.cpp"
 #include "session/status.cpp"
 #include "intent/open_intent.cpp"
+#include "intent/pending_command.cpp"
 
 #include "initialize.cpp"
