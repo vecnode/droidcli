@@ -8,12 +8,14 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -32,6 +34,23 @@
 
 namespace droidcli::cli {
 namespace {
+
+// "HH:MM:SS", matching DroidHost::make_log_timestamp()'s format (the one
+// already shown in log_view/tools_view/apps_view) - that method is private to
+// DroidHost, so the chat panel gets its own copy rather than exposing it.
+std::string current_time_hms()
+{
+	const std::time_t raw_time = std::time(nullptr);
+	std::tm local_time {};
+#if defined(_WIN32)
+	localtime_s(&local_time, &raw_time);
+#else
+	localtime_r(&raw_time, &local_time);
+#endif
+	char buffer[16] {};
+	std::strftime(buffer, sizeof(buffer), "%H:%M:%S", &local_time);
+	return buffer;
+}
 
 // Extracts each top-level object of a named JSON array, e.g. {"tasks":[{...}]}.
 // Hand-rolled brace-depth walk, mirroring extract_connector_objects() in
@@ -158,6 +177,44 @@ std::vector<TaskRow> parse_tasks(const std::string& json)
 	return rows;
 }
 
+// One remembered name -> path mapping from DroidHost::list_known_locations_json()
+// (see KnownLocation, cli/memory_store.hpp) - the Locations panel's list
+// below the current cwd/desktop_path line.
+struct LocationRow {
+	std::string name;
+	std::string resolved_path;
+	std::string updated_at;
+};
+
+// Parsed GET /api/locations response: {"ok":true,"cwd":...,"desktop_path":...,
+// "known_locations":[{"name":...,"resolved_path":...,"updated_at":...}]}.
+// cwd/desktop_path are handed back separately (not folded into locations)
+// since they're "where we are right now," not something remembered.
+struct LocationsSnapshot {
+	std::string cwd;
+	std::string desktop_path;
+	std::vector<LocationRow> locations;
+};
+
+LocationsSnapshot parse_locations(const std::string& json)
+{
+	LocationsSnapshot snapshot;
+	snapshot.cwd = net::extract_json_string_field(json, "cwd");
+	snapshot.desktop_path = net::extract_json_string_field(json, "desktop_path");
+	for (const std::string& object : extract_json_object_array(json, "known_locations"))
+	{
+		LocationRow row;
+		row.name = net::extract_json_string_field(object, "name");
+		row.resolved_path = net::extract_json_string_field(object, "resolved_path");
+		row.updated_at = net::extract_json_string_field(object, "updated_at");
+		if (!row.name.empty())
+		{
+			snapshot.locations.push_back(row);
+		}
+	}
+	return snapshot;
+}
+
 // One entry of GET /api/app/log, kept structured (not flattened to a string)
 // so the log panel can color by channel/success and pick out real tool
 // executions ("tool <name>(...) -> ...", see append_app_log calls in
@@ -232,12 +289,28 @@ struct PolledState {
 	std::vector<ConnectorRow> connectors;
 	std::vector<TaskRow> tasks;
 	std::vector<LogRow> log_lines;
+	LocationsSnapshot locations;
 };
 
 // One line of the chat panel: who said it (drives color/weight) and the text.
+// timestamp defaults to "now" (DroidHost::make_log_timestamp(), the same
+// HH:MM:SS used by the App Log/Agent Tools/Apps panels) so every existing
+// ChatEntry{role, text} call site gets a timestamp for free, taken at the
+// moment the entry is actually constructed. Explicit constructors (not a
+// default member initializer on an aggregate) - MSVC rejects a partial-brace
+// aggregate init ({role, text}, timestamp defaulted) as "invalid aggregate
+// initialization" even though it's valid since C++14; constructors sidestep
+// the conformance gap entirely while keeping every existing two-arg call site
+// unchanged.
 struct ChatEntry {
 	std::string role; // "user" | "assistant" | "tool" | "error" | "info"
 	std::string text;
+	std::string timestamp;
+
+	ChatEntry(std::string role_, std::string text_)
+		: role(std::move(role_)), text(std::move(text_)), timestamp(current_time_hms()) {}
+	ChatEntry(std::string role_, std::string text_, std::string timestamp_)
+		: role(std::move(role_)), text(std::move(text_)), timestamp(std::move(timestamp_)) {}
 };
 
 // Plain-text rendering of the chat transcript (one line per entry, with the
@@ -248,25 +321,26 @@ std::string format_chat_transcript(const std::vector<ChatEntry>& entries)
 	std::ostringstream stream;
 	for (const ChatEntry& entry : entries)
 	{
+		const std::string ts_prefix = "[" + entry.timestamp + "] ";
 		if (entry.role == "user")
 		{
-			stream << "[USER] " << entry.text << "\n";
+			stream << ts_prefix << "[USER] " << entry.text << "\n";
 		}
 		else if (entry.role == "assistant")
 		{
-			stream << "[AGENT] " << entry.text << "\n";
+			stream << ts_prefix << "[AGENT] " << entry.text << "\n";
 		}
 		else if (entry.role == "tool")
 		{
-			stream << "  " << entry.text << "\n";
+			stream << ts_prefix << "  " << entry.text << "\n";
 		}
 		else if (entry.role == "error")
 		{
-			stream << "error: " << entry.text << "\n";
+			stream << ts_prefix << "error: " << entry.text << "\n";
 		}
 		else
 		{
-			stream << "[SYSTEM] " << entry.text << "\n";
+			stream << ts_prefix << "[SYSTEM] " << entry.text << "\n";
 		}
 	}
 	return stream.str();
@@ -375,11 +449,21 @@ struct AppOpenCandidate {
 
 // Mirrors DroidHost::try_quick_open_json()'s response shape - the
 // deterministic, LLM-free "open X" recognizer (intent::parse_open_intent)
-// plus its resolution against the installed-apps index.
+// plus its resolution against the installed-apps index, and (Phase 21) a
+// fallback to droidcli's own built-in knowledge of Windows itself for things
+// that are not installed applications at all (Recycle Bin, Sound Settings,
+// Control Panel, ...) - only populated when candidates is empty.
 struct QuickOpenResult {
 	bool matched = false;
 	std::string app_name;
 	std::vector<AppOpenCandidate> candidates;
+	// Only for shaping the confirmation prompt text (below) - the actual
+	// launch just passes app_name through to DroidHost::open_application,
+	// which resolves it against this same built-in-Windows-knowledge table
+	// itself (cli/host.cpp, Phase 21), so the TUI never needs the resolved
+	// path_or_name/args to make the launch succeed.
+	bool resolved_windows_target = false;
+	std::string windows_target_display_name;
 };
 
 QuickOpenResult parse_quick_open_result(const std::string& json)
@@ -401,6 +485,11 @@ QuickOpenResult parse_quick_open_result(const std::string& json)
 			result.candidates.push_back(candidate);
 		}
 	}
+	net::extract_json_bool_field(json, "resolved_windows_target", result.resolved_windows_target);
+	if (result.resolved_windows_target)
+	{
+		result.windows_target_display_name = net::extract_json_string_field(json, "windows_target_display_name");
+	}
 	return result;
 }
 
@@ -415,6 +504,13 @@ struct PendingOpen {
 	// app_name directly. One entry: an unambiguous index match, confirm
 	// yes/no. More than one: ambiguous, ask the user to pick a number.
 	std::vector<AppOpenCandidate> candidates;
+	// Set instead of falling through to the generic "not in the index"
+	// prompt when candidates is empty and try_quick_open_json resolved a
+	// built-in Windows location/Settings page (Phase 21) - display-only, see
+	// QuickOpenResult's comment above for why the launch itself doesn't need
+	// these.
+	bool resolved_windows_target = false;
+	std::string windows_target_display_name;
 };
 
 std::string describe_pending_open_prompt(const PendingOpen& pending)
@@ -437,6 +533,11 @@ std::string describe_pending_open_prompt(const PendingOpen& pending)
 	if (pending.candidates.size() == 1)
 	{
 		return "Open " + pending.candidates[0].name + " (" + pending.candidates[0].path + ")? (yes/no)";
+	}
+	if (pending.resolved_windows_target)
+	{
+		return "Open " + pending.windows_target_display_name + " (a built-in Windows location, not an "
+			"installed app)? (yes/no)";
 	}
 	return "'" + pending.app_name + "' isn't in the installed-apps index, but I can still try to open it "
 		"directly by that name. Open it? (yes/no)";
@@ -732,17 +833,26 @@ std::vector<ChatEntry> parse_agent_history_for_resume(const std::string& json)
 			saw_system_prompt = true;
 			continue;
 		}
+		// created_at is stored/reported as "YYYY-MM-DD HH:MM:SS"
+		// (MemoryStore, DroidHost::make_full_log_timestamp) - the trailing 8
+		// characters are the HH:MM:SS this panel actually displays, so a
+		// resumed message shows when it really happened instead of the
+		// session-resume time ChatEntry's default ("now") would give it.
+		const std::string created_at = net::extract_json_string_field(message, "created_at");
+		const std::string resumed_timestamp = created_at.size() >= 8
+			? created_at.substr(created_at.size() - 8)
+			: current_time_hms();
 		if (role == "assistant")
 		{
-			entries.push_back(ChatEntry{"assistant", content});
+			entries.push_back(ChatEntry{"assistant", content, resumed_timestamp});
 		}
 		else if (role == "tool")
 		{
-			entries.push_back(ChatEntry{"tool", "(resumed) " + content});
+			entries.push_back(ChatEntry{"tool", "(resumed) " + content, resumed_timestamp});
 		}
 		else
 		{
-			entries.push_back(ChatEntry{"user", content});
+			entries.push_back(ChatEntry{"user", content, resumed_timestamp});
 		}
 	}
 	if (!entries.empty())
@@ -757,6 +867,18 @@ std::vector<ChatEntry> parse_agent_history_for_resume(const std::string& json)
 		entries.insert(entries.begin(), ChatEntry{"info", summary});
 	}
 	return entries;
+}
+
+// A window() title styled with a light-blue background/dark text - shared by
+// every panel title (Connectors, Tasks, Agent Tools, Apps, Locations, Agent
+// Chat, App Log) so they read as one consistent set of chrome alongside the
+// top status line and bottom focus-hint bar, which get the same treatment
+// directly in run_tui below. window() takes an Element for its title
+// argument (not just plain text), so this slots in with no other changes to
+// how each panel is built.
+ftxui::Element panel_title(const std::string& label)
+{
+	return ftxui::text(label) | ftxui::bgcolor(ftxui::Color::LightSkyBlue1) | ftxui::color(ftxui::Color::Black);
 }
 
 } // namespace
@@ -776,11 +898,23 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	int selected_connector = 0;
 	std::vector<TaskRow> tasks;
 	std::vector<LogRow> log_lines;
+	LocationsSnapshot locations;
 	std::vector<ChatEntry> chat_entries;
 	// Resizable-split pane widths (columns) - mutated directly by
-	// ResizableSplitLeft/Right on mouse drag, see the split construction below.
+	// ResizableSplitLeft/Right on mouse drag, see the split construction
+	// below. Both remain user-draggable at any time; only the *starting*
+	// value of right_pane_width is computed below (half of whatever's left
+	// after the left column), rather than a fixed guess that only looked
+	// right at one particular terminal size.
 	int left_pane_width = 36;
-	int right_pane_width = 30;
+	// Terminal::Size() is a plain OS query - safe to call before screen.Loop()
+	// starts. The -2 accounts for the two single-column separators
+	// ResizableSplitLeft and ResizableSplitRight each draw between panes, so
+	// Agent Chat and App Log actually split the true remaining width evenly,
+	// not the remaining width plus two separator columns that aren't really
+	// available to either of them.
+	const int terminal_width = Terminal::Size().dimx;
+	int right_pane_width = std::max(0, terminal_width - left_pane_width - 2) / 2;
 	std::string chat_input_text;
 	// Cursor position for chat_input, exposed so history recall below can
 	// jump it to the end of a recalled message instead of leaving it
@@ -983,9 +1117,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			const std::string rest = row.summary.substr(prefix.size());
 			const size_t paren = rest.find('(');
 			const std::string tool_name = paren == std::string::npos ? rest : rest.substr(0, paren);
+			// paragraph() (not text()) on the name so a long tool name wraps
+			// within the panel's width instead of overflowing off the right
+			// edge, matching log_view/chat_log_view.
 			rows.push_back(hbox({
 				text("[" + row.timestamp + "] ") | dim,
-				text(tool_name) | bold | color(row.success ? Color::Green : Color::Red),
+				paragraph(tool_name) | bold | color(row.success ? Color::Green : Color::Red),
 			}));
 		}
 		if (rows.empty())
@@ -1029,9 +1166,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			{
 				continue;
 			}
+			// paragraph() (not text()) on the label so a long app/command label
+			// wraps within the panel's width instead of overflowing off the
+			// right edge, matching log_view/chat_log_view.
 			rows.push_back(hbox({
 				text("[" + row.timestamp + "] ") | dim,
-				text(label) | color(row.success ? Color::Green : Color::Red),
+				paragraph(label) | color(row.success ? Color::Green : Color::Red),
 			}));
 		}
 		if (rows.empty())
@@ -1041,6 +1181,44 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		else
 		{
 			rows.back() |= focus;
+		}
+		return vbox(rows) | yframe | flex;
+	});
+
+	// "Views of the system" panel (Phase 19, ARCHITECTURE.md): "where we are
+	// right now" (cwd, the user's real Desktop) plus every name -> path the
+	// model has remembered via remember_location, most recently updated
+	// first - a live, inspectable answer to "what does droidcli think it
+	// knows about the filesystem" without having to call get_known_locations
+	// through chat. Polled the same way as tasks_view/connector_menu (see the
+	// poller thread below), not derived from log_lines like tools_view/
+	// apps_view/log_view - this reflects current stored state, not a stream
+	// of past events.
+	Component locations_view = Renderer([&]() -> Element
+	{
+		Elements rows;
+		if (!locations.cwd.empty())
+		{
+			rows.push_back(paragraph("cwd: " + locations.cwd) | dim);
+		}
+		if (!locations.desktop_path.empty())
+		{
+			rows.push_back(paragraph("Desktop: " + locations.desktop_path) | dim);
+		}
+		if (!rows.empty())
+		{
+			rows.push_back(separator());
+		}
+		if (locations.locations.empty())
+		{
+			rows.push_back(text("(no locations remembered yet)") | dim);
+		}
+		else
+		{
+			for (const LocationRow& location : locations.locations)
+			{
+				rows.push_back(paragraph(location.name + " -> " + location.resolved_path) | color(Color::Cyan));
+			}
 		}
 		return vbox(rows) | yframe | flex;
 	});
@@ -1060,8 +1238,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	//  - a process-launch channel (run/ffmpeg/open/process -
 	//    is_process_launch_channel) gets its own magenta so an actual OS-level
 	//    process launch/command execution is unmistakable even scrolling fast.
-	//  - watchdog/task/thread channels get their own dimmer colors so the
-	//    high-volume chat channel doesn't drown them out visually.
+	//  - watchdog/task/thread channels each get their own distinct color so
+	//    the high-volume chat channel doesn't drown them out visually.
 	Component log_view = Renderer([&]() -> Element
 	{
 		// paragraph() (not text()) so a long log line wraps within the panel's
@@ -1098,7 +1276,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			}
 			else if (row.channel == "thread")
 			{
-				element |= dim;
+				// A real color (not just dim), matching every other channel's
+				// treatment here, so thread spawn/join lines are as visually
+				// distinguishable from the rest of the log as watchdog/task/
+				// process-launch lines already are.
+				element |= color(Color::Blue);
 			}
 			lines.push_back(element);
 		}
@@ -1119,29 +1301,31 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		for (const ChatEntry& entry : chat_entries)
 		{
 			// paragraph() (not text()) wraps within the panel's width instead
-			// of overflowing off the right edge.
+			// of overflowing off the right edge. Timestamp prefix matches the
+			// "[HH:MM:SS] " style already used by log_view/tools_view/apps_view.
+			const std::string ts_prefix = "[" + entry.timestamp + "] ";
 			if (entry.role == "user")
 			{
-				lines.push_back(paragraph("[USER] " + entry.text) | bold | color(Color::Blue));
+				lines.push_back(paragraph(ts_prefix + "[USER] " + entry.text) | bold | color(Color::Blue));
 			}
 			else if (entry.role == "assistant")
 			{
-				lines.push_back(paragraph("[AGENT] " + entry.text) | color(Color::Green));
+				lines.push_back(paragraph(ts_prefix + "[AGENT] " + entry.text) | color(Color::Green));
 			}
 			else if (entry.role == "tool")
 			{
-				lines.push_back(paragraph("  " + entry.text) | dim | color(Color::Yellow));
+				lines.push_back(paragraph(ts_prefix + "  " + entry.text) | dim | color(Color::Yellow));
 			}
 			else if (entry.role == "error")
 			{
-				lines.push_back(paragraph("error: " + entry.text) | color(Color::Red));
+				lines.push_back(paragraph(ts_prefix + "error: " + entry.text) | color(Color::Red));
 			}
 			else
 			{
 				// [SYSTEM] (Ollama setup prompts, etc.) shows up often - an
 				// explicit dark grey keeps it visually de-emphasized without
 				// relying on `dim`, whose actual look varies by terminal.
-				lines.push_back(paragraph("[SYSTEM] " + entry.text) | color(Color::GrayDark));
+				lines.push_back(paragraph(ts_prefix + "[SYSTEM] " + entry.text) | color(Color::GrayDark));
 			}
 		}
 		if (agent_turn_in_flight)
@@ -1625,6 +1809,14 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					{
 						perform_quick_open(pending_open.candidates[0].path, pending_open.candidates[0].name);
 					}
+					else if (pending_open.resolved_windows_target)
+					{
+						// Launch still just passes the literal name through -
+						// DroidHost::open_application resolves it against the
+						// same built-in-Windows table itself (Phase 21) - only
+						// the display name shown to the user changes here.
+						perform_quick_open(pending_open.app_name, pending_open.windows_target_display_name);
+					}
 					else
 					{
 						perform_quick_open(pending_open.app_name, pending_open.app_name);
@@ -1658,6 +1850,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					pending_open.active = true;
 					pending_open.app_name = quick_open.app_name;
 					pending_open.candidates = quick_open.candidates;
+					pending_open.resolved_windows_target = quick_open.resolved_windows_target;
+					pending_open.windows_target_display_name = quick_open.windows_target_display_name;
 					host.log_quick_open_event("recognized \"" + quick_open.app_name + "\" from \"" + message + "\" - awaiting confirmation");
 					push_chat_entry("info", describe_pending_open_prompt(pending_open));
 					return true;
@@ -1723,19 +1917,20 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// nesting the resizable-split layout introduces.
 	Component left_column = Renderer(connector_menu, [&]() -> Element
 	{
-		// All four panels share equal flex weight, so "Agent Tools" is
-		// exactly as tall as "Tasks" (and Connectors/Apps) rather than
-		// whatever FTXUI's default content-driven sizing would give it.
-		Element connectors_panel = window(text(" Connectors  (l=launch, s=stop) "), connector_menu->Render()) | flex;
-		Element tasks_panel = window(text(" Tasks "), tasks_view->Render()) | flex;
-		Element tools_panel = window(text(" Agent Tools "), tools_view->Render()) | flex;
-		Element apps_panel = window(text(" Apps "), apps_view->Render()) | flex;
-		return vbox({ connectors_panel, tasks_panel, tools_panel, apps_panel });
+		// All five panels share equal flex weight, so "Agent Tools" is
+		// exactly as tall as "Tasks" (and Connectors/Apps/Locations) rather
+		// than whatever FTXUI's default content-driven sizing would give it.
+		Element connectors_panel = window(panel_title(" Connectors  (l=launch, s=stop) "), connector_menu->Render()) | flex;
+		Element tasks_panel = window(panel_title(" Tasks "), tasks_view->Render()) | flex;
+		Element tools_panel = window(panel_title(" Agent Tools "), tools_view->Render()) | flex;
+		Element apps_panel = window(panel_title(" Apps "), apps_view->Render()) | flex;
+		Element locations_panel = window(panel_title(" Locations "), locations_view->Render()) | flex;
+		return vbox({ connectors_panel, tasks_panel, tools_panel, apps_panel, locations_panel });
 	});
 
 	Component chat_column = Renderer(chat_input, [&]() -> Element
 	{
-		return window(text(" Agent Chat  (Tab/Esc to leave, Enter to send) "),
+		return window(panel_title(" Agent Chat  (Tab/Esc to leave, Enter to send) "),
 			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() }));
 	});
 
@@ -1746,16 +1941,19 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// actually be visible without a curl.
 	Component right_column = Renderer([&]() -> Element
 	{
-		return window(text(" App Log "), log_view->Render());
+		return window(panel_title(" App Log "), log_view->Render());
 	});
 
-	// Mouse-draggable panes: left column | chat (middle, gets remaining
-	// space) | right column. left_pane_width/right_pane_width are live state
-	// FTXUI mutates directly as the user drags a divider - must outlive
-	// screen.Loop() below, hence declared in this same function scope.
-	Component split = chat_column;
-	split = ResizableSplitLeft(left_column, split, &left_pane_width);
-	split = ResizableSplitRight(right_column, split, &right_pane_width);
+	// Mouse-draggable panes: left column | chat (middle) | right column (App
+	// Log). Both dividers are user-draggable at any time via
+	// left_pane_width/right_pane_width, same as before - only
+	// right_pane_width's *starting* value changed (see its computation
+	// above): an actual half-of-what's-left-of-the-terminal split instead of
+	// a fixed guess, while staying exactly where the user leaves it
+	// afterward, same as the left column already does.
+	Component middle = chat_column;
+	middle = ResizableSplitRight(right_column, middle, &right_pane_width);
+	Component split = ResizableSplitLeft(left_column, middle, &left_pane_width);
 
 	Component full_ui = Renderer(split, [&]() -> Element
 	{
@@ -1765,11 +1963,17 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		const std::string session_line = current_session_id.empty()
 			? "session: (none yet - starts on your first message)"
 			: "session: " + current_session_id;
+		// Light-blue background/dark text on the top status line and bottom
+		// focus-hint line, matching panel_title() above - xflex (X-axis only)
+		// stretches the colored box across the full terminal width without
+		// also claiming vertical space from the split in the middle: plain
+		// flex expands on both axes, which starved the split of height and
+		// blew up these two lines to fill the whole screen instead.
 		return vbox({
-			text(status_line) | bold,
+			text(status_line) | bold | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
 			text(session_line) | dim,
 			split->Render() | flex,
-			text(focus_hint) | dim,
+			text(focus_hint) | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
 		});
 	});
 
@@ -1782,6 +1986,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				connectors = polled.connectors;
 				tasks = polled.tasks;
 				log_lines = polled.log_lines;
+				locations = polled.locations;
 			}
 			rebuild_connector_entries();
 
@@ -2010,12 +2215,14 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				}
 				std::vector<TaskRow> next_tasks = parse_tasks(host.list_tasks_json());
 				std::vector<LogRow> next_log = parse_log_lines(host.build_app_log_json());
+				LocationsSnapshot next_locations = parse_locations(host.list_known_locations_json());
 
 				{
 					std::lock_guard<std::mutex> lock(polled.mutex);
 					polled.connectors = std::move(next_connectors);
 					polled.tasks = std::move(next_tasks);
 					polled.log_lines = std::move(next_log);
+					polled.locations = std::move(next_locations);
 				}
 
 				// FTXUI's documented pattern for live-updating dashboards: nudge the

@@ -95,7 +95,13 @@ struct HostConfig {
 		"Before calling copy_file/move_path/delete_file on a file the user referred to by description "
 		"rather than its exact path (\"the green image on the Desktop\", \"that file\"), call list_dir "
 		"on the real directory first to find its actual name - never invent a plausible-looking path "
-		"or a template like \"/path/to/file.png\", both are rejected outright and waste an attempt.";
+		"or a template like \"/path/to/file.png\", both are rejected outright and waste an attempt. "
+		"When you write, copy, move, or run a command that creates a file with no location specified "
+		"at all (a bare filename with no directory in it, and no work_dir passed to run_command/"
+		"run_ffmpeg), it lands on the user's real Desktop by default, not droidcli's own working "
+		"directory - this happens automatically, you don't need to construct the Desktop path "
+		"yourself. Report the actual location from the result's \"resolved_path\"/\"resolved_work_dir\" "
+		"field when present, not from what you originally typed.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's
@@ -310,6 +316,25 @@ public:
 	// "broken":...,"failure_reason":...,"working":...,"lesson":...,
 	// "created_at":...}]}.
 	core::String search_command_fixes_json(const core::String& body) const;
+
+	// Remembers a name -> real path mapping (see KnownLocation, cli/
+	// memory_store.hpp) - the remember_location agent tool. body:
+	// {"name":"...","path":"..."}. path is resolved (bare "desktop/..."
+	// token, if any) and verified against the real filesystem via stat_path
+	// before it's stored - a location that doesn't actually exist right now
+	// is never remembered. A second call with the same name (case-
+	// insensitive) updates the stored path rather than duplicating it. Same
+	// "recording knowledge, not touching the OS" rationale as
+	// record_command_fix_json above - not gated behind
+	// tool_call_requires_approval(). Returns {"ok":bool,"resolved_path":...}.
+	core::String remember_location_json(const core::String& body);
+
+	// Lists every remembered KnownLocation, most recently updated first,
+	// alongside "where we are right now" (cwd, desktop_path) - the
+	// get_known_locations agent tool and the TUI's Locations panel both read
+	// this. No arguments. Returns {"ok":true,"cwd":...,"desktop_path":...,
+	// "known_locations":[{"name":...,"resolved_path":...,"updated_at":...}]}.
+	core::String list_known_locations_json() const;
 
 	// The tool-calling agent turn (POST /api/agent/turn). body is
 	// {"message":"...","clear":bool,"session_id":"..."}. Drives a bounded

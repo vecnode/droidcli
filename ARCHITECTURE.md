@@ -61,6 +61,82 @@ validation + JSON, it belongs in core.
 
 ---
 
+## Agent properties
+
+Twenty phases of hardening (see the Phase log further below) have converged
+on a specific, opinionated shape for what kind of agent droidcli is. Anyone
+extending it should build *with* these properties, not around them - each
+one exists because a real observed failure, not a hypothetical, motivated it.
+
+1. **A personal desktop assistant, not a dev/build tool.** droidcli controls
+   the machine it runs on for a human sitting at it - opening apps, finding
+   and acting on files by description, running one-shot commands. It is not
+   optimized for "run this in the project directory" workflows. Concretely:
+   a file/command reference with **no location specified at all** defaults to
+   the user's real Desktop, not wherever droidcli's own process happened to
+   be launched from (`default_bare_filename_to_desktop()`, `cli/host.cpp`,
+   Phase 20) - the opposite of what a build tool or CLI dev utility would
+   default to.
+2. **Self-contained, not an MCP client.** Per ZeroClaw's minimal philosophy,
+   new capabilities are new `DroidHost` methods (see `filesystem_tools.{hpp,cpp}`/
+   `command_runner.{hpp,cpp}` for the pattern), never a dependency on an
+   external MCP server. If MCP support is ever added, droidcli exposes
+   *itself* as a server - it does not consume other servers.
+3. **Ground truth over self-report, always.** Every agent-tool result carries
+   `"ok"` first, always (the hard rule that came out of Phase 6's incident).
+   Beyond that baseline, several tools go further and independently *verify*
+   their own side effect after the fact rather than trusting their own
+   report: `write_file` re-`stat_path()`s the file it just wrote
+   (`verified_exists`/`verified_size_bytes`, Phase 18);
+   `remember_location`/`get_known_locations` only persists a location if a
+   live `stat_path()` confirms it's real *right now* (Phase 19); the
+   fabrication guard in `run_agent_tool_loop` only trusts a completion claim
+   backed by an actually-mutating tool's `ok:true`, never an unrelated
+   read-only success (Phase 17).
+4. **A false negative is always safe; a false positive is the failure mode
+   to avoid.** Every heuristic guard in `cli/host.cpp` (`looks_like_*`,
+   `substitute_bare_desktop_token`, the deterministic intent recognizers in
+   `src/intent/`) is written so that failing to recognize a pattern just
+   falls through to the normal, slower path - never so that it misfires and
+   hijacks or blocks something unrelated. See the "Algorithms reference"
+   appendix for the full list.
+5. **Deterministic bypasses for narrow, high-confidence shapes only** - never
+   as a general substitute for the model's own judgment. "open X" (Phase 11)
+   and "yes" confirming a just-proposed command (Phase 14) are recognized by
+   pure string scanning, no LLM call, because both are common, narrow, and
+   safe to get slightly wrong (a false negative is just a normal turn).
+   New tools should reach for this pattern rarely, and only when a
+   reliability problem has that exact shape.
+6. **Mutating tools are gated by default; read-only tools never are.**
+   `tool_call_requires_approval()` (`cli/host.cpp`) is the single list a
+   human approves before it runs - anything with a real side effect belongs
+   there; gating a read-only lookup only slows the agent down for no safety
+   benefit. See the "Adding things" extension points in `AGENTS.md` for the
+   two-part checklist every new tool follows.
+7. **Persistent memory, not just in-session context.** Three SQLite-backed
+   memories, all in the same `MemoryStore` database
+   (`cli/memory_store.{hpp,cpp}`): session transcripts (`memory_entries`,
+   resumable across restarts), command lessons (`command_lessons`, "this
+   broke, this fixed it," searched before a similar attempt), and known
+   locations (`known_locations`, a name → real path mapping, Phase 19).
+   Deliberately minimal - no embeddings, no vector search, LIKE-based
+   substring matching only.
+8. **Narrow, evidence-driven fixes over generic ones - and unsolved problems
+   are named, not papered over.** Every phase traces back to a specific
+   observed transcript, not a hypothetical. When a problem turned out to be
+   genuinely hard to solve generically (verifying a model's claim about tool
+   *content*, not just whether a tool ran - Phase 16), it's recorded as
+   deliberately open rather than "fixed" with a narrow regex that wouldn't
+   generalize.
+9. **Bounded, not unbounded, self-correction.** `run_agent_tool_loop`'s hop/
+   nudge/retry budgets (`kMaxHops`, `kMaxUnverifiedClaimNudges`,
+   `kMaxCommandRetryNudges`, `kMaxEmptyRetries`) all exist because letting a
+   small local model retry or self-nudge indefinitely measurably degrades
+   its own output rather than converging on a fix - every self-correction
+   path terminates in an honest report to the user, never silent looping.
+
+---
+
 ## Repository layout
 
 ```
@@ -1905,6 +1981,206 @@ the exact placeholder path from the transcript (`ok:false`, clear error) and
 with a bare `desktop/...` token (resolves correctly, reports
 `resolved_source_path`/`resolved_destination_path`).
 
+### Phase 17 — The fabrication guard's own success-scan was the vector, not just a mismatch ✅ implemented
+
+**Goal:** two real transcripts, days apart, showed the same shape recur four
+more times: the model calls an unrelated **read-only** tool (`list_connectors`,
+`list_open_windows`, `list_dir`, `self_status`), it succeeds, and that success
+alone is enough for `a_tool_call_already_succeeded_this_turn` (`cli/host.cpp`)
+to wave through a completely unrelated claim as "already backed by a real
+success" - "I've successfully copied the file" right after `list_connectors`
+returned an empty list; "The Recycle Bin is already running" right after
+`list_open_windows` returned a window list that doesn't contain it; "I called
+`list_dir`, then `run_command` to create it" right after a `list_dir` call,
+with no `run_command` call anywhere in that session. Phase 16 named a related,
+harder problem (fabricating *content* on top of a genuine success) as
+deliberately unsolved; this is a plainer bug in the guard's own scan - it
+checked "did *any* action this turn return `ok:true`," never whether that
+action had anything to do with the claim being made.
+
+**What shipped:** the scan in `run_agent_tool_loop` now only counts an action
+toward `a_tool_call_already_succeeded_this_turn` if its tool is also gated by
+`tool_call_requires_approval` (`copy_file`, `write_file`, `run_command`,
+`open_application`, etc. - the mutating/side-effecting set). A claim of a
+completed action can only be true if something that actually changes state
+ran; a read-only lookup succeeding is never evidence for it, regardless of
+what the claim is about. This doesn't solve Phase 16's harder open problem
+(verifying claim *content* against real tool output) - it closes the plainer
+gap of an unrelated success excusing an unrelated claim.
+
+**Verified:** `ctest` green (10/10), no regressions.
+
+### Phase 18 — Ground truth for `write_file`: a resolution gap Phase 16 missed, plus a real post-write filesystem check ✅ implemented
+
+**Goal:** three separate "create an image and save it to the Desktop"
+transcripts all ended with the user correctly saying "you didn't." Tracing it
+down: `write_file` (`cli/host.cpp`) was left out of the Phase 16 hardening
+pass entirely - no `looks_like_placeholder_path()`, no
+`substitute_bare_desktop_token()` - so a path like `"/Desktop/output.png"`
+went straight to `cli::write_file()` untouched. On Windows, a leading `/`
+means "root of the *current drive*," not "root of the filesystem" - so
+`std::filesystem` silently resolved it to `C:\Desktop\output.png` (auto-
+creating that bogus folder, since `write_file` creates missing parents) and
+reported a perfectly genuine `ok:true` throughout. Confirmed live: a probe
+write to `/Desktop/probe_test.png` landed in `C:\Desktop\`, not
+`C:\Users\...\Desktop\`. Separately, even `substitute_bare_desktop_token`
+itself had a gap: its word-boundary check only recognized a *bare*
+`desktop/...` token (preceded by whitespace/quote/nothing), not a *single
+leading* `/Desktop/...` - the exact shape the model actually produced.
+
+**What shipped:**
+
+- **`write_file` now gets the same guard pair** `copy_file`/`move_path`/
+  `delete_file` already had: `looks_like_placeholder_path()` rejects an
+  obvious template path outright, `substitute_bare_desktop_token()` resolves
+  a bare Desktop-relative token before the write ever happens, reporting
+  `resolved_path` when it fires (same convention as the other three tools).
+- **`substitute_bare_desktop_token()` extended** to also recognize a lone
+  leading `/` or `\` immediately before "desktop" (`cursor == 1 &&
+  (args[0] == '/' || args[0] == '\\')`) as a word boundary - distinguished
+  from a real absolute path like `C:\Users\...\Desktop\...` by *position*,
+  not just the character: a real absolute path has several characters before
+  "Desktop," never just one lone separator at the very start of the string.
+- **A real post-write ground-truth check**, not a repeat of the write's own
+  self-report: after `write_file` succeeds, it now calls `cli::stat_path()`
+  on the resolved path and returns `verified_exists`/`verified_size_bytes` -
+  an independent look at the actual filesystem state afterward, the same way
+  a human would run `ls` to confirm a command did what it claimed instead of
+  trusting its exit code alone. The tool description now tells the model
+  explicitly to trust these fields over its own assumption, and that
+  `write_file` cannot produce real binary image/media data (a related
+  transcript showed the model write the literal placeholder string `"<base64
+  encoded blue 512x512 pixel PNG image data>"` as file content and then claim
+  it had created a real image) - `run_ffmpeg` is now called out as the right
+  tool for that.
+
+**What this doesn't fix:** `verified_exists` only proves a file exists at
+whatever path the code ultimately resolved to - it can't independently judge
+whether that's *where the user meant*, and it can't validate file *content*
+(a real image vs. garbage text) beyond the explicit placeholder-content
+warning added to the tool description. Verifying claim content against
+arbitrary tool output generically is still Phase 16's named, deliberately
+open problem.
+
+**Verified:** `ctest` green (10/10). Live-probed against a running
+`--headless --no-ai` instance: a bare `/Desktop/...` path previously landed
+in a bogus `C:\Desktop\` (confirmed via `ls` before the fix); after the fix,
+the identical request resolves to the real
+`C:\Users\...\Desktop\...`, confirmed to exist there via `ls` and file
+content read-back, with `verified_exists:true` in the response.
+
+### Phase 19 — Content-signature ground truth, persistent location memory, and a "where are we" view ✅ implemented
+
+**Goal:** Phase 18 closed the *path* half of "did this really happen" for
+`write_file`; this phase closes the *content* half, plus two things the user
+asked for directly: a persistent memory of real, named locations the agent
+has already resolved (so a later turn - or a later session - doesn't have to
+re-`list_dir` the same folder again), and a live view of "where we are"
+(cwd, Desktop, and everything remembered).
+
+**What shipped:**
+
+- **`looks_like_mismatched_binary_content()`** (`cli/host.cpp`) - checked
+  before `write_file` ever touches disk, same "reject before it happens"
+  pattern as `looks_like_placeholder_path()`. If the path ends in a
+  recognized binary/image extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.bmp`),
+  the content must actually start with that format's real magic bytes
+  (e.g. PNG's `\x89PNG\r\n\x1a\n`) or the write is rejected with
+  `ok:false` and guidance toward `run_ffmpeg` - the tool that can actually
+  produce real image bytes. Directly targets the exact failure from Phase
+  18's transcript: `write_file` "succeeding" with the literal placeholder
+  string `"<base64 encoded blue 512x512 pixel PNG image data>"` as file
+  content. Smoke-tested live: that exact string against a `.png` path is
+  now rejected outright with a clear error instead of silently creating a
+  fake image file.
+- **`KnownLocation`** (`cli/memory_store.hpp`/`.cpp`) - a new `known_locations`
+  SQLite table (`name TEXT PRIMARY KEY COLLATE NOCASE, resolved_path,
+  created_at, updated_at`), alongside the existing `memory_entries`/
+  `command_lessons` tables in the same `MemoryStore` database. Two new agent
+  tools: `remember_location` (`name`, `path` - `path` is resolved via
+  `substitute_bare_desktop_token()` and must pass a live `stat_path()` check
+  before it's stored, so a location that doesn't actually exist right now is
+  never remembered; upserts by name, so remembering "Release_1" again
+  updates it rather than duplicating it) and `get_known_locations`
+  (read-only, no arguments - returns cwd, `desktop_path`, and every
+  remembered location). Same "recording knowledge, not touching the OS"
+  rationale as `record_command_fix` (Phase 8) - neither tool is gated behind
+  `tool_call_requires_approval()`.
+- **New `GET/POST /api/locations`** route (`cli/http_mount.cpp`) mirroring
+  the tool pair above for non-agent callers.
+- **A new "Locations" panel** in the TUI (`cli/tui.cpp`, `locations_view`) -
+  the fifth left-column panel alongside Connectors/Tasks/Agent Tools/Apps,
+  same equal-flex sizing. Polled the same way as Tasks/Connectors (not
+  derived from the log stream the way Tools/Apps/Log are), since this
+  reflects current stored state, not a history of past events: shows cwd and
+  the real Desktop path first, then every remembered `name -> path` mapping,
+  most recently updated first.
+
+**What this doesn't fix:** the content-signature check only covers a fixed
+list of common binary/image extensions and only checks the *start* of the
+content, not the whole file - it catches the specific "claims to be a real
+media file, isn't" shape from the observed transcripts, not a general
+content-quality judgment (Phase 16's still-open problem). Separately, JSON-
+over-HTTP is a lossy transport for genuine binary bytes in the first place
+(confirmed while smoke-testing this phase: round-tripping real `0x89`-led
+PNG bytes through a JSON string field via `Invoke-RestMethod`'s UTF-8 body
+encoding corrupted them before they ever reached the server) - another
+reason `write_file` is the wrong tool for real image/media data regardless
+of this guard, which the tool description already says explicitly.
+
+**Verified:** `ctest` green (10/10). Live-probed against a running
+`--headless --no-ai` instance: `remember_location` on a real path succeeds
+and round-trips through `get_known_locations`/`GET /api/locations` with the
+resolved path and an `updated_at` timestamp; the same call against a
+nonexistent path is rejected with a clear error; `write_file` against a
+`.png` path with the exact placeholder string from the Phase 18 transcript
+is rejected before any file is created.
+
+### Phase 20 — A bare filename defaults to the real Desktop, not droidcli's own working directory ✅ implemented
+
+**Goal:** the Phase 18/19 transcripts all shared a root cause: droidcli is a
+personal desktop assistant (see "Agent properties" above), but every file/
+command-execution tool defaulted a location-less reference to droidcli's own
+process working directory - in practice, the git repo it was built and run
+from during development. Asked to save an image "to Desktop," the model
+wrote a bare `output.png` with no directory at all, and it landed in the
+`metaagent` repo root instead - a real, reproducible instance of exactly the
+wrong default for what this agent is.
+
+**What shipped:**
+
+- **`default_bare_filename_to_desktop()`** (`cli/host.cpp`) - a bare filename
+  (no `/` or `\` anywhere in it) defaults to the real Desktop; anything with
+  *any* directory information at all, even a relative one (`subdir/x.png`,
+  `./x.png`), is left untouched as the caller having already specified where.
+  Composes with `substitute_bare_desktop_token()` (Phase 7/18), not a
+  replacement for it - that one resolves an explicit `desktop/...` reference,
+  this one covers the case where "desktop" was never mentioned at all. Wired
+  into `write_file`, `copy_file` (both `source_path`/`destination_path`),
+  `move_path` (both paths), and `delete_file`.
+- **`run_command`/`run_ffmpeg`'s `work_dir`** now defaults to the real
+  Desktop when the caller doesn't pass one, rather than inheriting
+  droidcli's own working directory - a bare relative output filename in a
+  shell command's redirection or ffmpeg's own args (its single most common
+  shape, e.g. `... output.png`) now lands on the Desktop by default. Reported
+  back via a new `resolved_work_dir` field whenever the default applied, same
+  convention as `resolved_path`/`resolved_command`/`resolved_args`. This was
+  a deliberate, broader-scope choice (not limited to the file tools) since
+  droidcli's own role is a desktop assistant, not a dev/build tool - an
+  explicit `work_dir` always overrides it.
+- **Tool descriptions and the system prompt** (`cli/host.cpp`,
+  `HostConfig::system_prompt` in `cli/host.hpp`) updated to state the new
+  default explicitly and point the model at `resolved_path`/
+  `resolved_work_dir` for reporting the true location back to the user.
+
+**Verified:** `ctest` green (10/10). Live-probed against a running
+`--headless --no-ai` instance: `POST /api/fs/write` with a bare filename and
+no directory resolves to and creates the file at the real
+`C:\Users\...\Desktop\...` (confirmed via `ls`); `POST /api/run` with a
+command that writes a bare relative output filename and no `work_dir`
+reports `resolved_work_dir` as the real Desktop and the file is confirmed
+there afterward, not in the droidcli working directory.
+
 ---
 
 ## Extension points
@@ -1922,5 +2198,64 @@ with a bare `desktop/...` token (resolves correctly, reports
    needed unless the process has bespoke lifecycle requirements beyond
    launch/stop, in which case extend `DroidHost::launch_connector`/
    `stop_connector` in `cli/host.cpp`.
+
+## Algorithms reference
+
+Every non-obvious algorithm/heuristic in the codebase, in one place, for
+findability. Each entry is deliberately short - the "why" (the real
+transcript that motivated it, the trade-off it makes) is in the Phase log
+above; this table is the index into that, not a replacement for it. Grouped
+by what part of the system each one serves.
+
+### Agent-turn reliability (`cli/host.cpp`)
+
+These all exist because the local models droidcli runs against are small,
+tool-calling-tuned, and unreliable in specific, reproducible ways - each
+guard was written against a real observed failure, not a hypothetical one.
+See "The agent turn" diagram earlier in this document for how they compose
+inside `DroidHost::run_agent_tool_loop`.
+
+| Algorithm | Location | What it does |
+|---|---|---|
+| `looks_like_unverified_action_claim` | `host.cpp:253` | Lowercases the assistant's text and checks for a claim phrase ("i've ", "i'll ", "successfully", "already ", ...) *combined with* an action verb ("create", "delete", "move", "list ", ...). Both must match - a claim phrase alone isn't enough, since ordinary narration ("I'll answer that") shouldn't false-positive. Deliberately loose (substring matching, not real NLP): a false positive only costs one extra nudge round-trip, never a wrong final answer. |
+| `looks_like_degenerate_role_leak` | `host.cpp:346` | Structural, not semantic: catches a reply that starts with a bare chat-role label ("assistant"/"system"/"user") standing alone at the start of the trimmed text - a real sentence never opens that way. Catches a distinct failure mode `looks_like_unverified_action_claim` misses: broken/garbled model output that isn't *claiming* anything, just malformed. |
+| `looks_like_capability_denial` | `host.cpp:403` | Substring-matches a fixed list of phrases where the model falsely claims it can't execute something ("i can only assist", "you'll need to run", "one command at a time", ...) - all confirmed-false claims since droidcli's tools genuinely execute. Triggers the same corrective nudge path as a failed command retry. |
+| `a_tool_call_already_succeeded_this_turn` scan | `host.cpp:3071` (inside `run_agent_tool_loop`) | Before trusting a completion claim as legitimate (not fabricated), scans this turn's actions for one whose tool is in `tool_call_requires_approval` (mutating/gated) *and* returned `ok:true`. Restricted to mutating tools as of Phase 17 - the original version counted *any* successful action, which let an unrelated read-only success (e.g. `list_connectors`) launder a completely unrelated claim ("I've copied the file") past the guard. A read-only lookup succeeding is never evidence for a completion claim, regardless of what the claim is about. |
+| Hop/nudge/retry budget | `host.cpp:3071` (`run_agent_tool_loop`) | `kMaxHops` (9): total model round-trips in one turn. `kMaxEmptyRetries` (2, doesn't consume hop budget): retries a hop that came back with neither text nor a tool call - near-always transient. `kMaxUnverifiedClaimNudges` (1): a fabrication gets exactly one correction attempt, then an honest override - repeating the nudge measurably degrades small-model output further rather than fixing it (observed: literal `"assistant\n\n"` role-token leakage after four nudges). `kMaxCommandRetryNudges` (3): a failed `run_command`/`run_ffmpeg` gets the error fed back and is told to self-correct and retry, rather than asking the user's permission each time. |
+| `tool_call_requires_approval` | `host.cpp:223` | The fixed list of tools whose call pauses for human approval (`POST /api/agent/tool_decision`) before executing: anything with a real side effect (`run_command`, `run_ffmpeg`, `write_file`, `open_application`, `launch_connector`/`stop_connector`, `enqueue_task`, `copy_file`/`move_path`/`delete_file`, `write_clipboard`). Read-only tools are deliberately excluded - gating those would only slow the agent down for no safety benefit. Also doubles as the mutating-tool set for the `a_tool_call_already_succeeded_this_turn` scan above. |
+| `substitute_bare_desktop_token` | `host.cpp:523` | Rewrites a bare `desktop/...`/`desktop\...` token (preceded by whitespace, a quote, start-of-string, or - as of Phase 18 - a single leading `/`/`\`) into the real, OS-resolved Desktop path. Deliberately does *not* touch a `"Desktop"` appearing mid-path in an already-correct absolute path (there it's preceded by more path, not a word boundary) - distinguished by *position*, not just the preceding character. |
+| `looks_like_placeholder_path` | `host.cpp:581` | Rejects a path containing `path/to/`, `path\to\`, `<`, or a common template filename (`your_file`, `example.txt`, `filename.ext`) before a filesystem tool ever touches disk - catches a model inventing a plausible-looking documentation-style path instead of calling `list_dir`/`stat_path` to find the real one, a shape `substitute_bare_desktop_token` can't catch (no word-boundary "desktop" token to rewrite). |
+| `looks_like_mismatched_binary_content` | `host.cpp:613` | Checked before `write_file` ever writes: if the path ends in a recognized binary/image extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.bmp`), the content must start with that format's real magic bytes or the write is rejected. Catches a model writing literal placeholder/narration text to a path that claims to be a real image. |
+| `write_file` post-write verification | `host.cpp:2050` | After a successful write, calls `stat_path()` on the resolved path and reports `verified_exists`/`verified_size_bytes` - ground truth from a fresh, independent filesystem look, not the write call's own self-reported byte count. |
+| `remember_location_json` pre-store verification | `host.cpp:2756` | Before a name → path mapping is persisted, resolves it (`substitute_bare_desktop_token`) and requires a live `stat_path()` to confirm the path exists *right now* - a location is only remembered if it's real at the moment of remembering, not trusted on the model's word. |
+
+### Deterministic bypasses (`src/intent/`, portable core, no LLM call)
+
+For a narrow, high-confidence request shape, recognizing it with pure string
+scanning avoids waiting on (and trusting) the local model's own tool-calling
+judgment. Both share the same discipline: a false negative (falling through
+to the normal agent loop) is always safe, so recognition stays deliberately
+narrow.
+
+| Algorithm | Location | What it does |
+|---|---|---|
+| `parse_open_intent` | `src/intent/open_intent.cpp:160` | Recognizes "open/launch/start X" as the very first word of the message (after courtesy-stripping), then peels the target down via `strip_leading_courtesy` (a long, ordered list of lead-in phrases - "can you", "i want you to", "ok", "great", ... - re-run in a loop until none match), `strip_leading_filler` (a bare "the"/"a"/"an"/"this"/"up"), and `strip_trailing_filler` (trailing punctuation, then "please"/"for me"/"now"/"right now"). Deliberately narrow: the verb must be the very first word, so an ordinary question like "how do I open a file in Python" never matches. |
+| `extract_proposed_command` | `src/intent/pending_command.cpp:98` | Scans the assistant's *previous* message for an explicit permission phrase ("would you like me to run/execute", "should i run", ...) plus a fenced code block or a bare `ffmpeg ...` line - if both are present, the exact command is extracted so a bare "yes" reply can execute it directly instead of re-asking the (unreliable) model to decide all over again. |
+| `is_bare_affirmative` | `src/intent/pending_command.cpp:173` | Trims trailing punctuation and matches the whole remaining message, case-insensitively, against a fixed list of affirmatives ("yes", "y", "sure", "do it", "go ahead", ...) - whole-string match, not substring, so "yes but not that one" correctly does *not* trigger the bypass. |
+
+### Persistent memory (`cli/memory_store.cpp`)
+
+| Algorithm | Location | What it does |
+|---|---|---|
+| `MemoryStore::search_lessons` | `memory_store.cpp:246` | Case-insensitive `LIKE '%query%'` scan across tool/broken/failure_reason/lesson columns, most recent first, capped at `max_results`. Deliberately not semantic/embeddings search - matches the project's stated minimal-memory stance (durability and queryability only, see the `MemoryStore` class comment in `memory_store.hpp`). |
+| `MemoryStore::remember_location` | `memory_store.cpp` (added Phase 19) | `INSERT ... ON CONFLICT(name) DO UPDATE` upsert keyed on `name` (`COLLATE NOCASE`) - remembering the same name again updates `resolved_path`/`updated_at` in place rather than growing a duplicate row, while preserving the original `created_at`. |
+
+### Host infrastructure (`cli/host.cpp`, `tools/mini_http_server.cpp`, `cli/process_manager.cpp`)
+
+| Algorithm | Location | What it does |
+|---|---|---|
+| `should_emit_periodic_log`/watchdog throttle | `host.cpp:1046`, used by `tick_watchdog` at `host.cpp:1065` | Folds a recurring health check (Ollama reachability) into the existing poll loop rather than a separate timer thread - compares elapsed wall-clock time against a minimum interval (`kWatchdogIntervalSeconds`) and only emits/checks when due, so the check happens at most once per interval regardless of how often `tick_watchdog()` itself gets called. |
+| Bearer-token gate | `tools/mini_http_server.cpp:99` (`request_requires_auth`), `:104` (`is_authorized`) | Centralized, not per-route: every `/api/*` and `/ai/chat` request is checked once in `MiniHttpServer::poll_once` before any route dispatch runs, so a new route automatically inherits the check with no per-route auth code needed. |
+| `ProcessManager` job/group tracking | `cli/process_manager.cpp` (Windows: `CreateJobObjectA` at `:60`; POSIX: `setpgid` at `:200`/`:212`) | A launched process is assigned to a Windows Job Object (or a POSIX process group) at launch time, so `stop()` can kill the whole process tree it spawned, not just the top-level PID - the same reason a plain `TerminateProcess`/`kill` on just the tracked PID would leave orphaned children behind. |
 
 Product usage, HTTP tables, and env vars: repository root `[README.md](./README.md)`.
