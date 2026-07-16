@@ -176,14 +176,24 @@ public:
 		const core::String& body);
 
 	// Task queue. body: {"connector_id":"...","command":"launch|stop|run|<http path>",
-	// "payload_json":"...","delay_ms":...}. delay_ms (optional) defers when
-	// the task becomes claimable by tick_tasks() - e.g. delay_ms:120000 runs
-	// it no sooner than two minutes from now, without a separate scheduler
-	// subsystem (see Task::scheduled_for_ms, src/app/tasks.hpp). Returns
+	// "payload_json":"...","delay_ms":...,"recurrence_ms":...}. delay_ms
+	// (optional) defers when the task becomes claimable by tick_tasks() -
+	// e.g. delay_ms:120000 runs it no sooner than two minutes from now.
+	// recurrence_ms (optional, "Phase 28") makes the task recurring - after
+	// each run it's automatically rescheduled recurrence_ms later instead of
+	// terminating, cron/SOP-style, without a separate scheduler subsystem
+	// (see Task::recurrence_ms/scheduled_for_ms, src/app/tasks.hpp). Returns
 	// {"ok":bool,"id":"...","scheduled_for_ms":...} (0 if not scheduled).
 	core::String enqueue_task(const core::String& body);
 	core::String list_tasks_json() const;
 	core::String task_status_json(const core::String& task_id) const;
+	// Stops a task for good - the only way to end a recurring task
+	// (Task::recurrence_ms > 0), which would otherwise keep rescheduling
+	// itself forever. No-op (ok:false) for an unknown task id or one already
+	// in a terminal, non-recurring state. Gated (tool_call_requires_approval) -
+	// same "recording/managing state, but still a real side effect" treatment
+	// as enqueue_task. Returns {"ok":bool,"error":"..."}.
+	core::String cancel_task_json(const core::String& task_id);
 	// Claims and dispatches one pending task (call_connector or launch_connector
 	// depending on the task command), marking it complete/fail. Call periodically
 	// from the daemon loop.
