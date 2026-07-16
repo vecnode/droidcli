@@ -65,6 +65,7 @@ std::optional<Task> TaskQueue::claim_next()
 		}
 		task.status = "running";
 		task.updated_at_ms = now;
+		++task.run_count;
 		return task;
 	}
 	return std::nullopt;
@@ -76,9 +77,22 @@ bool TaskQueue::complete(const core::String& task_id, const core::String& result
 	{
 		if (task.id == task_id)
 		{
-			task.status = "done";
 			task.updated_at_ms = current_timestamp_ms();
 			task.result_json = result_json;
+			if (task.recurrence_ms > 0)
+			{
+				// Cycle back to pending rather than terminate - see Task's
+				// status comment. error_message from a prior failed run is
+				// deliberately left alone here (not cleared) so it stays
+				// visible as "the last time this failed" even after a
+				// subsequent successful run, until the task is cancelled.
+				task.status = "pending";
+				task.scheduled_for_ms = task.updated_at_ms + task.recurrence_ms;
+			}
+			else
+			{
+				task.status = "done";
+			}
 			trim_history();
 			return true;
 		}
@@ -92,8 +106,38 @@ bool TaskQueue::fail(const core::String& task_id, const core::String& error)
 	{
 		if (task.id == task_id)
 		{
-			task.status = "failed";
 			task.error_message = error;
+			task.updated_at_ms = current_timestamp_ms();
+			if (task.recurrence_ms > 0)
+			{
+				// Keep trying on the next scheduled run instead of dying on
+				// one failure - matches cron/SOP semantics. The failure is
+				// still recorded in error_message above.
+				task.status = "pending";
+				task.scheduled_for_ms = task.updated_at_ms + task.recurrence_ms;
+			}
+			else
+			{
+				task.status = "failed";
+			}
+			trim_history();
+			return true;
+		}
+	}
+	return false;
+}
+
+bool TaskQueue::cancel(const core::String& task_id)
+{
+	for (Task& task : tasks_)
+	{
+		if (task.id == task_id)
+		{
+			if (task.status == "done" || task.status == "failed" || task.status == "cancelled")
+			{
+				return false;
+			}
+			task.status = "cancelled";
 			task.updated_at_ms = current_timestamp_ms();
 			trim_history();
 			return true;
@@ -128,7 +172,7 @@ void TaskQueue::trim_history()
 		bool trimmed = false;
 		for (auto iterator = tasks_.begin(); iterator != tasks_.end(); ++iterator)
 		{
-			if (iterator->status == "done" || iterator->status == "failed")
+			if (iterator->status == "done" || iterator->status == "failed" || iterator->status == "cancelled")
 			{
 				tasks_.erase(iterator);
 				trimmed = true;
@@ -154,6 +198,8 @@ core::String build_task_json(const Task& task)
 	stream << "\"created_at_ms\":" << task.created_at_ms << ',';
 	stream << "\"updated_at_ms\":" << task.updated_at_ms << ',';
 	stream << "\"scheduled_for_ms\":" << task.scheduled_for_ms << ',';
+	stream << "\"recurrence_ms\":" << task.recurrence_ms << ',';
+	stream << "\"run_count\":" << task.run_count << ',';
 	stream << net::json_string_field("error_message", task.error_message) << ',';
 	stream << net::json_string_field("result_json", task.result_json);
 	stream << '}';
@@ -201,6 +247,12 @@ bool parse_task_request_from_json(
 	if (net::extract_json_int_field(json, "delay_ms", delay_ms) && delay_ms > 0)
 	{
 		out_task.scheduled_for_ms = current_timestamp_ms() + delay_ms;
+	}
+
+	int64_t recurrence_ms = 0;
+	if (net::extract_json_int_field(json, "recurrence_ms", recurrence_ms) && recurrence_ms > 0)
+	{
+		out_task.recurrence_ms = recurrence_ms;
 	}
 
 	return true;

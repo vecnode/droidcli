@@ -784,21 +784,25 @@ vocabulary, not a claim that droidcli is secretly an 18-target build.
 
 ### Current status and next hardening priorities
 
-**As of Phase 14**, every Core-tier gap the original ZeroClaw comparison
+**As of Phase 28**, every Core-tier gap the original ZeroClaw comparison
 identified is closed at the concrete-implementation level except a formal
 `Channel`/`Memory`/`Observer` trait layer (which nothing in droidcli needs
 yet - see below): a real provider abstraction, durable/queryable session
-memory with a procedural "lessons learned" store, structured JSONL logging,
-named/observable background threads, self-health awareness with a folded-in
-watchdog, one-shot task scheduling, a read-only local hardware inventory,
-and - the largest single area of investment across Phases 6-14 - a
-reliability layer around the agent-turn loop that catches and corrects
-fabricated success claims, leaked model output, false capability denial,
-and unretried command failures in real time, plus a deterministic bypass for
-the highest-confidence request shapes (open an app, confirm a proposed
-command) so those never depend on the local model's tool-calling judgment
-at all. See the flowchart above for how those pieces fit together, and the
-hardening log below for the incident that motivated each one.
+memory (session history, command lessons, known locations) with a
+procedural "lessons learned" store, structured JSONL logging, named/
+observable background threads, self-health awareness with a folded-in
+watchdog, a task queue with both one-shot delay *and* cron/SOP-style
+recurrence (Phase 28), a read-only local hardware inventory, and - the
+largest single area of investment across Phases 6-27 - a reliability layer
+around the agent-turn loop that catches and corrects fabricated success
+claims, leaked model output, false capability denial, unretried
+command/file-tool failures, and invented paths in real time (now backed by
+permanent regression tests, not just live verification - Phase 26), plus a
+deterministic bypass for the highest-confidence request shapes (open an
+app/Windows location, confirm a proposed command) so those never depend on
+the local model's tool-calling judgment at all. See the flowchart above for
+how those pieces fit together, and the hardening log below for the incident
+that motivated each one.
 
 **What droidcli still is, honestly:** a single-machine, single-operator
 daemon reached over localhost HTTP or an in-process TUI - not yet a
@@ -806,42 +810,49 @@ background service that survives logoff/reboot, not yet reachable from a
 messaging platform, and still driven by whatever local model is loaded (this
 session's transcripts were all against small, tool-calling-tuned but
 frequently unreliable local models - the reliability layer above exists
-*because of*, not despite, that choice). Closing those gaps, roughly in
-priority order:
+*because of*, not despite, that choice; a deliberate A/B comparison across
+models under real use, not simulated, is still the single most likely
+remaining lever on incident rate - see "OpenClaude" above for a concrete,
+comparable data point: `llama3-groq-tool-use` is already in the model
+picker's pull list and untested against the incumbent default). Closing
+those gaps, roughly in priority order:
 
 1. **A real background service (`--daemon` is still a documented no-op).**
    `--headless` (skip the TUI, keep the HTTP loop) is already the correct
    foundation - a Windows Service (`ServiceMain`/`RegisterServiceCtrlHandler`)
    and a systemd unit are two more host-side entry points around the same
-   `DroidHost`, not a redesign. This is the highest-leverage remaining item:
-   "always ready to act" (see the self-status/watchdog work in Phase 9) means
-   little if the process itself doesn't survive a reboot.
-2. **A recurring scheduler, not just one-shot delay.** Phase 9's
-   `Task::scheduled_for_ms` answers "run this once, in N minutes" - it does
-   not answer "run this every N minutes" (a cron/SOP concept). `TaskQueue`
-   would need a `recurrence` field and `tick_tasks()` would need to
-   re-enqueue on completion rather than terminate - additive to what already
-   exists, not a rewrite.
-3. **Config hardening**: flat JSON/CLI flags today, no TOML schema, no
+   `DroidHost`, not a redesign. Still the highest-leverage remaining item:
+   "always ready to act" (see the self-status/watchdog work in Phase 9, and
+   now the recurring scheduler in Phase 28) means little if the process
+   itself doesn't survive a reboot.
+2. **Config hardening**: flat JSON/CLI flags today, no TOML schema, no
    autonomy levels, no workspace concept, and the bearer token is plaintext
    (env var or CLI arg, never echoed back - see `CLAUDE.md`). A packaged,
    unattended daemon (item 1) is a materially higher-value credential target
    than an interactively-run one, so this should land before or alongside
    real background operation, not after.
-4. **A `Channel` concept, only once a channel is actually wanted** - do not
+3. **A `Channel` concept, only once a channel is actually wanted** - do not
    build `zeroclaw-channels`-equivalent plumbing speculatively. `Connector`
    already generalizes "a peer droidcli talks to"; a messaging channel is a
    new `Connector` kind (`kind: "messaging_peer"` or similar) plus inbound
    webhook handling in `http_mount.cpp`, not a new subsystem. `MemoryStore`'s
    session model is what would key each external conversation's history
    once this lands.
-5. **A second `ai::ModelProvider` implementation** (Anthropic/OpenAI/...) -
+4. **A second `ai::ModelProvider` implementation** (Anthropic/OpenAI/...) -
    the interface (Phase 1) already exists and `agent_turn` is coded against
    it, so this is additive: implement the interface, construct it instead of
    `OllamaProvider` where it's selected. Deliberately not started
    speculatively - there's nothing to route between until a second
    implementation is actually needed, and a real local-model reliability
-   story (Phases 6-14) mattered more first.
+   story (Phases 6-27) mattered more first. OpenClaude's descriptor-first
+   metadata/routing/transport split (see "OpenClaude" above) is a reasonable
+   shape to borrow *if and when* this actually starts.
+
+Two items from this list as of Phase 14 are now done and removed:
+~~a recurring scheduler~~ (Phase 28 - `Task::recurrence_ms`, `cancel_task`)
+and the model's own lack of date/time awareness (Phase 29 -
+`get_system_info`'s `current_datetime`, freshly read every call rather than
+cached at startup like the rest of `SystemInfo`).
 
 `zeroclaw-plugins` (dynamic plugin loading) remains intentionally out of
 scope - see the "droidcli does not consume MCP servers" guardrail in
@@ -2489,6 +2500,85 @@ under real use, which needs a live Ollama instance and repeated real
 sessions to produce a trustworthy answer, not something that can be
 fabricated or simulated. Worth running deliberately before continuing to
 patch string heuristics one transcript at a time.
+
+### Phase 28 — A recurring scheduler, not just one-shot delay ✅ implemented
+
+**Goal:** the "next hardening priorities" list above named this gap
+explicitly: `Task::scheduled_for_ms` (Phase 9) answers "run this once, in N
+minutes" but not "run this every N minutes" (a cron/SOP concept) - the
+single most concretely-specified, still-open item from that list.
+
+**What shipped:**
+
+- **`Task::recurrence_ms`** (`src/app/tasks.hpp`) - 0 (default) means
+  one-shot, unchanged from before; a positive value is a recurrence interval
+  in milliseconds. `TaskQueue::complete()`/`fail()` (`tasks.cpp`) now check
+  it: a recurring task cycles back to `"pending"` with
+  `scheduled_for_ms = now + recurrence_ms` instead of terminating in
+  `"done"`/`"failed"` - and it cycles back **whether the run succeeded or
+  failed**, matching real cron/SOP semantics (a failure doesn't kill a
+  recurring job, it just tries again next time; the error is still recorded
+  in `error_message` either way). `tick_tasks()` (`cli/host.cpp`) needed no
+  changes at all - it already re-calls `claim_next()` every poll iteration,
+  which already respects `scheduled_for_ms`, so a rescheduled task is picked
+  up on its own next due time with no separate scheduler thread or code
+  path, exactly as the priorities list predicted.
+- **`Task::run_count`** - incremented each time `claim_next()` returns the
+  task, so a recurring task's run history is observable via
+  `GET /api/tasks/{id}`/`list_tasks` without a separate log query.
+  `result_json` holds the *most recent* run's result, overwritten each cycle.
+- **`TaskQueue::cancel()`** and the new **`cancel_task`** agent tool/
+  `POST /api/tasks/{id}/cancel` route - the only way to stop a recurring
+  task for good (it would otherwise reschedule itself forever). Gated
+  (`tool_call_requires_approval`), same as `enqueue_task`. Also works on a
+  still-pending one-shot task (e.g. cancelling a delayed task before it
+  fires); a no-op (`ok:false`) on an already-terminal task.
+- **`enqueue_task`'s `recurrence_ms` parameter** (`parse_task_request_from_json`)
+  - usable together with the existing `delay_ms` to control both the first
+  run's timing and the recurrence interval independently.
+
+**Verified:** `ctest` green (13/13) - `task_queue_test` covers a recurring
+task's successful-run reschedule, failed-run reschedule (error recorded, still
+reschedules), `cancel()` (including the double-cancel/unknown-id no-op
+cases), and confirms a one-shot task's `complete()`/`fail()` behavior is
+unchanged. Live-probed end-to-end against a running `--headless --no-ai`
+instance: a task with `recurrence_ms:2000` ran repeatedly with `run_count`
+incrementing and `updated_at_ms` deltas of ~2000ms between runs (confirmed
+via three separate polls), stayed `"pending"` (never terminal) between
+cycles, and `cancel_task` stopped it for good - a repeat poll after
+cancelling showed a stable `run_count` and `"status":"cancelled"`, and a
+second cancel attempt correctly returned `ok:false`.
+
+### Phase 29 — The model now knows what time it actually is ✅ implemented
+
+**Goal:** a real, concrete gap surfaced while reviewing this document
+against OpenClaude's own design: `get_system_info` and the seeded system
+prompt report OS/hostname/username/cwd/Desktop, but neither ever reports the
+current date/time - and the system prompt is only sent once, when a
+session's transcript is empty (`agent_turn()`, `cli/host.cpp`), so even
+adding a date/time string there naively would go stale the moment a session
+runs past that instant. The model had no way to reason about "what time is
+it" or "how long has this session been running" at all.
+
+**What shipped:**
+
+- **`current_datetime`** added to `build_system_info_json()`'s response
+  (`cli/host.cpp`) - computed fresh via `make_full_log_timestamp()` on
+  *every* call, unlike the rest of `SystemInfo` (queried once at startup and
+  cached). The `get_system_info` tool description now tells the model this
+  explicitly: call it whenever the actual current time is needed, not just
+  at session start.
+- **The seeded system prompt** (`agent_turn()`) now also states the date/
+  time as of session start - explicitly labeled *"as of the start of this
+  session"*, with an explicit instruction to call `get_system_info` for a
+  fresh read later, rather than implying the seeded value stays current for
+  the life of a long-running session.
+
+**Verified:** `ctest` green (13/13, no regressions - this phase didn't touch
+any tested pure function, only `build_system_info_json`'s output and the
+system-prompt string). Live-probed against a running `--headless --no-ai`
+instance: `GET /api/system` returns a `current_datetime` field matching the
+real wall-clock time at the moment of the call.
 
 ---
 

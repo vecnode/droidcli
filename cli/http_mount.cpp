@@ -353,10 +353,18 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 		}
 		core::String task_id;
 		core::String task_rest;
-		if (is_get && split_id_and_rest(path, "/api/tasks/", task_id, task_rest) && task_rest.empty())
+		if (split_id_and_rest(path, "/api/tasks/", task_id, task_rest))
 		{
-			set_json(response, host.task_status_json(task_id));
-			return true;
+			if (is_get && task_rest.empty())
+			{
+				set_json(response, host.task_status_json(task_id));
+				return true;
+			}
+			if (is_post && task_rest == "/cancel")
+			{
+				set_json(response, host.cancel_task_json(task_id));
+				return true;
+			}
 		}
 
 		return false;

@@ -316,6 +316,7 @@ bool tool_call_requires_approval(const core::String& tool_name)
 		|| tool_name == "launch_connector"
 		|| tool_name == "stop_connector"
 		|| tool_name == "enqueue_task"
+		|| tool_name == "cancel_task"
 		|| tool_name == "copy_file"
 		|| tool_name == "move_path"
 		|| tool_name == "delete_file"
@@ -1351,6 +1352,23 @@ core::String DroidHost::task_status_json(const core::String& task_id) const
 	return app::build_task_json(*found);
 }
 
+core::String DroidHost::cancel_task_json(const core::String& task_id)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (!tasks_.find(task_id).has_value())
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "unknown task") + "}";
+	}
+	const bool cancelled = tasks_.cancel(task_id);
+	if (!cancelled)
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", "task is already in a terminal state") + "}";
+	}
+	return "{" + net::json_bool_field("ok", true) + "}";
+}
+
 void DroidHost::tick_tasks()
 {
 	std::optional<app::Task> claimed;
@@ -2005,6 +2023,13 @@ core::String DroidHost::get_cwd_json() const
 
 core::String DroidHost::build_system_info_json() const
 {
+	// current_datetime is computed fresh on every call, unlike the rest of
+	// system_info_ (queried once at startup and cached) - "what time is it"
+	// goes stale the instant it's cached, and a real gap showed the model has
+	// no other way to know the current date/time at all: it's never in the
+	// seeded system prompt (only sent once, at session start - see
+	// agent_turn()) and no tool ever reported it, so a long-running session
+	// had no way to reason about elapsed time or the actual current date.
 	return "{"
 		+ net::json_bool_field("ok", true) + ","
 		+ net::json_string_field("os_name", system_info_.os_name) + ","
@@ -2013,7 +2038,8 @@ core::String DroidHost::build_system_info_json() const
 		+ net::json_string_field("hostname", system_info_.hostname) + ","
 		+ net::json_string_field("username", system_info_.username) + ","
 		+ net::json_string_field("cwd", system_info_.cwd) + ","
-		+ net::json_string_field("desktop_path", system_info_.desktop_path)
+		+ net::json_string_field("desktop_path", system_info_.desktop_path) + ","
+		+ net::json_string_field("current_datetime", make_full_log_timestamp())
 		+ "}";
 }
 
@@ -2339,18 +2365,26 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"enqueue_task",
-		"Queue a task for droidcli's background task loop to process later: \"launch\"/\"stop\" a connector_id, \"run\" a shell command (payload_json {\"command\":..,\"work_dir\":..}), or any other command string treated as an HTTP path called on connector_id. Pass delay_ms to schedule it for later instead of as soon as possible - e.g. delay_ms:120000 for \"do this in 2 minutes\" - the task stays visible as pending (with its due time) until then; omit delay_ms (or pass 0) to make it claimable immediately, same as before.",
+		"Queue a task for droidcli's background task loop to process later: \"launch\"/\"stop\" a connector_id, \"run\" a shell command (payload_json {\"command\":..,\"work_dir\":..}), or any other command string treated as an HTTP path called on connector_id. Pass delay_ms to schedule it for later instead of as soon as possible - e.g. delay_ms:120000 for \"do this in 2 minutes\" - the task stays visible as pending (with its due time) until then; omit delay_ms (or pass 0) to make it claimable immediately, same as before. Pass recurrence_ms to make it recurring instead of one-shot - e.g. recurrence_ms:3600000 for \"run this every hour\" - after each run it automatically reschedules itself recurrence_ms later (whether that run succeeded or failed) instead of terminating; call cancel_task to stop it for good. Use delay_ms and recurrence_ms together to also control when the *first* run happens.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"connector_id\":{\"type\":\"string\",\"description\":\"optional, required for launch/stop/http-path commands\"},"
 		"\"command\":{\"type\":\"string\",\"description\":\"launch | stop | run | <http path>\"},"
 		"\"payload_json\":{\"type\":\"string\",\"description\":\"optional raw JSON payload\"},"
-		"\"delay_ms\":{\"type\":\"integer\",\"description\":\"optional - milliseconds from now before this task becomes runnable, e.g. 120000 for 'in 2 minutes'\"}"
+		"\"delay_ms\":{\"type\":\"integer\",\"description\":\"optional - milliseconds from now before this task's first run becomes runnable, e.g. 120000 for 'in 2 minutes'\"},"
+		"\"recurrence_ms\":{\"type\":\"integer\",\"description\":\"optional - milliseconds between runs, e.g. 3600000 for 'every hour'; omit (or 0) for one-shot\"}"
 		"},\"required\":[\"command\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
 		"list_tasks",
-		"List all tasks in the task queue with their status (pending/running/done/failed). Takes no arguments.",
+		"List all tasks in the task queue with their status (pending/running/done/failed/cancelled), recurrence_ms (0 means one-shot), and run_count (how many times it has run so far). Takes no arguments.",
 		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"cancel_task",
+		"Stop a task for good - the only way to end a recurring task (enqueue_task's recurrence_ms), which would otherwise keep rescheduling itself forever. Also works on a one-shot task that's still pending/running (e.g. to cancel a delayed task before it fires). ok:false if the task id is unknown or it's already in a terminal state.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"task_id\":{\"type\":\"string\",\"description\":\"the task id, from enqueue_task's result or list_tasks\"}"
+		"},\"required\":[\"task_id\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
 		"run_command",
@@ -2477,7 +2511,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"get_system_info",
-		"Get the host machine droidcli is actually running on right now: OS name, OS version/build, CPU architecture, hostname, username, current working directory, and desktop_path (the user's actual Desktop folder, resolved via the OS - not a guess, use this instead of constructing a 'C:\\Users\\<name>\\Desktop'-style path yourself, which breaks for a redirected or localized Desktop folder). This was already queried once at startup and is in your system prompt, but call this if you need to double-check or report it precisely (e.g. the user asks 'what machine/OS is this' or 'where is my Desktop'). Takes no arguments.",
+		"Get the host machine droidcli is actually running on right now: OS name, OS version/build, CPU architecture, hostname, username, current working directory, desktop_path (the user's actual Desktop folder, resolved via the OS - not a guess, use this instead of constructing a 'C:\\Users\\<name>\\Desktop'-style path yourself, which breaks for a redirected or localized Desktop folder), and current_datetime (the real current date and time, freshly read every call - your system prompt only has the date/time from when this session started, which goes stale in a long-running session; call this whenever you need to know what time/date it actually is right now, not just at session start). Most fields were already queried once at startup and are in your system prompt, but call this if you need to double-check or report them precisely (e.g. the user asks 'what machine/OS is this', 'where is my Desktop', or 'what's today's date'). Takes no arguments.",
 		"{\"type\":\"object\",\"properties\":{}}"});
 
 	tools.push_back(ai::ToolDefinition{
@@ -2557,6 +2591,10 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "list_tasks")
 	{
 		return list_tasks_json();
+	}
+	if (tool_name == "cancel_task")
+	{
+		return cancel_task_json(net::extract_json_string_field(arguments_json, "task_id"));
 	}
 	if (tool_name == "run_command")
 	{
@@ -2936,7 +2974,16 @@ core::String DroidHost::agent_turn(const core::String& body)
 			seed_system_prompt = true;
 			system_prompt_text = config_.system_prompt
 				+ " Right now this index has " + std::to_string(installed_apps_.size())
-				+ " installed applications in it.";
+				+ " installed applications in it."
+				// Labeled explicitly as "as of the start of this session," not
+				// "the current time" - this is only sent once, when the
+				// transcript is empty, so it goes stale in a long-running
+				// session. call get_system_info for a fresh read instead of
+				// assuming this one is still current.
+				+ " As of the start of this session, the date and time was "
+				+ make_full_log_timestamp() + " - call get_system_info if you "
+				"need the actual current date/time later in a long session, "
+				"since this won't update on its own.";
 		}
 	}
 

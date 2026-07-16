@@ -95,6 +95,77 @@ int main()
 	assert(scheduler_queue.find(scheduled_id)->status == "pending");
 	assert(!scheduler_queue.claim_next().has_value());
 
+	// --- Recurring tasks (Phase 28) ---
+
+	Task recurring;
+	droidcli::core::String recurring_error;
+	const droidcli::core::String recurring_request_json =
+		"{\"command\":\"run\",\"payload_json\":\"{}\",\"recurrence_ms\":60000}";
+	assert(parse_task_request_from_json(recurring_request_json, recurring, recurring_error));
+	assert(recurring.recurrence_ms == 60000);
+
+	TaskQueue recurring_queue;
+	const droidcli::core::String recurring_id = recurring_queue.enqueue(recurring);
+	assert(recurring_queue.find(recurring_id)->run_count == 0);
+
+	// A successful run of a recurring task cycles back to "pending" with a
+	// new scheduled_for_ms, rather than terminating in "done" the way a
+	// one-shot task's complete() does above.
+	auto first_run = recurring_queue.claim_next();
+	assert(first_run.has_value());
+	assert(first_run->id == recurring_id);
+	assert(recurring_queue.find(recurring_id)->run_count == 1);
+	assert(recurring_queue.complete(recurring_id, "{\"exit_code\":0}"));
+	{
+		const auto after_first_run = recurring_queue.find(recurring_id);
+		assert(after_first_run->status == "pending");
+		assert(after_first_run->scheduled_for_ms > 0);
+		assert(after_first_run->result_json == "{\"exit_code\":0}");
+	}
+	// Rescheduled into the future - not claimable again immediately.
+	assert(!recurring_queue.claim_next().has_value());
+
+	// A *failed* run of a recurring task also cycles back to "pending"
+	// (cron/SOP semantics: keep trying next time) rather than terminating in
+	// "failed" the way a one-shot task's fail() does above - the error is
+	// still recorded.
+	Task recurring_two;
+	recurring_two.command = "run";
+	recurring_two.recurrence_ms = 60000;
+	const droidcli::core::String recurring_two_id = recurring_queue.enqueue(recurring_two);
+	auto second_claim = recurring_queue.claim_next();
+	assert(second_claim.has_value());
+	assert(second_claim->id == recurring_two_id);
+	assert(recurring_queue.fail(recurring_two_id, "boom"));
+	{
+		const auto after_fail = recurring_queue.find(recurring_two_id);
+		assert(after_fail->status == "pending");
+		assert(after_fail->error_message == "boom");
+	}
+
+	// cancel() stops a recurring task for good - the only way to end one.
+	assert(recurring_queue.cancel(recurring_id));
+	assert(recurring_queue.find(recurring_id)->status == "cancelled");
+	// Cancelling an already-terminal (or already-cancelled) task is a no-op.
+	assert(!recurring_queue.cancel(recurring_id));
+	assert(!recurring_queue.cancel("does-not-exist"));
+
+	// A one-shot task's normal terminal behavior is unchanged by any of the
+	// above - complete()/fail() on a recurrence_ms == 0 task still terminate.
+	TaskQueue one_shot_queue;
+	Task one_shot;
+	one_shot.command = "run";
+	const droidcli::core::String one_shot_id = one_shot_queue.enqueue(one_shot);
+	one_shot_queue.claim_next();
+	assert(one_shot_queue.complete(one_shot_id));
+	assert(one_shot_queue.find(one_shot_id)->status == "done");
+	assert(!one_shot_queue.cancel(one_shot_id));
+
+	const droidcli::core::String recurring_json = build_tasks_json(recurring_queue.list());
+	assert(recurring_json.find("\"recurrence_ms\":60000") != droidcli::core::String::npos);
+	assert(recurring_json.find("\"run_count\":1") != droidcli::core::String::npos);
+	assert(recurring_json.find("\"status\":\"cancelled\"") != droidcli::core::String::npos);
+
 	std::cout << "task_queue_test passed" << std::endl;
 	return 0;
 }
