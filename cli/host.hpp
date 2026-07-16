@@ -83,7 +83,14 @@ struct HostConfig {
 		"unrelated work. get_hardware_info reports this machine's CPU/GPU/RAM/disk inventory, but "
 		"only if the human enabled it at startup - if it comes back with \"enabled\":false, tell "
 		"the user hardware scanning is off and how to turn it on (--enable-hardware-scan), don't "
-		"claim the data doesn't exist or make up plausible-sounding specs.";
+		"claim the data doesn't exist or make up plausible-sounding specs. If run_command or "
+		"run_ffmpeg returns \"ok\":false, do not stop and ask the user whether you should retry - "
+		"read \"failure_reason\", fix the command yourself based on the actual error, and call the "
+		"tool again immediately in this same response. You get multiple automatic attempts at this "
+		"before you have to report failure, so use them; only after you've genuinely tried a "
+		"corrected command and it still fails should you explain the real error to the user. You "
+		"always have the ability to run commands directly - never tell the user to run a command "
+		"themselves or claim command execution is beyond your capabilities, that is never true here.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's

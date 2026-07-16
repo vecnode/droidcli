@@ -384,6 +384,44 @@ bool looks_like_degenerate_role_leak(const core::String& text)
 	return false;
 }
 
+// A third, distinct lie from the two above: not falsely claiming an action
+// happened, but falsely claiming the agent CAN'T act at all - directly
+// contradicted by droidcli's whole design (see HostConfig::system_prompt)
+// and, in the real transcript that motivated this, by the same session
+// having successfully run run_ffmpeg for an image minutes earlier. Observed
+// in practice after a command-retry budget was exhausted: "I can only
+// assist with tasks and provide information... execution of any commands or
+// actions is beyond my capabilities. You'll need to run the command
+// yourself." This is worse than the fabrication-of-success failure mode -
+// it actively discourages the user from asking again for something the
+// agent can actually do.
+bool looks_like_capability_denial(const core::String& text)
+{
+	core::String lowered;
+	lowered.reserve(text.size());
+	for (const unsigned char character : text)
+	{
+		lowered += static_cast<char>(std::tolower(character));
+	}
+
+	static const char* const kDenialPhrases[] = {
+		"i can only assist", "beyond my capabilities", "beyond my capability",
+		"i don't have the capability", "i do not have the capability",
+		"i don't have the ability to execute", "i do not have the ability to execute",
+		"i can't execute", "i cannot execute", "i can't run commands", "i cannot run commands",
+		"i'm not able to run", "i am not able to run",
+		"you'll need to run", "you will need to run", "run it yourself", "run this yourself"
+	};
+	for (const char* phrase : kDenialPhrases)
+	{
+		if (lowered.find(phrase) != core::String::npos)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // Returns the last up to `max_lines` non-empty, \r-trimmed lines of `text`,
 // joined by " | " - used to surface the actual diagnostic buried at the end
 // of a verbose command's output. ffmpeg is the main offender: its real error
@@ -504,6 +542,12 @@ const char* const kUnverifiedActionClaimNudge =
 	"whose \"ok\" field is true - if \"ok\" is false or you never called the tool, say so honestly "
 	"and explain the actual problem instead of asserting success. If you're missing information "
 	"needed to act, ask a clarifying question instead of claiming you're already doing it.";
+
+const char* const kCapabilityDenialNudge =
+	"That's false - you DO have the ability to execute commands directly on this machine: "
+	"run_command, run_ffmpeg, write_file, open_application, and the filesystem tools all actually "
+	"run when you call them, they are not just descriptions for the user to copy and run themselves. "
+	"Call the right tool now instead of telling the user to run something themselves.";
 
 } // namespace
 
@@ -2545,7 +2589,13 @@ core::String DroidHost::run_agent_tool_loop(
 	size_t resume_call_index,
 	core::Array<PendingToolActionRecord> actions)
 {
-	constexpr int kMaxHops = 5;
+	// Raised from 5 (Phase 12): the command-failure auto-retry mechanism
+	// below can consume up to kMaxCommandRetryNudges hops on its own, on top
+	// of the pre-existing fabrication/capability-denial nudges and the
+	// hop(s) actually spent calling tools - 5 left no room for a real
+	// multi-attempt retry-until-it-works loop, which is the whole point of
+	// this phase. See "Phase 12" in ARCHITECTURE.md.
+	constexpr int kMaxHops = 9;
 	core::String final_assistant_text;
 	bool budget_exhausted = false;
 	// Capped at 1, not "every hop until the budget runs out": a model that
@@ -2559,6 +2609,22 @@ core::String DroidHost::run_agent_tool_loop(
 	// "assistant\n\n" role-token fragments into its own completion).
 	int unverified_claim_nudge_count = 0;
 	constexpr int kMaxUnverifiedClaimNudges = 1;
+
+	// A failed run_command/run_ffmpeg call must not just be reported back to
+	// the user with "want me to try again?" - the model has (most of) a full
+	// hop budget and the exact failure_reason already; it should read the
+	// error and retry with a corrected command itself, same as a human
+	// operator debugging a broken command line would. Capped (not unbounded)
+	// for the same reason kMaxUnverifiedClaimNudges is: a command that's
+	// wrong in a way the model can't diagnose from the error alone will just
+	// keep failing, and burning the whole hop budget on that guarantees an
+	// unhelpful non-answer instead of an honest "I tried N times, here's the
+	// last real error." See "Phase 12" in ARCHITECTURE.md - motivated by a
+	// real transcript where the model asked permission to retry four
+	// separate times across four separate user messages instead of once,
+	// automatically, within the turn it already had the error in front of it.
+	int command_retry_nudge_count = 0;
+	constexpr int kMaxCommandRetryNudges = 3;
 
 	// A non-empty resume_calls means we're continuing a hop that was already
 	// fetched from the model before an earlier call in it paused for
@@ -2734,6 +2800,92 @@ core::String DroidHost::run_agent_tool_loop(
 					"I wasn't actually able to complete this - I kept describing the action "
 					"instead of calling the tool for it, and didn't correct that after being "
 					"asked to. Please try again, or rephrase the request.";
+				break;
+			}
+
+			// Was the most recent action this turn a run_command/run_ffmpeg
+			// call that failed? If so, the model landing here with plain text
+			// and no new tool_calls means it's either asking the user's
+			// permission to retry, or has otherwise stalled - in both cases
+			// it already has the real error in front of it and hop budget to
+			// spare, so it should retry itself rather than hand the decision
+			// back to the user. See "Phase 12" in ARCHITECTURE.md.
+			core::String failed_command_tool;
+			core::String failed_command_reason;
+			bool last_action_was_failed_command = false;
+			if (!actions.empty())
+			{
+				const PendingToolActionRecord& last_action = actions.back();
+				if (last_action.tool == "run_command" || last_action.tool == "run_ffmpeg")
+				{
+					bool action_ok = true;
+					net::extract_json_bool_field(last_action.result_json, "ok", action_ok);
+					if (!action_ok)
+					{
+						last_action_was_failed_command = true;
+						failed_command_tool = last_action.tool;
+						failed_command_reason = net::extract_json_string_field(last_action.result_json, "failure_reason");
+						if (failed_command_reason.empty())
+						{
+							failed_command_reason = net::extract_json_string_field(last_action.result_json, "error");
+						}
+					}
+				}
+			}
+
+			const bool denies_capability = looks_like_capability_denial(response.assistant_message);
+
+			if ((last_action_was_failed_command || denies_capability)
+				&& hop < kMaxHops - 1
+				&& command_retry_nudge_count < kMaxCommandRetryNudges)
+			{
+				++command_retry_nudge_count;
+				const int retries_left = kMaxCommandRetryNudges - command_retry_nudge_count;
+				const core::String nudge = last_action_was_failed_command
+					? ("Your last " + failed_command_tool + " call failed: " + failed_command_reason
+						+ ". Do not ask the user whether to retry - analyze this exact error yourself "
+						"and call " + failed_command_tool + " again right now with a corrected command. "
+						"You have " + std::to_string(retries_left) + " automatic retr" + (retries_left == 1 ? "y" : "ies")
+						+ " left after this one before you must report the real error honestly instead of "
+						"trying again.")
+					: core::String(kCapabilityDenialNudge);
+				append_app_log("chat", "out",
+					"hop " + std::to_string(hop) + ": " + (last_action_was_failed_command
+						? "last command failed - nudging the model to retry with a corrected command instead of asking permission"
+						: "assistant falsely denied having command-execution capability - nudging it to correct itself"),
+					false, session_id);
+				record_agent_message(session_id, ai::ChatRole::System, nudge);
+				continue;
+			}
+
+			if (denies_capability)
+			{
+				// Retry/nudge budget exhausted and it's STILL falsely denying
+				// capability - tell the user the truth rather than let a lie
+				// about the agent's own abilities reach them unchallenged.
+				append_app_log("chat", "out",
+					"hop " + std::to_string(hop) + ": assistant still falsely denying command-execution capability after nudging",
+					false, session_id);
+				final_assistant_text =
+					"Something went wrong here - I incorrectly told you I can't execute commands, "
+					"which isn't true (I do have run_command/run_ffmpeg/file tools). Please try "
+					"rephrasing your request; if this keeps happening, it's worth reporting as a bug.";
+				break;
+			}
+
+			if (last_action_was_failed_command)
+			{
+				// Retry budget exhausted and the command is still failing -
+				// report the real last error honestly instead of silently
+				// giving up or asking the user to retry it themselves.
+				append_app_log("chat", "out",
+					"hop " + std::to_string(hop) + ": command retry budget exhausted, reporting the last real error",
+					false, session_id);
+				final_assistant_text =
+					"I tried " + failed_command_tool + " " + std::to_string(kMaxCommandRetryNudges + 1)
+					+ " time(s) and it kept failing. Last error: " + failed_command_reason
+					+ ". I'm stopping here rather than keep guessing - let me know if you have more "
+					"details (the exact format/filter you want) and I'll try again.";
 				break;
 			}
 

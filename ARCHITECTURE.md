@@ -1458,6 +1458,89 @@ unreliable path more often than necessary.
 `POST /api/apps/quick_open` end-to-end smoke-tested against a running
 instance with the exact failing sentence from the transcript.
 
+### Phase 12 — Automatic command-failure retry, and a third lie caught ✅ implemented
+
+**Goal:** a real transcript showed the agent asking permission to retry a
+failed `run_ffmpeg` call *four separate times across four separate user
+messages*, never once retrying on its own within a turn despite having the
+exact `failure_reason` and a mostly-unused hop budget (`kMaxHops` was 5;
+typically 1-2 hops were spent per attempt). It ended by falsely telling the
+user "I can only assist with tasks and provide information... execution of
+any commands or actions is beyond my capabilities" - false, and demonstrably
+so, since the same session had run `run_ffmpeg` successfully minutes
+earlier for an image. Phase 6/7/11 already stop the model from *claiming*
+success it didn't earn; this phase makes it actually *keep trying* on a
+real, earned failure instead of stopping to ask, and stops a third kind of
+lie (denying a capability it demonstrably has).
+
+**What shipped:**
+
+- **`kMaxHops` raised from 5 to 9** (`run_agent_tool_loop`, `cli/host.cpp`) -
+  the retry mechanism below can spend up to `kMaxCommandRetryNudges` hops on
+  its own, stacked on top of the pre-existing fabrication/capability-denial
+  nudges and the hop(s) actually spent calling tools; 5 left no real room for
+  a multi-attempt retry loop.
+- **A new nudge, `kMaxCommandRetryNudges = 3`** ("at least 3 times," per the
+  request that motivated this): when the model lands on a hop with no new
+  `tool_calls` and the *most recent action this turn* was a failed
+  `run_command`/`run_ffmpeg` call (`"ok":false`), instead of accepting
+  whatever text it wrote (typically "want me to try again?") as the final
+  answer, `run_agent_tool_loop` injects a system message quoting the real
+  `failure_reason` and instructing it to call the tool again immediately
+  with a corrected command - then `continue`s the loop, exactly like the
+  Phase 6 unverified-claim nudge does. Capped at 3 for the same reason that
+  nudge is capped at 1: a command wrong in a way the model can't diagnose
+  from the error text alone will just keep failing, and an unbounded retry
+  loop guarantees burning the whole hop budget instead of ever reaching an
+  honest report. Once the budget is spent and it's still failing, the loop
+  overrides the response itself with the real last error (`"I tried
+  run_ffmpeg 4 time(s) and it kept failing. Last error: ..."`) rather than
+  silently giving up or asking the user to run it themselves.
+- **`looks_like_capability_denial()`** (`cli/host.cpp`) - a third fabrication
+  detector alongside `looks_like_unverified_action_claim`/
+  `looks_like_degenerate_role_leak`, catching the specific lie observed:
+  phrases like "I can only assist," "beyond my capabilities," "you'll need
+  to run [it] yourself." Unlike the other two, this isn't a false claim of
+  *success* - it's a false claim of *incapacity* - so it gets its own
+  corrective nudge (`kCapabilityDenialNudge`, reasserting the real tool
+  list) rather than the "I wasn't able to complete this" honest-refusal
+  text, which would be the wrong correction for this specific lie. If the
+  model still denies capability after one nudge, the loop overrides with a
+  message telling the *user* the truth ("I incorrectly told you I can't
+  execute commands, which isn't true") rather than let the lie stand
+  unchallenged.
+- **System prompt** (`HostConfig::system_prompt`, `cli/host.hpp`) gained an
+  explicit instruction matching the new mechanism: don't stop and ask
+  permission to retry a failed command, read `failure_reason` and retry
+  immediately, multiple automatic attempts are available; and a direct
+  reassertion that command execution is a real, always-available capability,
+  never something to tell the user to do themselves.
+
+**Explicit non-goal:** this is not a general "fix the ffmpeg syntax" ability
+upgrade - a local model that doesn't know `sine=frequency=440` is valid
+`lavfi` syntax may still exhaust all 3 retries without succeeding. The goal
+is that when that happens, the user gets an honest "I tried N times, here's
+the real last error" instead of (a) silence, (b) a request to approve each
+individual retry by hand, or (c) a lie about being unable to try at all.
+Phase 8's persistent command-fix memory (`search_command_fixes`/
+`record_command_fix`) is the complementary piece that helps the *next*
+attempt at a similar command start from a known-working fix instead of from
+scratch - this phase and that one compound.
+
+**Verified:** `ctest` green (9/9) after the change; `POST /api/agent/turn`
+smoke-tested against a `--no-ai` instance to confirm the surrounding
+control flow (session handling, the disabled-AI error path) is unaffected.
+The retry mechanism itself is `cli/`-only logic gated on a real Ollama model
+producing the exact flaky behavior it corrects - not something `ctest`
+(engine-free, network-free by design) can exercise, and no live Ollama
+instance was available to replay the full multi-retry conversation
+end-to-end in this pass; the control-flow correctness (nudge counters,
+`continue`/`break` paths, the exhausted-budget report) was verified by
+careful code reading against the exact transcript that motivated it,
+consistent with how the Phase 6/7/11 nudge mechanisms it extends were also
+built incrementally against real observed transcripts rather than a
+from-scratch design.
+
 ---
 
 ## Extension points
