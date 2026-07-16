@@ -61,6 +61,19 @@ int main()
 		assert(intent.app_name == "Blender");
 	}
 
+	// Real-world phrasing observed in a second production incident: "Ok great
+	// can you now open Blender?" fell through to the LLM path because neither
+	// "great " nor "now " (sitting between the courtesy prefix and the verb)
+	// was stripped - the model then took two hops (one fabrication nudge) and
+	// still never called open_application, replying with garbled leaked-role
+	// text instead ("assistant\n\nYes, please.") before eventually launching
+	// Blender on a later, differently-phrased retry the user had to make by hand.
+	{
+		const OpenIntent intent = parse_open_intent("Ok great can you now open Blender?");
+		assert(intent.matched);
+		assert(intent.app_name == "Blender");
+	}
+
 	// "so, open X" and "I'd like to open X" variants.
 	{
 		const OpenIntent intent = parse_open_intent("So, open Chrome");

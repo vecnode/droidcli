@@ -47,14 +47,25 @@ core::String TaskQueue::enqueue(Task task)
 
 std::optional<Task> TaskQueue::claim_next()
 {
+	const int64_t now = current_timestamp_ms();
 	for (Task& task : tasks_)
 	{
-		if (task.status == "pending")
+		if (task.status != "pending")
 		{
-			task.status = "running";
-			task.updated_at_ms = current_timestamp_ms();
-			return task;
+			continue;
 		}
+		if (task.scheduled_for_ms > now)
+		{
+			// Not due yet - a scheduled task stays pending (and unclaimed by
+			// any other pending task behind it) until the wall clock reaches
+			// its deadline. tick_tasks() calling this every poll iteration
+			// means it becomes claimable within one iteration of becoming due,
+			// with no separate scheduler thread needed.
+			continue;
+		}
+		task.status = "running";
+		task.updated_at_ms = now;
+		return task;
 	}
 	return std::nullopt;
 }
@@ -142,6 +153,7 @@ core::String build_task_json(const Task& task)
 	stream << net::json_string_field("status", task.status) << ',';
 	stream << "\"created_at_ms\":" << task.created_at_ms << ',';
 	stream << "\"updated_at_ms\":" << task.updated_at_ms << ',';
+	stream << "\"scheduled_for_ms\":" << task.scheduled_for_ms << ',';
 	stream << net::json_string_field("error_message", task.error_message) << ',';
 	stream << net::json_string_field("result_json", task.result_json);
 	stream << '}';
@@ -181,6 +193,12 @@ bool parse_task_request_from_json(
 
 	out_task.connector_id = net::extract_json_string_field(json, "connector_id");
 	out_task.payload_json = net::extract_json_string_field(json, "payload_json");
+
+	int64_t delay_ms = 0;
+	if (net::extract_json_int_field(json, "delay_ms", delay_ms) && delay_ms > 0)
+	{
+		out_task.scheduled_for_ms = current_timestamp_ms() + delay_ms;
+	}
 
 	return true;
 }

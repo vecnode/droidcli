@@ -177,9 +177,11 @@ core::String join_url(const core::String& base, const core::String& path)
 	return path.front() == '/' ? trimmed_base + path : trimmed_base + "/" + path;
 }
 
-// Minimal integer field extractor, matching net/json.hpp's hand-rolled style
-// (only string/bool extractors exist there). Returns false if the field is
-// absent or not a plain integer literal.
+// int32_t-scoped field extractor for host-local uses (timeout_ms, max_bytes)
+// that never need more than 32 bits. net::extract_json_int_field (added
+// alongside Task::scheduled_for_ms) is the int64_t-scoped equivalent for
+// fields that can hold an absolute epoch-ms value; kept separate rather than
+// widening every call site here to int64_t for no benefit.
 bool extract_json_int_field(const core::String& json, const core::String& field_name, int32_t& out_value)
 {
 	const core::String needle = "\"" + field_name + "\":";
@@ -252,6 +254,34 @@ bool looks_like_unverified_action_claim(const core::String& text)
 		lowered += static_cast<char>(std::tolower(character));
 	}
 
+	// Claims that work is continuing beyond this response - "I'm currently
+	// running X", "the process is still ongoing", "give me a few more
+	// seconds". These are unconditionally fabricated in this architecture,
+	// not just probably: agent_turn is one bounded, synchronous request/
+	// response (see run_agent_tool_loop) - nothing droidcli does ever
+	// continues after this hop's HTTP response is sent, there is no
+	// background job, no worker thread, no "still working on it" state to
+	// report truthfully. Caught a real specimen of this in practice: a
+	// model told the user "I am currently using the 'list_open_windows'
+	// function" and, two turns later, "the process is still ongoing...
+	// I will need a few more seconds" - zero tool_calls were ever made for
+	// either claim. Unlike the claim+verb pair below, a match here doesn't
+	// need a corroborating action verb - the claim itself is the tell.
+	static const char* const kOngoingProcessPhrases[] = {
+		"is still ongoing", "still in progress", "in progress", "still ongoing",
+		"still processing", "still working on", "currently using", "currently running",
+		"i am currently", "i'm currently", "few more seconds", "a moment more",
+		"not finished yet", "isn't finished yet", "give it a moment", "check back",
+		"is it finished", "keep me posted"
+	};
+	for (const char* phrase : kOngoingProcessPhrases)
+	{
+		if (lowered.find(phrase) != core::String::npos)
+		{
+			return true;
+		}
+	}
+
 	static const char* const kClaimPhrases[] = {
 		// Future/in-progress.
 		"i'll ", "i will ", "let me ", "hold on", "one moment",
@@ -274,15 +304,79 @@ bool looks_like_unverified_action_claim(const core::String& text)
 		return false;
 	}
 
+	// Broader than just file/media verbs - covers the "I'll look that up"
+	// class of claim too (search/list/find/check), which evaded this check
+	// in the same real transcript that motivated kOngoingProcessPhrases
+	// above ("I'll need to list all installed applications and then search
+	// for those related to sound" had a claim phrase but no verb this list
+	// used to recognize).
 	static const char* const kActionVerbs[] = {
 		"execute", "run ", "create", "created", "creating", "generate",
 		"transcode", "convert", "save", "saved", "make", "made", "launch",
 		"open", "write", "wrote", "delete", "deleted", "start", "move",
-		"moved", "moving"
+		"moved", "moving", "search", "searching", "list ", "listing",
+		"find ", "finding", "check ", "checking", "look up", "looking up"
 	};
 	for (const char* verb : kActionVerbs)
 	{
 		if (lowered.find(verb) != core::String::npos)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Catches a distinct, previously-observed failure mode from Phase 7 that
+// looks_like_unverified_action_claim doesn't cover: a nudged small local
+// model degrading into leaked role-token output instead of either calling
+// the tool or giving a real answer - a real transcript showed a nudge after
+// "open Blender" produce the literal reply "assistant\n\nYes, please." with
+// no tool_calls at all. That text contains no claim phrase and no action
+// verb (it isn't *claiming* anything, it's just broken), so it passed the
+// existing heuristic and reached the user as if it were a real response to
+// "can you open Blender." Detected structurally, not semantically: the reply
+// starts with a bare chat-role label ("assistant"/"system"/"user") standing
+// alone on its own line/segment - a real sentence never opens that way.
+bool looks_like_degenerate_role_leak(const core::String& text)
+{
+	core::String trimmed = text;
+	size_t start = 0;
+	while (start < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[start])))
+	{
+		++start;
+	}
+	trimmed = trimmed.substr(start);
+
+	static const char* const kRoleLabels[] = { "assistant", "system", "user" };
+	for (const char* label : kRoleLabels)
+	{
+		const size_t label_length = std::char_traits<char>::length(label);
+		if (trimmed.size() <= label_length)
+		{
+			continue;
+		}
+		bool matches_case_insensitive = true;
+		for (size_t i = 0; i < label_length; ++i)
+		{
+			if (std::tolower(static_cast<unsigned char>(trimmed[i])) != label[i])
+			{
+				matches_case_insensitive = false;
+				break;
+			}
+		}
+		if (!matches_case_insensitive)
+		{
+			continue;
+		}
+		// The character right after the label must end the "word" (not part
+		// of a real sentence like "Assistant managers..."), and what follows
+		// must be whitespace/newline before any further content, not e.g.
+		// "assistant: here's your answer" which is just an odd-but-real
+		// prefix a model sometimes echoes - only a bare standalone label
+		// followed by blank space counts as the leak this is meant to catch.
+		const char next = trimmed[label_length];
+		if (next == '\n' || next == '\r')
 		{
 			return true;
 		}
@@ -432,6 +526,15 @@ void DroidHost::initialize()
 		// each other instead of re-querying the OS independently.
 		system_info_ = get_system_info();
 
+		// Hardware inventory only runs if the human opted in at startup
+		// (--enable-hardware-scan) - see HostConfig::enable_hardware_scan.
+		// Left default-constructed (empty) otherwise; build_hardware_info_json
+		// reports that honestly rather than presenting zeroed fields as data.
+		if (config_.enable_hardware_scan)
+		{
+			hardware_info_ = scan_hardware_info();
+		}
+
 		// Durable session log: logs/log.jsonl accumulates across restarts so
 		// a crash or a bug report can be diagnosed after the fact, not just
 		// while the process happens to still be up. Structured JSONL (one
@@ -534,13 +637,16 @@ void DroidHost::initialize()
 	}
 
 	append_app_log("host", "event",
-		"droidcli host initialized (" + std::to_string(installed_apps_.size()) + " installed apps indexed)", true);
+		"droidcli host initialized (" + std::to_string(installed_apps_.size()) + " installed apps indexed"
+			+ (config_.enable_hardware_scan ? ", hardware scan enabled" : ", hardware scan disabled") + ")",
+		true);
 }
 
 
 void DroidHost::tick(const float delta_seconds)
 {
 	(void)delta_seconds;
+	tick_watchdog();
 	tick_tasks();
 }
 
@@ -797,6 +903,63 @@ bool DroidHost::should_emit_periodic_log(
 	}
 
 	return false;
+}
+
+void DroidHost::tick_watchdog()
+{
+	if (!config_.enable_ai)
+	{
+		// --no-ai means there's nothing to watch - don't manufacture
+		// "Ollama unreachable" noise for a backend the operator deliberately
+		// turned off.
+		return;
+	}
+
+	const std::time_t now_utc = std::time(nullptr);
+	std::time_t last_check = watchdog_last_check_utc_;
+	if (!should_emit_periodic_log(now_utc, last_check, kWatchdogIntervalSeconds))
+	{
+		return;
+	}
+	watchdog_last_check_utc_ = last_check;
+
+	core::String ollama_url_copy;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		ollama_url_copy = config_.ollama_url;
+	}
+
+	const core::String tags_url = strip_trailing_slashes(ollama_url_copy) + "/api/tags";
+	int32_t status_code = 0;
+	core::String response_body;
+	const bool transport_ok = tools::sync_http_get(tags_url, status_code, response_body);
+	const bool reachable = transport_ok && status_code >= 200 && status_code < 300;
+
+	using namespace std::chrono;
+	const int64_t checked_at_ms = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+
+	bool was_reachable = true;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		was_reachable = ollama_reachable_;
+		ollama_reachable_ = reachable;
+		ollama_last_check_ms_ = checked_at_ms;
+		ollama_last_check_error_ = reachable ? core::String {} : ("status_code=" + std::to_string(status_code));
+	}
+
+	// Only log a transition, not every check - this runs at most every
+	// kWatchdogIntervalSeconds, but a long-running daemon would still fill
+	// the log with "still unreachable" repeats otherwise.
+	if (reachable != was_reachable)
+	{
+		append_app_log(
+			"watchdog",
+			"ollama",
+			reachable
+				? "Ollama is reachable again at " + ollama_url_copy
+				: "Ollama became unreachable at " + ollama_url_copy + " - agent_turn will keep responding with ok:false rather than hanging or crashing",
+			reachable);
+	}
 }
 
 core::String DroidHost::build_app_log_json() const
@@ -1254,14 +1417,20 @@ core::String DroidHost::enqueue_task(const core::String& body)
 	core::String error;
 	if (!app::parse_task_request_from_json(body, task, error))
 	{
-		return "{" + net::json_bool_field("success", false) + ","
+		// "ok" first, per AGENTS.md's hard rule that every agent-tool result
+		// must carry it - this route is also the enqueue_task tool, and a
+		// plain "success" field here (the pre-existing shape) is exactly the
+		// kind of field the model is not conditioned to trust, per "Phase 6"
+		// in ARCHITECTURE.md.
+		return "{" + net::json_bool_field("ok", false) + ","
 			+ net::json_string_field("error", error) + "}";
 	}
 
 	std::lock_guard<std::mutex> lock(mutex_);
 	const core::String id = tasks_.enqueue(task);
-	return "{" + net::json_bool_field("success", true) + ","
-		+ net::json_string_field("id", id) + "}";
+	return "{" + net::json_bool_field("ok", true) + ","
+		+ net::json_string_field("id", id) + ","
+		+ "\"scheduled_for_ms\":" + std::to_string(task.scheduled_for_ms) + "}";
 }
 
 core::String DroidHost::list_tasks_json() const
@@ -1343,15 +1512,75 @@ void DroidHost::tick_tasks()
 		error = "task has no connector_id and command is not launch/stop";
 	}
 
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (success)
+		{
+			tasks_.complete(task.id, result_json);
+		}
+		else
+		{
+			tasks_.fail(task.id, error);
+		}
+	}
+
+	// append_app_log takes mutex_ itself, so it must run after the block
+	// above releases it - this is what makes a scheduled/queued task's
+	// dispatch visible in GET /api/app/log and the TUI's log panel, not just
+	// GET /api/tasks/{id}'s terminal status.
+	append_app_log("task", task.command, task.id + (success ? " completed" : (" failed: " + error)), success);
+}
+
+core::String DroidHost::build_self_status_json() const
+{
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (success)
+
+	const core::Array<net::Connector> connector_list = connectors_.list_connectors();
+	size_t connectors_enabled = 0;
+	for (const net::Connector& connector : connector_list)
 	{
-		tasks_.complete(task.id, result_json);
+		if (connector.enabled)
+		{
+			++connectors_enabled;
+		}
 	}
-	else
+
+	const core::Array<app::Task> task_list = tasks_.list();
+	size_t tasks_pending = 0;
+	size_t tasks_running = 0;
+	size_t tasks_failed = 0;
+	for (const app::Task& task : task_list)
 	{
-		tasks_.fail(task.id, error);
+		if (task.status == "pending") { ++tasks_pending; }
+		else if (task.status == "running") { ++tasks_running; }
+		else if (task.status == "failed") { ++tasks_failed; }
 	}
+
+	size_t recent_failures = 0;
+	for (size_t index = app_log_.size(); index > 0 && app_log_.size() - index < 20; --index)
+	{
+		if (!app_log_[index - 1].success)
+		{
+			++recent_failures;
+		}
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", true) << ',';
+	stream << net::json_bool_field("ai_enabled", config_.enable_ai) << ',';
+	stream << net::json_bool_field("ollama_reachable", ollama_reachable_) << ',';
+	stream << "\"ollama_last_check_ms\":" << ollama_last_check_ms_ << ',';
+	stream << net::json_string_field("ollama_last_check_error", ollama_last_check_error_) << ',';
+	stream << "\"connector_count\":" << connector_list.size() << ',';
+	stream << "\"connectors_enabled\":" << connectors_enabled << ',';
+	stream << "\"tasks_pending\":" << tasks_pending << ',';
+	stream << "\"tasks_running\":" << tasks_running << ',';
+	stream << "\"tasks_failed\":" << tasks_failed << ',';
+	stream << net::json_bool_field("memory_store_open", memory_store_.is_open()) << ',';
+	stream << "\"recent_failures_last_20_log_entries\":" << recent_failures;
+	stream << '}';
+	return stream.str();
 }
 
 core::String DroidHost::build_process_status_json()
@@ -1731,6 +1960,44 @@ core::String DroidHost::build_system_info_json() const
 		+ "}";
 }
 
+core::String DroidHost::build_hardware_info_json() const
+{
+	if (!config_.enable_hardware_scan)
+	{
+		return "{" + net::json_bool_field("ok", true) + ","
+			+ net::json_bool_field("enabled", false) + ","
+			+ net::json_string_field("error", "hardware scanning is disabled - restart droidcli with --enable-hardware-scan to turn it on") + "}";
+	}
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", true) << ',';
+	stream << net::json_bool_field("enabled", true) << ',';
+	stream << net::json_string_field("cpu_name", hardware_info_.cpu_name) << ',';
+	stream << "\"cpu_core_count\":" << hardware_info_.cpu_core_count << ',';
+	stream << "\"total_ram_bytes\":" << hardware_info_.total_ram_bytes << ',';
+	stream << "\"gpus\":[";
+	for (size_t index = 0; index < hardware_info_.gpus.size(); ++index)
+	{
+		if (index > 0) { stream << ','; }
+		stream << '{' << net::json_string_field("name", hardware_info_.gpus[index].name) << '}';
+	}
+	stream << "],";
+	stream << "\"disks\":[";
+	for (size_t index = 0; index < hardware_info_.disks.size(); ++index)
+	{
+		if (index > 0) { stream << ','; }
+		const DiskVolume& disk = hardware_info_.disks[index];
+		stream << '{'
+			<< net::json_string_field("drive", disk.drive) << ','
+			<< "\"total_bytes\":" << disk.total_bytes << ','
+			<< "\"free_bytes\":" << disk.free_bytes
+			<< '}';
+	}
+	stream << "]}";
+	return stream.str();
+}
+
 core::String DroidHost::which_executable_json(const core::String& body)
 {
 	const core::String name = net::extract_json_string_field(body, "name");
@@ -1779,11 +2046,12 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"enqueue_task",
-		"Queue a task for droidcli's background task loop to process later: \"launch\"/\"stop\" a connector_id, \"run\" a shell command (payload_json {\"command\":..,\"work_dir\":..}), or any other command string treated as an HTTP path called on connector_id.",
+		"Queue a task for droidcli's background task loop to process later: \"launch\"/\"stop\" a connector_id, \"run\" a shell command (payload_json {\"command\":..,\"work_dir\":..}), or any other command string treated as an HTTP path called on connector_id. Pass delay_ms to schedule it for later instead of as soon as possible - e.g. delay_ms:120000 for \"do this in 2 minutes\" - the task stays visible as pending (with its due time) until then; omit delay_ms (or pass 0) to make it claimable immediately, same as before.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"connector_id\":{\"type\":\"string\",\"description\":\"optional, required for launch/stop/http-path commands\"},"
 		"\"command\":{\"type\":\"string\",\"description\":\"launch | stop | run | <http path>\"},"
-		"\"payload_json\":{\"type\":\"string\",\"description\":\"optional raw JSON payload\"}"
+		"\"payload_json\":{\"type\":\"string\",\"description\":\"optional raw JSON payload\"},"
+		"\"delay_ms\":{\"type\":\"integer\",\"description\":\"optional - milliseconds from now before this task becomes runnable, e.g. 120000 for 'in 2 minutes'\"}"
 		"},\"required\":[\"command\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
@@ -1885,6 +2153,16 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"},\"required\":[\"query\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
+		"get_hardware_info",
+		"Get this machine's local hardware inventory: CPU name/core count, total RAM, GPU adapter name(s), and per-drive disk capacity (total/free bytes for each fixed local drive). This is read-only, local-only information about what the machine is made of - not geolocation, not network scanning, not device control. Only returns real data if the human enabled it at droidcli startup (--enable-hardware-scan); if not, the result reports enabled:false honestly - tell the user that instead of claiming the data isn't available for some other reason. Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"self_status",
+		"Check droidcli's own current health before acting or reporting on its capabilities: whether Ollama is reachable right now (cached from a background check, not a fresh call), connector/task counts, and how many of the last 20 log entries were failures. Call this when you're about to say you can't do something, when a tool call just failed and you want to know if it's a one-off or a wider problem (e.g. Ollama down), or when the user asks what state you're in / whether something is working. A false ollama_reachable does not mean you should give up - keep using non-AI tools (run_command, filesystem, connectors) normally and tell the user honestly that the AI backend specifically is degraded. Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
 		"record_command_fix",
 		"Record a 'this was broken, this is what fixed it' lesson so future run_command/run_ffmpeg calls (in this or a later session) can look it up via search_command_fixes instead of hitting the same wall again. Call this right after you fix something that failed at least once first - not for a command that worked on the first try, and not for a fix you haven't actually verified worked (an 'ok':true tool result). broken/working should be the actual command/args strings, not a paraphrase; lesson should be one short, specific, reusable sentence (e.g. 'ffmpeg embeds nested double-quotes badly through cmd.exe - avoid quoting filter expressions that don't need it').",
 		"{\"type\":\"object\",\"properties\":{"
@@ -1979,6 +2257,14 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "run_ffmpeg")
 	{
 		return run_ffmpeg_json(arguments_json);
+	}
+	if (tool_name == "get_hardware_info")
+	{
+		return build_hardware_info_json();
+	}
+	if (tool_name == "self_status")
+	{
+		return build_self_status_json();
 	}
 	if (tool_name == "search_command_fixes")
 	{
@@ -2406,8 +2692,13 @@ core::String DroidHost::run_agent_tool_loop(
 					break;
 				}
 			}
-			const bool looks_fabricated = !a_tool_call_already_succeeded_this_turn
-				&& looks_like_unverified_action_claim(response.assistant_message);
+			// The role-leak check runs regardless of a_tool_call_already_succeeded_this_turn -
+			// unlike an unverified claim, leaked-role garbled text isn't a
+			// legitimate truthful summary under any circumstance, tool call or
+			// not, so a prior success in this turn never excuses it.
+			const bool looks_fabricated =
+				(!a_tool_call_already_succeeded_this_turn && looks_like_unverified_action_claim(response.assistant_message))
+				|| looks_like_degenerate_role_leak(response.assistant_message);
 
 			if (looks_fabricated && hop < kMaxHops - 1
 				&& unverified_claim_nudge_count < kMaxUnverifiedClaimNudges)
@@ -2636,6 +2927,11 @@ void DroidHost::log_thread_event(const core::String& thread_name, const core::St
 	// not something to alarm on.
 	const bool success = event.rfind("threw", 0) != 0;
 	append_app_log("thread", thread_name, event, success);
+}
+
+void DroidHost::log_quick_open_event(const core::String& summary, const bool success)
+{
+	append_app_log("quick_open", "out", summary, success);
 }
 
 } // namespace droidcli::cli

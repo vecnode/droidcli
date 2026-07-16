@@ -9,6 +9,7 @@
 #include "memory_store.hpp"
 #include "window_list.hpp"
 #include "system_info.hpp"
+#include "hardware_info.hpp"
 #include "ffmpeg_tool.hpp"
 
 #include <ctime>
@@ -19,6 +20,12 @@ namespace droidcli::cli {
 
 struct HostConfig {
 	bool enable_ai = true;
+	// Off by default - a human opts in once, at process start (--enable-hardware-scan),
+	// rather than the daemon deciding on its own to enumerate CPU/GPU/disk
+	// facts about the machine it's running on. See "droidcli-hardware" in
+	// ARCHITECTURE.md's crate-by-crate mapping / "Hardware awareness" section
+	// for why this is scoped to read-only local inventory, not device control.
+	bool enable_hardware_scan = false;
 	core::String ollama_url = "http://127.0.0.1:11434";
 	core::String ollama_model = "llama3.2";
 	core::String system_prompt =
@@ -68,7 +75,15 @@ struct HostConfig {
 		"guess - call record_command_fix with the exact broken and working command/args and one "
 		"short, reusable lesson, so the next time (in this session or a future one) doesn't start "
 		"from scratch. Don't record a command that worked on the first try - only ones you had to "
-		"fix.";
+		"fix. Call self_status before claiming you can't do something, or right after a tool call "
+		"fails and you want to know if it's an isolated problem or something wider (e.g. the AI "
+		"backend itself is down). A degraded Ollama connection does not mean you're broken - the "
+		"host keeps running and every non-AI tool (run_command, filesystem, connectors, tasks) "
+		"still works normally; report the degradation honestly instead of going silent or refusing "
+		"unrelated work. get_hardware_info reports this machine's CPU/GPU/RAM/disk inventory, but "
+		"only if the human enabled it at startup - if it comes back with \"enabled\":false, tell "
+		"the user hardware scanning is off and how to turn it on (--enable-hardware-scan), don't "
+		"claim the data doesn't exist or make up plausible-sounding specs.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's
@@ -137,7 +152,12 @@ public:
 		const core::String& method,
 		const core::String& body);
 
-	// Task queue.
+	// Task queue. body: {"connector_id":"...","command":"launch|stop|run|<http path>",
+	// "payload_json":"...","delay_ms":...}. delay_ms (optional) defers when
+	// the task becomes claimable by tick_tasks() - e.g. delay_ms:120000 runs
+	// it no sooner than two minutes from now, without a separate scheduler
+	// subsystem (see Task::scheduled_for_ms, src/app/tasks.hpp). Returns
+	// {"ok":bool,"id":"...","scheduled_for_ms":...} (0 if not scheduled).
 	core::String enqueue_task(const core::String& body);
 	core::String list_tasks_json() const;
 	core::String task_status_json(const core::String& task_id) const;
@@ -147,6 +167,15 @@ public:
 	void tick_tasks();
 
 	core::String build_process_status_json();
+
+	// Aggregated self-health snapshot (GET /api/agent/self_status, and the
+	// self_status agent tool) - answers "am I actually capable of acting
+	// right now" from state already tracked elsewhere, without a fresh
+	// network round-trip on every call: cached Ollama reachability (updated
+	// by the watchdog check folded into tick(), not pinged inline here),
+	// connector/task counts, memory-store health, and a recent-failure count
+	// from app_log_. See "Phase 9" in ARCHITECTURE.md.
+	core::String build_self_status_json() const;
 
 	// One-shot shell command execution (POST /api/run). body is
 	// {"command":"...","work_dir":"...","timeout_ms":...}.
@@ -212,6 +241,16 @@ public:
 	// build_status_json (droidcli's own session state), this is about the
 	// environment droidcli lives in.
 	core::String build_system_info_json() const;
+
+	// Read-only local hardware inventory (GET /api/hardware, and the
+	// get_hardware_info agent tool) - CPU name/core count, total RAM, GPU
+	// adapter name(s), and per-volume disk capacity. Only populated if
+	// HostConfig::enable_hardware_scan was on at startup (the human's
+	// one-time opt-in - see HostConfig above); otherwise returns
+	// {"ok":true,"enabled":false,...} honestly rather than fabricating
+	// empty-looking data. Scanned once at initialize(), same cache-once
+	// pattern as build_system_info_json/get_system_info.
+	core::String build_hardware_info_json() const;
 
 	// The fixed tool set agent_turn() can call (GET /api/agent/tools) - name,
 	// description, and JSON Schema parameters for every tool in
@@ -293,6 +332,18 @@ public:
 	// {"session_ids":[...],"current_session_id":"..."}.
 	core::String build_agent_sessions_json() const;
 
+	// Public logging hook for the TUI's deterministic quick-open flow
+	// (try_quick_open_json recognition, the yes/no confirmation the human
+	// answers, and the resulting launch decision - cli/tui.cpp) so that path
+	// is visible in logs/log.jsonl and the App Log panel like every other
+	// action, not just the bare open_application() call it ends in. Before
+	// this, the only trace of a quick-open launch was the "open" channel
+	// entry open_application() itself logs - no record of what was
+	// recognized, what was asked, or what the human answered, which made a
+	// real incident (a quick-open launch appearing with no visible cause)
+	// hard to diagnose from logs/log.jsonl alone.
+	void log_quick_open_event(const core::String& summary, bool success = true);
+
 	// Public logging hook for host-owned background threads spawned via
 	// core::spawn() (see ARCHITECTURE.md's "Spawn attribution") to report
 	// their lifecycle - "spawned"/"joined"/"threw: <what>" - under the
@@ -319,6 +370,18 @@ private:
 	// logs/log.txt accumulates across restarts, so entries need a date too.
 	static core::String make_full_log_timestamp();
 	static bool should_emit_periodic_log(std::time_t now_utc, std::time_t& last_emit_utc, int32_t min_interval_seconds);
+
+	// Throttled Ollama-reachability check, folded into tick() rather than run
+	// on its own thread: a fresh /api/tags GET only every kWatchdogIntervalSeconds,
+	// caching the result into ollama_reachable_/ollama_last_check_ms_/
+	// ollama_last_check_error_ so build_self_status_json() and the model (via
+	// the self_status tool) can notice a degraded Ollama without agent_turn
+	// having to discover it mid-conversation, and without blocking the poll
+	// loop on a network call every ~200ms tick. Only logs on a state
+	// transition (reachable <-> unreachable), not every check, to avoid
+	// spamming app_log_ while Ollama is simply off (--no-ai / not installed
+	// yet). See "Phase 9" in ARCHITECTURE.md.
+	void tick_watchdog();
 
 	core::Array<ai::ToolDefinition> agent_tool_definitions() const;
 	// Executes one tool call by name against this host's own methods. Returns
@@ -402,6 +465,13 @@ private:
 	// initialize() (see system_info.hpp) - not meant to change during a run.
 	SystemInfo system_info_;
 
+	// CPU/GPU/RAM/disk inventory, queried once in initialize() only if
+	// config_.enable_hardware_scan was on (see HardwareInfo, hardware_info.hpp).
+	// Left default-constructed (all zero/empty) when scanning is disabled -
+	// build_hardware_info_json() reports "enabled":false rather than treating
+	// zeroed-out fields as real data.
+	HardwareInfo hardware_info_;
+
 	// Persistent agent-turn history (see "Persistent memory" in
 	// ARCHITECTURE.md's extension plan) - memory_store_ is the durable
 	// SQLite-backed log; current_session_id_ is which session agent_turn is
@@ -435,6 +505,15 @@ private:
 	// Set only while a gated tool call is awaiting the user's decision - see
 	// PendingAgentToolCall and run_agent_tool_loop.
 	PendingAgentToolCall pending_tool_call_;
+
+	// Watchdog state (see tick_watchdog()) - optimistic defaults so a host
+	// started with --no-ai or before the first check ever runs doesn't
+	// falsely report Ollama as down.
+	bool ollama_reachable_ = true;
+	int64_t ollama_last_check_ms_ = 0;
+	core::String ollama_last_check_error_;
+	std::time_t watchdog_last_check_utc_ = 0;
+	static constexpr int32_t kWatchdogIntervalSeconds = 15;
 
 	mutable std::mutex mutex_;
 };

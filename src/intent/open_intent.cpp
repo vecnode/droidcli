@@ -55,7 +55,17 @@ core::String strip_leading_courtesy(core::String message)
 			// "ok " then "i want you to " both fire in turn).
 			"i want you to ", "i would like you to ", "i'd like you to ",
 			"i want to ", "i would like to ", "i'd like to ",
-			"so, ", "so ", "okay, ", "okay ", "ok, ", "ok ", "well, ", "well "};
+			"so, ", "so ", "okay, ", "okay ", "ok, ", "ok ", "well, ", "well ",
+			// Acknowledgement/filler words observed sitting between a courtesy
+			// prefix and the verb in a real transcript - "Ok great can you now
+			// open Blender?" fell through to the (unreliable) LLM path because
+			// neither "great " nor "now " was stripped, leaving "great can you
+			// now open blender?" with no verb at position 0 after the loop gave
+			// up. The outer while loop already re-runs this whole list after
+			// each strip, so "ok " -> "great " -> "can you " -> "now " all peel
+			// off in turn the same way "ok "/"i want you to " already did.
+			"great ", "cool ", "nice ", "awesome ", "sure ", "alright ",
+			"yes ", "yeah ", "now ", "just ", "quickly ", "really "};
 		for (const char* prefix : kCourtesyPrefixes)
 		{
 			const core::String prefix_str(prefix);

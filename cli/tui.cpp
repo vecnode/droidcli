@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -106,6 +107,10 @@ struct TaskRow {
 	std::string connector_id;
 	std::string command;
 	std::string status;
+	// Absolute epoch-ms deadline (0 = runnable immediately) - see
+	// Task::scheduled_for_ms, src/app/tasks.hpp. Rendered as a countdown in
+	// the Tasks panel while still in the future.
+	int64_t scheduled_for_ms = 0;
 };
 
 std::vector<ConnectorRow> parse_connectors(const std::string& json)
@@ -141,6 +146,9 @@ std::vector<TaskRow> parse_tasks(const std::string& json)
 		row.connector_id = net::extract_json_string_field(object, "connector_id");
 		row.command = net::extract_json_string_field(object, "command");
 		row.status = net::extract_json_string_field(object, "status");
+		int64_t scheduled_for_ms = 0;
+		net::extract_json_int_field(object, "scheduled_for_ms", scheduled_for_ms);
+		row.scheduled_for_ms = scheduled_for_ms;
 		if (!row.id.empty())
 		{
 			rows.push_back(row);
@@ -174,18 +182,48 @@ std::vector<ToolRow> parse_tools(const std::string& json)
 	return rows;
 }
 
-std::vector<std::string> parse_log_lines(const std::string& json)
+// One entry of GET /api/app/log, kept structured (not flattened to a string)
+// so the log panel can color by channel/success and pick out real tool
+// executions ("tool <name>(...) -> ...", see append_app_log calls in
+// cli/host.cpp) instead of narrated chat text - see "Phase 9 follow-up:
+// log coloring + execution visibility" in ARCHITECTURE.md.
+struct LogRow {
+	std::string timestamp;
+	std::string channel;
+	std::string direction;
+	std::string summary;
+	bool success = true;
+};
+
+std::vector<LogRow> parse_log_lines(const std::string& json)
 {
-	std::vector<std::string> lines;
+	std::vector<LogRow> rows;
 	for (const std::string& object : extract_json_object_array(json, "entries"))
 	{
-		const std::string timestamp = net::extract_json_string_field(object, "timestamp");
-		const std::string channel = net::extract_json_string_field(object, "channel");
-		const std::string direction = net::extract_json_string_field(object, "direction");
-		const std::string summary = net::extract_json_string_field(object, "summary");
-		lines.push_back("[" + timestamp + "] [" + channel + "] [" + direction + "] " + summary);
+		LogRow row;
+		row.timestamp = net::extract_json_string_field(object, "timestamp");
+		row.channel = net::extract_json_string_field(object, "channel");
+		row.direction = net::extract_json_string_field(object, "direction");
+		row.summary = net::extract_json_string_field(object, "summary");
+		bool success = true;
+		if (net::extract_json_bool_field(object, "success", success))
+		{
+			row.success = success;
+		}
+		rows.push_back(row);
 	}
-	return lines;
+	return rows;
+}
+
+// Channels that mean droidcli actually launched or ran something on the
+// host machine (a real process, not just chat narration) - "run" (run_command),
+// "ffmpeg" (run_ffmpeg), "open" (open_application), "process"
+// (launch_connector/stop_connector via ProcessManager). Used to give process
+// launches their own unmistakable color in the log panel.
+bool is_process_launch_channel(const std::string& channel)
+{
+	return channel == "run" || channel == "ffmpeg" || channel == "open" || channel == "process"
+		|| channel == "quick_open";
 }
 
 // Boils DroidHost::connector_status_json()'s two response shapes (launched_process
@@ -217,7 +255,7 @@ struct PolledState {
 	std::mutex mutex;
 	std::vector<ConnectorRow> connectors;
 	std::vector<TaskRow> tasks;
-	std::vector<std::string> log_lines;
+	std::vector<LogRow> log_lines;
 };
 
 // One line of the chat panel: who said it (drives color/weight) and the text.
@@ -810,7 +848,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// Fetched once here (not part of PolledState's periodic refresh) since
 	// the tool set is fixed for the process lifetime - see parse_tools().
 	const std::vector<ToolRow> tools = parse_tools(host.build_agent_tools_json());
-	std::vector<std::string> log_lines;
+	std::vector<LogRow> log_lines;
 	std::vector<ChatEntry> chat_entries;
 	// Resizable-split pane widths (columns) - mutated directly by
 	// ResizableSplitLeft/Right on mouse drag, see the split construction below.
@@ -874,6 +912,13 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		const std::string result_json = host.open_application(body);
 		bool launched = false;
 		net::extract_json_bool_field(result_json, "launched", launched);
+		// log_quick_open_event puts this decision in logs/log.jsonl and the
+		// App Log panel under its own "quick_open" channel - before this, a
+		// quick-open launch left no trace besides open_application()'s own
+		// "open"-channel line, with nothing explaining what was recognized or
+		// that the human confirmed it (see "Phase 9 follow-up" in
+		// ARCHITECTURE.md for the real incident this closes).
+		host.log_quick_open_event("confirmed - launching " + display_name, launched);
 		if (launched)
 		{
 			chat_entries.push_back(ChatEntry{"info", "Opened " + display_name + "."});
@@ -929,17 +974,31 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// wraps within its column instead of overflowing into the next one.
 		Elements rows;
 		rows.push_back(hbox({
-			text("ID") | size(WIDTH, EQUAL, 22),
-			text("CONNECTOR") | size(WIDTH, EQUAL, 16),
-			text("COMMAND") | size(WIDTH, EQUAL, 10),
+			text("ID") | size(WIDTH, EQUAL, 20),
+			text("CONNECTOR") | size(WIDTH, EQUAL, 14),
+			text("COMMAND") | size(WIDTH, EQUAL, 9),
+			text("WHEN") | size(WIDTH, EQUAL, 12),
 			text("STATUS") | flex,
 		}) | bold);
+		const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::system_clock::now().time_since_epoch()).count();
 		for (const TaskRow& task : tasks)
 		{
+			// A task's scheduled_for_ms is only meaningful while it's still
+			// pending - once claimed it runs immediately regardless, so a
+			// "done"/"failed"/"running" row with a past deadline shows blank
+			// rather than a stale "in -12s".
+			std::string when = "now";
+			if (task.status == "pending" && task.scheduled_for_ms > now_ms)
+			{
+				const int64_t seconds_left = (task.scheduled_for_ms - now_ms) / 1000;
+				when = "in " + std::to_string(seconds_left) + "s";
+			}
 			rows.push_back(hbox({
-				paragraph(task.id) | size(WIDTH, EQUAL, 22),
-				paragraph(task.connector_id) | size(WIDTH, EQUAL, 16),
-				paragraph(task.command) | size(WIDTH, EQUAL, 10),
+				paragraph(task.id) | size(WIDTH, EQUAL, 20),
+				paragraph(task.connector_id) | size(WIDTH, EQUAL, 14),
+				paragraph(task.command) | size(WIDTH, EQUAL, 9),
+				paragraph(when) | size(WIDTH, EQUAL, 12),
 				paragraph(task.status) | flex,
 			}));
 		}
@@ -967,9 +1026,23 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return vbox(rows) | frame | flex;
 	});
 
-	// Not currently mounted in the layout (see right_column below, reserved
-	// for future functionality) - kept defined since the App Log view is the
-	// obvious first thing to place there once that pane's purpose is decided.
+	// Mounted into right_column below (see "Phase 9" in ARCHITECTURE.md).
+	// Color-coded so failures and real process launches stand out from
+	// ordinary chat narration at a glance:
+	//  - a failed entry (success:false) is always red, regardless of channel -
+	//    this is the "something actually went wrong" signal.
+	//  - a real tool execution ("tool <name>(...) -> ...", logged only when
+	//    a tool call actually ran - see execute_agent_tool call sites in
+	//    cli/host.cpp) is bold green, distinct from the assistant's own
+	//    narration text right above/below it in the same channel. This is
+	//    the answer to "is it actually launching something": if you don't
+	//    see a green "tool ..." line, nothing ran, no matter what the
+	//    assistant claimed in chat.
+	//  - a process-launch channel (run/ffmpeg/open/process -
+	//    is_process_launch_channel) gets its own magenta so an actual OS-level
+	//    process launch/command execution is unmistakable even scrolling fast.
+	//  - watchdog/task/thread channels get their own dimmer colors so the
+	//    high-volume chat channel doesn't drown them out visually.
 	Component log_view = Renderer([&]() -> Element
 	{
 		// paragraph() (not text()) so a long log line wraps within the panel's
@@ -979,7 +1052,36 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		const size_t start = log_lines.size() > max_visible_lines ? log_lines.size() - max_visible_lines : 0;
 		for (size_t index = start; index < log_lines.size(); ++index)
 		{
-			lines.push_back(paragraph(log_lines[index]));
+			const LogRow& row = log_lines[index];
+			const std::string line = "[" + row.timestamp + "] [" + row.channel + "] [" + row.direction + "] " + row.summary;
+			Element element = paragraph(line);
+			if (!row.success)
+			{
+				element |= color(Color::Red);
+			}
+			else if (row.channel == "chat" && row.summary.rfind("tool ", 0) == 0)
+			{
+				element |= color(Color::Green);
+				element |= bold;
+			}
+			else if (is_process_launch_channel(row.channel))
+			{
+				element |= color(Color::Magenta);
+				element |= bold;
+			}
+			else if (row.channel == "watchdog")
+			{
+				element |= color(Color::Yellow);
+			}
+			else if (row.channel == "task")
+			{
+				element |= color(Color::Cyan);
+			}
+			else if (row.channel == "thread")
+			{
+				element |= dim;
+			}
+			lines.push_back(element);
 		}
 		if (lines.empty())
 		{
@@ -1476,6 +1578,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					}
 					if (lower_reply == "cancel" || lower_reply == "no")
 					{
+						host.log_quick_open_event("declined - user did not confirm opening " + pending_open.app_name, false);
 						chat_entries.push_back(ChatEntry{"info", "Cancelled."});
 						pending_open = PendingOpen{};
 					}
@@ -1512,6 +1615,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				}
 				else if (lower_reply == "no" || lower_reply == "n" || lower_reply == "cancel")
 				{
+					host.log_quick_open_event("declined - user did not confirm opening " + pending_open.app_name, false);
 					chat_entries.push_back(ChatEntry{"info", "Cancelled."});
 					pending_open = PendingOpen{};
 				}
@@ -1536,6 +1640,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					pending_open.active = true;
 					pending_open.app_name = quick_open.app_name;
 					pending_open.candidates = quick_open.candidates;
+					host.log_quick_open_event("recognized \"" + quick_open.app_name + "\" from \"" + message + "\" - awaiting confirmation");
 					chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
 					return true;
 				}
@@ -1608,10 +1713,14 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() }));
 	});
 
-	// Reserved for future functionality - deliberately empty for now.
-	Component right_column = Renderer([]() -> Element
+	// App Log panel (watchdog transitions, scheduled/queued task dispatch,
+	// connector/fs/run activity - see append_app_log in cli/host.cpp) - was
+	// built but unmounted before the self-health/scheduler work (see "Phase
+	// 9" in ARCHITECTURE.md), which needed somewhere for that activity to
+	// actually be visible without a curl.
+	Component right_column = Renderer([&]() -> Element
 	{
-		return window(text(" Reserved "), text("(future functionality)") | dim | center);
+		return window(text(" App Log "), log_view->Render());
 	});
 
 	// Mouse-draggable panes: left column | chat (middle, gets remaining
@@ -1863,7 +1972,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					row.live_status = summarize_status(row.kind, host.connector_status_json(row.id));
 				}
 				std::vector<TaskRow> next_tasks = parse_tasks(host.list_tasks_json());
-				std::vector<std::string> next_log = parse_log_lines(host.build_app_log_json());
+				std::vector<LogRow> next_log = parse_log_lines(host.build_app_log_json());
 
 				{
 					std::lock_guard<std::mutex> lock(polled.mutex);
