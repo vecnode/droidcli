@@ -458,8 +458,15 @@ std::vector<ChatEntry> parse_agent_turn_response(
 		out_has_pending_tool_call = true;
 		out_pending_tool_name = net::extract_json_string_field(pending_object, "tool");
 		out_pending_tool_args = net::extract_json_string_field(pending_object, "arguments_json");
+		bool looks_destructive = false;
+		net::extract_json_bool_field(pending_object, "looks_destructive", looks_destructive);
+		// A visibility aid, not a gate (cli/host.cpp's looks_like_destructive_command -
+		// "Phase 26" - never blocks anything on its own) - a human skimming
+		// past a routine "yes" is more likely to actually stop and read this
+		// particular prompt with the warning prefixed.
+		const std::string prefix = looks_destructive ? "[!! DESTRUCTIVE !!] " : "";
 		entries.push_back(ChatEntry{"info",
-			"[AGENT WANTS TO] " + out_pending_tool_name + "(" + out_pending_tool_args + ") - approve? (yes/no, or say why not)"});
+			prefix + "[AGENT WANTS TO] " + out_pending_tool_name + "(" + out_pending_tool_args + ") - approve? (yes/no, or say why not)"});
 		return entries;
 	}
 

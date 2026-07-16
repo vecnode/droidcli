@@ -152,7 +152,8 @@ metaagent/                        (repository directory name unchanged)
 │   ├── session/                   RuntimeSession + status strings
 │   ├── app/                       tasks (persistent task queue)
 │   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime + ModelProvider interface
-│   └── intent/                    Deterministic "open X" phrase recognizer (no LLM, no I/O)
+│   ├── intent/                    Deterministic "open X" phrase recognizer (no LLM, no I/O)
+│   └── reliability/               Fabrication/path/command guards used by cli/host.cpp (Phase 26/27, no LLM, no I/O)
 ├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, MemoryStore (SQLite), HTTP route mount, entrypoint
 ├── tools/                         mini_http_server + sync_http_client (raw-socket HTTP, WinHTTP for https://)
 ├── tests/                         One *_test.cpp per core module
@@ -2402,6 +2403,93 @@ out in the error; a bare name, a `desktop/...` token, and the real absolute
 Desktop path all still succeed exactly as before - the guard doesn't
 false-positive on any of the three already-legitimate shapes.
 
+### Phase 26 — The 25 guards get permanent regression tests, not just a live-probe verification ✅ implemented
+
+**Goal:** every guard/heuristic in the Phase 6-25 hardening log was verified
+by live-probing a running instance during the session that built it - real,
+but not durable. Nothing stopped a future edit to `cli/host.cpp` from
+silently breaking `looks_like_invented_desktop_path` or
+`substitute_bare_desktop_token`'s leading-`./` case; the only way anyone
+would find out was another real incident. Named as the single highest-
+leverage, cheapest fix available: these are already pure functions with no
+host I/O, they just weren't in a testable location.
+
+**What shipped:**
+
+- **Two new portable core modules**, `src/reliability/claim_guards.{hpp,cpp}`
+  (`looks_like_unverified_action_claim`, `looks_like_degenerate_role_leak`,
+  `looks_like_capability_denial`) and `src/reliability/path_guards.{hpp,cpp}`
+  (`substitute_bare_desktop_token`, `default_bare_filename_to_desktop`,
+  `looks_like_placeholder_path`, `looks_like_invented_desktop_path`,
+  `looks_like_mismatched_binary_content`) - moved out of `cli/host.cpp`'s
+  anonymous namespace verbatim (same logic, same comments explaining each
+  incident), registered in `droidcli_core.cpp` like every other core module.
+  `cli/host.cpp` now `#include`s these headers and pulls the names in via a
+  single `using namespace droidcli::reliability;` at the top of its own
+  anonymous namespace, rather than defining local copies.
+- **`tests/claim_guards_test.cpp`/`tests/path_guards_test.cpp`** - each real
+  transcript that motivated a guard (Phase 6/7/11/16/18/19/20/23/25's
+  incidents) is now encoded as its own assertion, plus the false-positive
+  cases each guard is specifically designed not to catch (a genuine truthful
+  report, a real absolute Desktop path, a real PNG's magic bytes, an already-
+  correct relative path). Registered in `CMakeLists.txt` like every other
+  per-module test.
+
+**What this doesn't cover:** the reliability-*loop* behavior itself
+(`run_agent_tool_loop`'s hop/nudge/retry budget interactions in
+`cli/host.cpp`) isn't unit-tested here - that requires a live or mocked
+`ai::ModelProvider`, a materially larger undertaking than extracting pure
+string functions. The guards this phase covers are the load-bearing,
+easy-to-silently-break primitives those loop interactions are built on;
+locking those down first is the higher-leverage move.
+
+**Verified:** `ctest` green - 12/12 (10 pre-existing plus
+`claim_guards_test`/`path_guards_test`, both passing on first run against the
+extracted code).
+
+### Phase 27 — A destructive-command warning surfaced in the approval prompt ✅ implemented
+
+**Goal:** `run_command`/`run_ffmpeg` is droidcli's single largest blast-
+radius capability - arbitrary shell execution - gated by a human approval
+prompt that only ever showed the raw command string. That prompt's safety
+depends entirely on a human actually reading it every time, which gets
+harder the more routine approving becomes across a session.
+
+**What shipped:**
+
+- **`looks_like_destructive_command()`** (`src/reliability/command_guards.{hpp,cpp}`) -
+  a narrow, conservative pattern list for unambiguously destructive/
+  irreversible shapes: recursive/forced delete (`rm -rf`, `rd /s`,
+  `Remove-Item -Recurse -Force`, ...), disk/partition-level operations
+  (`format`, `diskpart`, `dd if=...`), broad forced process kills or
+  shutdown/reboot, and a fork bomb. Explicitly a visibility aid, not a
+  safety gate - `tool_call_requires_approval` is still the only real one; a
+  false negative here just means no extra warning, never a behavior change.
+- **`DroidHost::build_pending_tool_call_response`** (`cli/host.cpp`) now
+  checks the pending `run_command`/`run_ffmpeg` call's `command`/`args`
+  field and includes `"looks_destructive"` in the `pending_tool_call` JSON.
+- **The TUI's approval prompt** (`parse_agent_turn_response`, `cli/tui.cpp`)
+  prefixes `"[!! DESTRUCTIVE !!] "` to the `[AGENT WANTS TO] ...` line when
+  set, so a destructive-shaped command reads differently from a routine one
+  at a glance, rather than requiring the human to parse the raw string
+  themselves every time.
+
+**Verified:** `ctest` green (13/13, `command_guards_test` covers every
+pattern plus deliberate non-matches - an ordinary `dir`/`echo`/`ffmpeg`/`git`
+command and a single, non-recursive `del` of one named file must never be
+flagged).
+
+**Still open (named, not solved here):** the underlying root cause across
+most of Phases 6-25 is model quality, not infrastructure -
+`llama3.1:8b`/`gemma3:1b` are the models repeatedly shown fabricating,
+guessing paths, and giving up; `llama3-groq-tool-use` is already in the
+model-picker's pull list. Deliberately not addressed with code in this
+phase: it requires an actual A/B comparison of incident rate across models
+under real use, which needs a live Ollama instance and repeated real
+sessions to produce a trustworthy answer, not something that can be
+fabricated or simulated. Worth running deliberately before continuing to
+patch string heuristics one transcript at a time.
+
 ---
 
 ## Extension points
@@ -2438,16 +2526,17 @@ inside `DroidHost::run_agent_tool_loop`.
 
 | Algorithm | Location | What it does |
 |---|---|---|
-| `looks_like_unverified_action_claim` | `host.cpp:253` | Lowercases the assistant's text and checks for a claim phrase ("i've ", "i'll ", "successfully", "already ", ...) *combined with* an action verb ("create", "delete", "move", "list ", ...). Both must match - a claim phrase alone isn't enough, since ordinary narration ("I'll answer that") shouldn't false-positive. Deliberately loose (substring matching, not real NLP): a false positive only costs one extra nudge round-trip, never a wrong final answer. |
-| `looks_like_degenerate_role_leak` | `host.cpp:346` | Structural, not semantic: catches a reply that starts with a bare chat-role label ("assistant"/"system"/"user") standing alone at the start of the trimmed text - a real sentence never opens that way. Catches a distinct failure mode `looks_like_unverified_action_claim` misses: broken/garbled model output that isn't *claiming* anything, just malformed. |
-| `looks_like_capability_denial` | `host.cpp:403` | Substring-matches a fixed list of phrases where the model falsely claims it can't execute something ("i can only assist", "you'll need to run", "one command at a time", ...) - all confirmed-false claims since droidcli's tools genuinely execute. Triggers the same corrective nudge path as a failed command retry. |
+| `looks_like_unverified_action_claim` | `src/reliability/claim_guards.cpp` (Phase 26) | Lowercases the assistant's text and checks for a claim phrase ("i've ", "i'll ", "successfully", "already ", ...) *combined with* an action verb ("create", "delete", "move", "list ", ...). Both must match - a claim phrase alone isn't enough, since ordinary narration ("I'll answer that") shouldn't false-positive. Deliberately loose (substring matching, not real NLP): a false positive only costs one extra nudge round-trip, never a wrong final answer. |
+| `looks_like_degenerate_role_leak` | `src/reliability/claim_guards.cpp` (Phase 26) | Structural, not semantic: catches a reply that starts with a bare chat-role label ("assistant"/"system"/"user") standing alone at the start of the trimmed text - a real sentence never opens that way. Catches a distinct failure mode `looks_like_unverified_action_claim` misses: broken/garbled model output that isn't *claiming* anything, just malformed. |
+| `looks_like_capability_denial` | `src/reliability/claim_guards.cpp` (Phase 26) | Substring-matches a fixed list of phrases where the model falsely claims it can't execute something ("i can only assist", "you'll need to run", "one command at a time", ...) - all confirmed-false claims since droidcli's tools genuinely execute. Triggers the same corrective nudge path as a failed command retry. |
 | `a_tool_call_already_succeeded_this_turn` scan | `host.cpp:3071` (inside `run_agent_tool_loop`) | Before trusting a completion claim as legitimate (not fabricated), scans this turn's actions for one whose tool is in `tool_call_requires_approval` (mutating/gated) *and* returned `ok:true`. Restricted to mutating tools as of Phase 17 - the original version counted *any* successful action, which let an unrelated read-only success (e.g. `list_connectors`) launder a completely unrelated claim ("I've copied the file") past the guard. A read-only lookup succeeding is never evidence for a completion claim, regardless of what the claim is about. |
 | Hop/nudge/retry budget | `host.cpp:3071` (`run_agent_tool_loop`) | `kMaxHops` (9): total model round-trips in one turn. `kMaxEmptyRetries` (2, doesn't consume hop budget): retries a hop that came back with neither text nor a tool call - near-always transient. `kMaxUnverifiedClaimNudges` (1): a fabrication gets exactly one correction attempt, then an honest override - repeating the nudge measurably degrades small-model output further rather than fixing it (observed: literal `"assistant\n\n"` role-token leakage after four nudges). `kMaxCommandRetryNudges` (3): a failed `run_command`/`run_ffmpeg` gets the error fed back and is told to self-correct and retry, rather than asking the user's permission each time. |
 | `tool_call_requires_approval` | `host.cpp:223` | The fixed list of tools whose call pauses for human approval (`POST /api/agent/tool_decision`) before executing: anything with a real side effect (`run_command`, `run_ffmpeg`, `write_file`, `open_application`, `launch_connector`/`stop_connector`, `enqueue_task`, `copy_file`/`move_path`/`delete_file`, `write_clipboard`). Read-only tools are deliberately excluded - gating those would only slow the agent down for no safety benefit. Also doubles as the mutating-tool set for the `a_tool_call_already_succeeded_this_turn` scan above. |
-| `substitute_bare_desktop_token` | `host.cpp:523` | Rewrites a bare `desktop/...`/`desktop\...` token (preceded by whitespace, a quote, start-of-string, or - as of Phase 18 - a single leading `/`/`\`) into the real, OS-resolved Desktop path. Deliberately does *not* touch a `"Desktop"` appearing mid-path in an already-correct absolute path (there it's preceded by more path, not a word boundary) - distinguished by *position*, not just the preceding character. |
-| `looks_like_placeholder_path` | `host.cpp:581` | Rejects a path containing `path/to/`, `path\to\`, `<`, or a common template filename (`your_file`, `example.txt`, `filename.ext`) before a filesystem tool ever touches disk - catches a model inventing a plausible-looking documentation-style path instead of calling `list_dir`/`stat_path` to find the real one, a shape `substitute_bare_desktop_token` can't catch (no word-boundary "desktop" token to rewrite). |
-| `looks_like_mismatched_binary_content` | `host.cpp:613` | Checked before `write_file` ever writes: if the path ends in a recognized binary/image extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.bmp`), the content must start with that format's real magic bytes or the write is rejected. Catches a model writing literal placeholder/narration text to a path that claims to be a real image. |
-| `looks_like_invented_desktop_path` | `host.cpp` (Phase 25) | Structural, not pattern-based: after Desktop-token substitution has already run, does the resolved path still contain a `"desktop"` path segment (bounded by separators) that ISN'T the real, resolved `desktop_path` prefix? There is exactly one real Desktop location, so any survivor here is definitionally invented, not just probably wrong - catches an absolute-*looking* path with its own guessed `"desktop"` segment (e.g. `C:\desktop\hello`, root-level) that never matched any of `substitute_bare_desktop_token`'s specific recognized shapes. Checked in all six file tools. |
+| `substitute_bare_desktop_token` | `src/reliability/path_guards.cpp` (Phase 26) | Rewrites a bare `desktop/...`/`desktop\...` token (preceded by whitespace, a quote, start-of-string, a single leading `/`/`\`, or a leading `./`/`.\`) into the real, OS-resolved Desktop path. Deliberately does *not* touch a `"Desktop"` appearing mid-path in an already-correct absolute path (there it's preceded by more path, not a word boundary) - distinguished by *position*, not just the preceding character. |
+| `looks_like_placeholder_path` | `src/reliability/path_guards.cpp` (Phase 26) | Rejects a path containing `path/to/`, `path\to\`, `<`, `username`, or a common template filename (`your_file`, `example.txt`, `filename.ext`) before a filesystem tool ever touches disk - catches a model inventing a plausible-looking documentation-style path instead of calling `list_dir`/`stat_path` to find the real one, a shape `substitute_bare_desktop_token` can't catch (no word-boundary "desktop" token to rewrite). |
+| `looks_like_mismatched_binary_content` | `src/reliability/path_guards.cpp` (Phase 26) | Checked before `write_file` ever writes: if the path ends in a recognized binary/image extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.bmp`), the content must start with that format's real magic bytes or the write is rejected. Catches a model writing literal placeholder/narration text to a path that claims to be a real image. |
+| `looks_like_invented_desktop_path` | `src/reliability/path_guards.cpp` (Phase 26) | Structural, not pattern-based: after Desktop-token substitution has already run, does the resolved path still contain a `"desktop"` path segment (bounded by separators) that ISN'T the real, resolved `desktop_path` prefix? There is exactly one real Desktop location, so any survivor here is definitionally invented, not just probably wrong - catches an absolute-*looking* path with its own guessed `"desktop"` segment (e.g. `C:\desktop\hello`, root-level) that never matched any of `substitute_bare_desktop_token`'s specific recognized shapes. Checked in all six file tools. |
+| `looks_like_destructive_command` | `src/reliability/command_guards.cpp` (Phase 27) | A visibility aid, not a gate: flags an unambiguously destructive/irreversible shell shape (recursive delete, disk-formatting, broad forced process kill, shutdown/reboot, a fork bomb) so the approval prompt can prefix a prominent warning. Never blocks anything on its own - `tool_call_requires_approval` is still the only real gate. |
 | Post-action ground-truth verification | `write_file`/`create_directory`/`copy_file`/`move_path`/`delete_file` (`host.cpp`), `write_clipboard_json` (`host.cpp:2625`) | After a successful mutating call, an independent re-check via the same OS API confirms the claimed effect actually happened, inline before the result reaches the model - `verified_exists`/`verified_size_bytes` (write/copy), `verified_is_directory` (mkdir), `verified_exists`+`verified_source_removed` (move - both sides, not just one), `verified_deleted` (delete), `verified_matches` (clipboard read-back, since another application can race for ownership). Extended from just `write_file`/`create_directory` (Phase 18/23) to all six in Phase 24 - "did this actually happen" should be answered reliably for every mutating tool, not just the ones hardened first. |
 | `remember_location_json` pre-store verification | `host.cpp:2756` | Before a name → path mapping is persisted, resolves it (`substitute_bare_desktop_token`) and requires a live `stat_path()` to confirm the path exists *right now* - a location is only remembered if it's real at the moment of remembering, not trusted on the model's word. |
 
