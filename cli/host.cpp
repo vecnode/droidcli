@@ -4,6 +4,9 @@
 #include "command_runner.hpp"
 #include "intent/open_intent.hpp"
 #include "intent/pending_command.hpp"
+#include "reliability/claim_guards.hpp"
+#include "reliability/command_guards.hpp"
+#include "reliability/path_guards.hpp"
 #include "tools/sync_http_client.hpp"
 
 #include <algorithm>
@@ -19,6 +22,13 @@
 
 namespace droidcli::cli {
 namespace {
+
+// The path/content and claim/response guards used throughout this file now
+// live in src/reliability/ (portable core, unit-tested in tests/ - see
+// path_guards_test.cpp/claim_guards_test.cpp) rather than as local copies
+// here, so a future edit can't silently regress one of them without a test
+// failing.
+using namespace droidcli::reliability;
 
 // Lowercases and strips everything but letters/digits, so "Note Pad",
 // "note-pad", and "NOTEPAD" all normalize to the same "notepad" key - name
@@ -313,204 +323,6 @@ bool tool_call_requires_approval(const core::String& tool_name)
 		|| tool_name == "write_clipboard";
 }
 
-// Heuristic: does `text` claim an action was performed, or promise one is
-// about to be, without an accompanying tool call in this same response? Two
-// related failure modes local tool-use models exhibit:
-//  - future/in-progress: "I'll execute ffmpeg...", "hold on while I process
-//    this" - narrated intent instead of a real tool_calls entry.
-//  - past-tense fabrication: "The image has been successfully created",
-//    "I've moved it to your Desktop" - the more dangerous of the two, since
-//    it asserts something already happened when nothing did (seen in
-//    practice: a model claimed a file move it never attempted, with zero
-//    tool calls anywhere in that turn).
-// Deliberately loose - a claim phrase plus an action verb, not real NLP -
-// since run_agent_tool_loop only nudges instead of accepting this as final
-// when no action this turn actually succeeded (see actions_include_success
-// below), so a false positive here costs one extra bounded model round-trip
-// at worst, never a wrong final answer reaching the user.
-bool looks_like_unverified_action_claim(const core::String& text)
-{
-	core::String lowered;
-	lowered.reserve(text.size());
-	for (const unsigned char character : text)
-	{
-		lowered += static_cast<char>(std::tolower(character));
-	}
-
-	// Claims that work is continuing beyond this response - "I'm currently
-	// running X", "the process is still ongoing", "give me a few more
-	// seconds". These are unconditionally fabricated in this architecture,
-	// not just probably: agent_turn is one bounded, synchronous request/
-	// response (see run_agent_tool_loop) - nothing droidcli does ever
-	// continues after this hop's HTTP response is sent, there is no
-	// background job, no worker thread, no "still working on it" state to
-	// report truthfully. Caught a real specimen of this in practice: a
-	// model told the user "I am currently using the 'list_open_windows'
-	// function" and, two turns later, "the process is still ongoing...
-	// I will need a few more seconds" - zero tool_calls were ever made for
-	// either claim. Unlike the claim+verb pair below, a match here doesn't
-	// need a corroborating action verb - the claim itself is the tell.
-	static const char* const kOngoingProcessPhrases[] = {
-		"is still ongoing", "still in progress", "in progress", "still ongoing",
-		"still processing", "still working on", "currently using", "currently running",
-		"i am currently", "i'm currently", "few more seconds", "a moment more",
-		"not finished yet", "isn't finished yet", "give it a moment", "check back",
-		"is it finished", "keep me posted"
-	};
-	for (const char* phrase : kOngoingProcessPhrases)
-	{
-		if (lowered.find(phrase) != core::String::npos)
-		{
-			return true;
-		}
-	}
-
-	static const char* const kClaimPhrases[] = {
-		// Future/in-progress.
-		"i'll ", "i will ", "let me ", "hold on", "one moment",
-		"give me a moment", "please wait", "processing this", "working on it",
-		// Past-tense completion, unbacked by any tool call this turn.
-		"i've ", "i have ", "has been ", "have been ", "successfully",
-		"already ", "all done", "task is complete", "task complete"
-	};
-	bool has_claim = false;
-	for (const char* phrase : kClaimPhrases)
-	{
-		if (lowered.find(phrase) != core::String::npos)
-		{
-			has_claim = true;
-			break;
-		}
-	}
-	if (!has_claim)
-	{
-		return false;
-	}
-
-	// Broader than just file/media verbs - covers the "I'll look that up"
-	// class of claim too (search/list/find/check), which evaded this check
-	// in the same real transcript that motivated kOngoingProcessPhrases
-	// above ("I'll need to list all installed applications and then search
-	// for those related to sound" had a claim phrase but no verb this list
-	// used to recognize).
-	static const char* const kActionVerbs[] = {
-		"execute", "run ", "create", "created", "creating", "generate",
-		"transcode", "convert", "save", "saved", "make", "made", "launch",
-		"open", "write", "wrote", "delete", "deleted", "start", "move",
-		"moved", "moving", "search", "searching", "list ", "listing",
-		"find ", "finding", "check ", "checking", "look up", "looking up"
-	};
-	for (const char* verb : kActionVerbs)
-	{
-		if (lowered.find(verb) != core::String::npos)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-// Catches a distinct, previously-observed failure mode from Phase 7 that
-// looks_like_unverified_action_claim doesn't cover: a nudged small local
-// model degrading into leaked role-token output instead of either calling
-// the tool or giving a real answer - a real transcript showed a nudge after
-// "open Blender" produce the literal reply "assistant\n\nYes, please." with
-// no tool_calls at all. That text contains no claim phrase and no action
-// verb (it isn't *claiming* anything, it's just broken), so it passed the
-// existing heuristic and reached the user as if it were a real response to
-// "can you open Blender." Detected structurally, not semantically: the reply
-// starts with a bare chat-role label ("assistant"/"system"/"user") standing
-// alone on its own line/segment - a real sentence never opens that way.
-bool looks_like_degenerate_role_leak(const core::String& text)
-{
-	core::String trimmed = text;
-	size_t start = 0;
-	while (start < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[start])))
-	{
-		++start;
-	}
-	trimmed = trimmed.substr(start);
-
-	static const char* const kRoleLabels[] = { "assistant", "system", "user" };
-	for (const char* label : kRoleLabels)
-	{
-		const size_t label_length = std::char_traits<char>::length(label);
-		if (trimmed.size() <= label_length)
-		{
-			continue;
-		}
-		bool matches_case_insensitive = true;
-		for (size_t i = 0; i < label_length; ++i)
-		{
-			if (std::tolower(static_cast<unsigned char>(trimmed[i])) != label[i])
-			{
-				matches_case_insensitive = false;
-				break;
-			}
-		}
-		if (!matches_case_insensitive)
-		{
-			continue;
-		}
-		// The character right after the label must end the "word" (not part
-		// of a real sentence like "Assistant managers..."), and what follows
-		// must be whitespace/newline before any further content, not e.g.
-		// "assistant: here's your answer" which is just an odd-but-real
-		// prefix a model sometimes echoes - only a bare standalone label
-		// followed by blank space counts as the leak this is meant to catch.
-		const char next = trimmed[label_length];
-		if (next == '\n' || next == '\r')
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-// A third, distinct lie from the two above: not falsely claiming an action
-// happened, but falsely claiming the agent CAN'T act at all - directly
-// contradicted by droidcli's whole design (see HostConfig::system_prompt)
-// and, in the real transcript that motivated this, by the same session
-// having successfully run run_ffmpeg for an image minutes earlier. Observed
-// in practice after a command-retry budget was exhausted: "I can only
-// assist with tasks and provide information... execution of any commands or
-// actions is beyond my capabilities. You'll need to run the command
-// yourself." This is worse than the fabrication-of-success failure mode -
-// it actively discourages the user from asking again for something the
-// agent can actually do.
-bool looks_like_capability_denial(const core::String& text)
-{
-	core::String lowered;
-	lowered.reserve(text.size());
-	for (const unsigned char character : text)
-	{
-		lowered += static_cast<char>(std::tolower(character));
-	}
-
-	static const char* const kDenialPhrases[] = {
-		"i can only assist", "beyond my capabilities", "beyond my capability",
-		"i don't have the capability", "i do not have the capability",
-		"i don't have the ability to execute", "i do not have the ability to execute",
-		"i can't execute", "i cannot execute", "i can't run commands", "i cannot run commands",
-		"i'm not able to run", "i am not able to run",
-		"you'll need to run", "you will need to run", "run it yourself", "run this yourself",
-		// A distinct fabricated-constraint variant caught in a real
-		// transcript: not denying capability outright, but inventing a false
-		// "only one at a time" limit as an excuse not to call the tool again
-		// for a second, near-identical request (a second image, a retry).
-		"only execute one command", "only run one command", "one command at a time",
-		"execute one command at a time", "run one command at a time"
-	};
-	for (const char* phrase : kDenialPhrases)
-	{
-		if (lowered.find(phrase) != core::String::npos)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
 // Returns the last up to `max_lines` non-empty, \r-trimmed lines of `text`,
 // joined by " | " - used to surface the actual diagnostic buried at the end
 // of a verbose command's output. ffmpeg is the main offender: its real error
@@ -571,269 +383,6 @@ core::String summarize_command_failure(const CommandRunResult& result)
 		return stderr_tail;
 	}
 	return last_nonempty_lines(result.stdout_text, 3);
-}
-
-// The model has the real Desktop path in its system prompt (see
-// system_info_.desktop_path, injected in DroidHost::initialize()) but has
-// been observed - repeatedly and reproducibly, not a one-off - writing a
-// bare relative "desktop/..." or "desktop\..." token instead of using it
-// (e.g. "-y ... desktop/red.png"), which can never succeed: no such
-// directory exists relative to droidcli's own working directory. Rather
-// than let a command that's guaranteed to fail reach the shell/ffmpeg,
-// substitute the real resolved Desktop path in for a bare "desktop" token
-// wherever one starts a path (preceded by whitespace, a quote, or nothing).
-// Deliberately does NOT touch an already-correct absolute path like
-// "C:\Users\...\Desktop\..." - there the character immediately before
-// "Desktop" is a path separator, not a word boundary, so it never matches.
-//
-// Also matches a *single* leading '/' or '\' right at the start of the whole
-// string ("/Desktop/red.png") - a real transcript showed write_file's path
-// argument use exactly this shape, which the original word-boundary check
-// missed (the character before "Desktop" is a separator, same as the
-// deliberately-excluded real-absolute-path case above) and which silently
-// wrote to the wrong place: on Windows, a leading "/" means "root of the
-// current drive," not "root of the filesystem," so std::filesystem resolved
-// it to a bogus "C:\Desktop\..." (auto-creating that folder) rather than the
-// user's actual Desktop, returning a perfectly genuine ok:true throughout.
-// The distinguishing signal from a real absolute path is position, not just
-// the character: a real "C:\Users\...\Desktop\..." has several characters
-// before "Desktop", never just one lone separator at the very start.
-//
-// Also matches a leading "./" or ".\" ("./desktop/new_folder") - a real
-// transcript showed exactly this shape reach write_file untouched (the
-// character before "Desktop" is a separator at cursor==2, not cursor==1, so
-// the single-leading-separator case above never fired) and land in
-// droidcli's own working directory instead of the real Desktop. Same
-// position-based distinction as the leading-separator case: a real absolute
-// path never starts with a literal ".".
-core::String substitute_bare_desktop_token(const core::String& args, const core::String& desktop_path)
-{
-	if (desktop_path.empty())
-	{
-		return args;
-	}
-
-	core::String lowered;
-	lowered.reserve(args.size());
-	for (const unsigned char character : args)
-	{
-		lowered += static_cast<char>(std::tolower(character));
-	}
-
-	core::String result;
-	result.reserve(args.size() + desktop_path.size());
-	size_t cursor = 0;
-	while (cursor < args.size())
-	{
-		const bool leading_separator = cursor == 1 && (args[0] == '/' || args[0] == '\\');
-		const bool leading_dot_separator = cursor == 2 && args[0] == '.' && (args[1] == '/' || args[1] == '\\');
-		const bool at_word_boundary = cursor == 0
-			|| args[cursor - 1] == ' ' || args[cursor - 1] == '"' || args[cursor - 1] == '\''
-			|| leading_separator || leading_dot_separator;
-		const bool matches_slash = lowered.compare(cursor, 8, "desktop/") == 0;
-		const bool matches_backslash = lowered.compare(cursor, 8, "desktop\\") == 0;
-
-		if (at_word_boundary && (matches_slash || matches_backslash))
-		{
-			// The leading_separator/leading_dot_separator cases above already
-			// appended those 1-2 literal prefix characters to result during
-			// the earlier cursor==0(/1) iterations - drop them here so the
-			// substitution doesn't leave a stray "/" or "./" in front of
-			// desktop_path's own drive letter (e.g. "/C:\Users\..." or
-			// "./C:\Users\...").
-			if ((leading_separator || leading_dot_separator) && result.size() >= cursor)
-			{
-				result.resize(result.size() - cursor);
-			}
-			result += desktop_path;
-			result += matches_slash ? '/' : '\\';
-			cursor += 8;
-			continue;
-		}
-
-		result += args[cursor];
-		++cursor;
-	}
-	return result;
-}
-
-// droidcli is a personal desktop assistant (see "Agent properties" in
-// ARCHITECTURE.md), not a build tool - a file/command reference with no
-// location information at all should default to somewhere a human would
-// actually go looking for it, the real Desktop, not wherever droidcli's own
-// process happened to be launched from. A real transcript showed exactly
-// this: asked to save an image "to Desktop," the model wrote a bare
-// "output.png" with no directory at all, which landed in droidcli's own
-// working directory (the git repo it was built from) instead. Only a truly
-// bare name - no '/' or '\' anywhere in it - counts as "no location
-// specified"; anything with any directory information at all, even a
-// relative one ("subdir/x.png", "./x.png"), is left untouched as the caller
-// having already specified where. Composes with
-// substitute_bare_desktop_token() above, not a replacement for it: that one
-// resolves an explicit "desktop/..." reference to the real path, this one
-// covers the case where "desktop" was never mentioned at all.
-core::String default_bare_filename_to_desktop(const core::String& path, const core::String& desktop_path)
-{
-	if (path.empty() || desktop_path.empty())
-	{
-		return path;
-	}
-	if (path.find('/') != core::String::npos || path.find('\\') != core::String::npos)
-	{
-		return path;
-	}
-	const char last_char = desktop_path.back();
-	const bool needs_separator = last_char != '/' && last_char != '\\';
-	return desktop_path + (needs_separator ? "\\" : "") + path;
-}
-
-// Catches a distinct, previously-observed failure mode from Phase 7's bare-
-// desktop-token substitution above, but not fixed by it: a model inventing
-// an entire plausible-looking *template* path - "/path/to/Desktop/
-// green_image.png" - rather than a bare relative token. That specific
-// string is the generic placeholder convention used in documentation/
-// examples everywhere; a model that's seen a million code samples reaches
-// for it when it doesn't actually know the real path, instead of calling
-// list_dir/stat_path to find out. substitute_bare_desktop_token can't catch
-// this - "Desktop" here isn't at a word boundary, it's preceded by "to/".
-// Checked as its own guard, at the tool-execution layer, on any path
-// argument a filesystem tool receives.
-bool looks_like_placeholder_path(const core::String& path)
-{
-	core::String lowered;
-	lowered.reserve(path.size());
-	for (const unsigned char character : path)
-	{
-		lowered += static_cast<char>(std::tolower(character));
-	}
-	return lowered.find("path/to/") != core::String::npos
-		|| lowered.find("path\\to\\") != core::String::npos
-		|| lowered.find("<") != core::String::npos
-		|| lowered.find("your_file") != core::String::npos
-		|| lowered.find("yourfile") != core::String::npos
-		|| lowered.find("example.txt") != core::String::npos
-		|| lowered.find("filename.ext") != core::String::npos
-		// A real transcript showed the model guess "/Users/username/Desktop/
-		// folder_name" for read_file - a documentation-convention placeholder
-		// exactly like "path/to/" above, just a different one (the generic
-		// "username" a man page/Stack Overflow answer uses in place of a
-		// real one), and it slipped through untouched since none of the
-		// patterns above matched it. Substring match also catches
-		// "yourusername".
-		|| lowered.find("username") != core::String::npos;
-}
-
-// A structural safety net beyond substitute_bare_desktop_token's own pattern
-// coverage: that function only rewrites specific recognized token shapes
-// (Phase 7/18/23's bare/leading-separator/leading-dot-slash cases) and
-// deliberately leaves anything that already looks like a real absolute path
-// untouched, since "Desktop" preceded by more path is indistinguishable from
-// an already-correct "C:\Users\...\Desktop\..." by pattern alone. But a
-// model can still type an absolute-*looking* path with its own invented
-// "desktop" segment that was never one of those recognized shapes at all -
-// e.g. a literal "C:\desktop\hello" (root-level, not the real per-user
-// Desktop) - and nothing catches that. There is exactly one real Desktop
-// location; checked here, after substitution has already run, on the fully
-// resolved path: any "desktop" path segment (bounded by separators, so this
-// doesn't false-positive on a real folder that merely contains "desktop" as
-// part of a longer name) that ISN'T the real, resolved desktop_path prefix
-// is never legitimate, full stop - there is no second "desktop" folder
-// anywhere on the machine that a path should ever be rooted at.
-bool looks_like_invented_desktop_path(const core::String& resolved_path, const core::String& real_desktop_path)
-{
-	if (real_desktop_path.empty())
-	{
-		return false;
-	}
-
-	core::String lowered_path;
-	lowered_path.reserve(resolved_path.size());
-	for (const unsigned char character : resolved_path)
-	{
-		lowered_path += static_cast<char>(std::tolower(character));
-	}
-	core::String lowered_desktop;
-	lowered_desktop.reserve(real_desktop_path.size());
-	for (const unsigned char character : real_desktop_path)
-	{
-		lowered_desktop += static_cast<char>(std::tolower(character));
-	}
-
-	if (lowered_path.rfind(lowered_desktop, 0) == 0)
-	{
-		// Already correctly rooted at the real Desktop.
-		return false;
-	}
-
-	size_t search_position = 0;
-	while (true)
-	{
-		const size_t found = lowered_path.find("desktop", search_position);
-		if (found == core::String::npos)
-		{
-			return false;
-		}
-		const bool left_boundary = found == 0 || lowered_path[found - 1] == '/' || lowered_path[found - 1] == '\\';
-		const size_t after = found + 7;
-		const bool right_boundary = after == lowered_path.size() || lowered_path[after] == '/' || lowered_path[after] == '\\';
-		if (left_boundary && right_boundary)
-		{
-			return true;
-		}
-		search_position = after;
-	}
-}
-
-// A real transcript showed write_file "successfully" create two garbage
-// image files: once with the literal ffmpeg command line as file content,
-// once with the literal placeholder string "<base64 encoded blue 512x512
-// pixel PNG image data>" - write_file has no way to generate real binary
-// image/media data (its content argument is exact text, not a renderer), but
-// nothing stopped it from writing obviously-fake bytes to a path that claims
-// to be one anyway. Checked by file signature, not extension alone: a
-// path ending in a known binary/image extension must have content that
-// actually starts with that format's real magic bytes, or the write is
-// rejected before it happens (same "reject before touching disk" pattern as
-// looks_like_placeholder_path above) with guidance toward run_ffmpeg, the
-// tool that can actually produce real image/media bytes. A path with no
-// recognized extension, or an extension not in this list, is never checked -
-// this only catches the specific "claims to be a real media file, isn't"
-// shape, not a general content-quality judgment.
-bool looks_like_mismatched_binary_content(const core::String& path, const core::String& content)
-{
-	core::String lowered_path;
-	lowered_path.reserve(path.size());
-	for (const unsigned char character : path)
-	{
-		lowered_path += static_cast<char>(std::tolower(character));
-	}
-
-	struct BinarySignature
-	{
-		const char* extension;
-		const char* magic_bytes;
-		size_t magic_length;
-	};
-	static const BinarySignature kSignatures[] = {
-		{".png", "\x89PNG\r\n\x1a\n", 8},
-		{".jpg", "\xFF\xD8\xFF", 3},
-		{".jpeg", "\xFF\xD8\xFF", 3},
-		{".gif", "GIF8", 4},
-		{".bmp", "BM", 2},
-	};
-
-	for (const BinarySignature& signature : kSignatures)
-	{
-		const core::String extension(signature.extension);
-		if (lowered_path.size() < extension.size()
-			|| lowered_path.compare(lowered_path.size() - extension.size(), extension.size(), extension) != 0)
-		{
-			continue;
-		}
-		const core::String magic_bytes(signature.magic_bytes, signature.magic_length);
-		return content.size() < magic_bytes.size() || content.compare(0, magic_bytes.size(), magic_bytes) != 0;
-	}
-	return false;
 }
 
 const char* const kUnverifiedActionClaimNudge =
@@ -3972,13 +3521,31 @@ core::String DroidHost::build_pending_tool_call_response(
 	const ai::ToolCall& call,
 	const core::Array<PendingToolActionRecord>& actions_so_far)
 {
+	// Visibility aid, not a gate (tool_call_requires_approval is still the
+	// only real one): run_command/run_ffmpeg is the single largest blast-
+	// radius capability droidcli has, and the approval prompt otherwise just
+	// shows the raw string - flag an unambiguously destructive shape
+	// (recursive delete, disk-formatting, forced broad process/service
+	// kills, shutdown/reboot) so a human skimming past a routine "yes" is
+	// more likely to actually stop and read this particular one.
+	bool looks_destructive = false;
+	if (call.name == "run_command")
+	{
+		looks_destructive = looks_like_destructive_command(net::extract_json_string_field(call.arguments_json, "command"));
+	}
+	else if (call.name == "run_ffmpeg")
+	{
+		looks_destructive = looks_like_destructive_command(net::extract_json_string_field(call.arguments_json, "args"));
+	}
+
 	std::ostringstream stream;
 	stream << '{';
 	stream << net::json_bool_field("ok", true) << ',';
 	stream << net::json_string_field("session_id", session_id) << ',';
 	stream << "\"pending_tool_call\":{";
 	stream << net::json_string_field("tool", call.name) << ',';
-	stream << net::json_string_field("arguments_json", call.arguments_json);
+	stream << net::json_string_field("arguments_json", call.arguments_json) << ',';
+	stream << net::json_bool_field("looks_destructive", looks_destructive);
 	stream << "},";
 	stream << "\"actions\":[";
 	for (size_t index = 0; index < actions_so_far.size(); ++index)

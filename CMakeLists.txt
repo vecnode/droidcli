@@ -90,6 +90,18 @@ add_executable(droidcli_pending_command_test tests/pending_command_test.cpp)
 target_link_libraries(droidcli_pending_command_test PRIVATE droidcli_core)
 add_test(NAME pending_command_test COMMAND droidcli_pending_command_test)
 
+add_executable(droidcli_claim_guards_test tests/claim_guards_test.cpp)
+target_link_libraries(droidcli_claim_guards_test PRIVATE droidcli_core)
+add_test(NAME claim_guards_test COMMAND droidcli_claim_guards_test)
+
+add_executable(droidcli_path_guards_test tests/path_guards_test.cpp)
+target_link_libraries(droidcli_path_guards_test PRIVATE droidcli_core)
+add_test(NAME path_guards_test COMMAND droidcli_path_guards_test)
+
+add_executable(droidcli_command_guards_test tests/command_guards_test.cpp)
+target_link_libraries(droidcli_command_guards_test PRIVATE droidcli_core)
+add_test(NAME command_guards_test COMMAND droidcli_command_guards_test)
+
 add_executable(droidcli_model_provider_test tests/model_provider_test.cpp)
 target_link_libraries(droidcli_model_provider_test PRIVATE droidcli_core)
 add_test(NAME model_provider_test COMMAND droidcli_model_provider_test)
