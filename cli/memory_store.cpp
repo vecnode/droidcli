@@ -81,7 +81,13 @@ bool MemoryStore::open(const core::String& db_path)
 		"created_at TEXT NOT NULL"
 		");"
 		"CREATE INDEX IF NOT EXISTS idx_command_lessons_tool "
-		"ON command_lessons(tool);";
+		"ON command_lessons(tool);"
+		"CREATE TABLE IF NOT EXISTS known_locations ("
+		"name TEXT PRIMARY KEY COLLATE NOCASE,"
+		"resolved_path TEXT NOT NULL,"
+		"created_at TEXT NOT NULL,"
+		"updated_at TEXT NOT NULL"
+		");";
 
 	char* error_message = nullptr;
 	if (sqlite3_exec(db_, kCreateTable, nullptr, nullptr, &error_message) != SQLITE_OK)
@@ -285,6 +291,75 @@ core::Array<CommandLesson> MemoryStore::search_lessons(const core::String& query
 
 	sqlite3_finalize(statement);
 	return lessons;
+}
+
+bool MemoryStore::remember_location(const core::String& name, const core::String& resolved_path)
+{
+	if (db_ == nullptr)
+	{
+		return false;
+	}
+
+	// ON CONFLICT upsert keyed on name (COLLATE NOCASE, from the table
+	// definition) - remembering the same name again updates resolved_path/
+	// updated_at in place instead of growing a duplicate row, and preserves
+	// the original created_at.
+	static const char* kUpsert =
+		"INSERT INTO known_locations (name, resolved_path, created_at, updated_at) "
+		"VALUES (?, ?, ?, ?) "
+		"ON CONFLICT(name) DO UPDATE SET resolved_path = excluded.resolved_path, updated_at = excluded.updated_at;";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kUpsert, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return false;
+	}
+
+	const core::String now = make_timestamp();
+	bool ok = bind_text(statement, 1, name)
+		&& bind_text(statement, 2, resolved_path)
+		&& bind_text(statement, 3, now)
+		&& bind_text(statement, 4, now);
+
+	if (ok)
+	{
+		ok = sqlite3_step(statement) == SQLITE_DONE;
+	}
+
+	sqlite3_finalize(statement);
+	return ok;
+}
+
+core::Array<KnownLocation> MemoryStore::list_locations() const
+{
+	core::Array<KnownLocation> locations;
+	if (db_ == nullptr)
+	{
+		return locations;
+	}
+
+	static const char* kSelect =
+		"SELECT name, resolved_path, created_at, updated_at FROM known_locations "
+		"ORDER BY updated_at DESC;";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kSelect, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return locations;
+	}
+
+	while (sqlite3_step(statement) == SQLITE_ROW)
+	{
+		KnownLocation location;
+		location.name = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+		location.resolved_path = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
+		location.created_at = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
+		location.updated_at = reinterpret_cast<const char*>(sqlite3_column_text(statement, 3));
+		locations.push_back(location);
+	}
+
+	sqlite3_finalize(statement);
+	return locations;
 }
 
 } // namespace droidcli::cli

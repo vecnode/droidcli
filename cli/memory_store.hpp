@@ -34,6 +34,21 @@ struct CommandLesson {
 	core::String created_at;
 };
 
+// A name-to-real-path mapping the model learned once (usually via list_dir/
+// stat_path resolving what the user meant by "the green image" or
+// "Release_1") and chose to remember, via the remember_location agent tool,
+// so a later turn - or a later session entirely - can look it up instead of
+// re-listing the same directory again. See "Phase 19" in ARCHITECTURE.md.
+// name is matched case-insensitively and is the upsert key: remembering a
+// name a second time updates resolved_path/updated_at in place rather than
+// growing duplicate rows.
+struct KnownLocation {
+	core::String name;
+	core::String resolved_path;
+	core::String created_at;
+	core::String updated_at;
+};
+
 // droidcli's Core-tier "memory" role (see ARCHITECTURE.md's crate
 // comparison to ZeroClaw's zeroclaw-memory / zeroclaw-infra): a SQLite-
 // backed, append-only log of every message DroidHost::agent_turn adds to a
@@ -93,6 +108,15 @@ public:
 	// full-text/embeddings search - deliberately minimal, matching this
 	// project's existing "no semantic recall" stance (see ARCHITECTURE.md).
 	core::Array<CommandLesson> search_lessons(const core::String& query, int32_t max_results = 5) const;
+
+	// Upserts a KnownLocation by name (case-insensitive) - a second call with
+	// the same name updates resolved_path/updated_at rather than creating a
+	// duplicate row. No-op (returns false) if the store isn't open.
+	bool remember_location(const core::String& name, const core::String& resolved_path);
+
+	// Every remembered location, most recently updated first. Empty if the
+	// store isn't open or nothing has been remembered yet.
+	core::Array<KnownLocation> list_locations() const;
 
 private:
 	sqlite3* db_ = nullptr;

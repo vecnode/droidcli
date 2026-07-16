@@ -259,6 +259,17 @@ in one change so the core/host/test trio stays in sync:
      reproducible, not a one-off guess. Report what actually ran back to
      the model (a `"resolved_args"`/`"resolved_command"`-style field) so it
      can tell the user the truth instead of what it originally typed.
+   - **If the tool creates or acts on a file/artifact and the caller gives no
+     location at all** (a bare filename, or `run_command`/`run_ffmpeg` with
+     no `work_dir`), default it to the user's real Desktop, not droidcli's
+     own working directory — droidcli is a personal desktop assistant, not a
+     dev/build tool (see "Agent properties" in `ARCHITECTURE.md`), and a
+     location-less reference should land somewhere a human would actually go
+     looking for it. `default_bare_filename_to_desktop()` (`cli/host.cpp`,
+     "Phase 20") is the existing helper — reuse it rather than writing a
+     second copy. Anything with *any* directory information at all, even a
+     relative one, is left untouched as the caller having already specified
+     where.
 7. **A deterministic recognizer that bypasses the LLM entirely** — for a
    narrow, high-confidence request shape where waiting on (and trusting) the
    local model's own tool-calling judgment has a demonstrated failure rate,
