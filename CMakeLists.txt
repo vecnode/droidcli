@@ -118,6 +118,7 @@ add_executable(droidcli
     cli/droidcli.cpp
     cli/ffmpeg_tool.cpp
     cli/filesystem_tools.cpp
+    cli/hardware_info.cpp
     cli/host.cpp
     cli/http_mount.cpp
     cli/memory_store.cpp

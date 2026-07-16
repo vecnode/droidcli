@@ -606,24 +606,31 @@ flowchart LR
 
 ### Crate-by-crate mapping
 
-| ZeroClaw crate | Role | droidcli equivalent | Status |
-| --- | --- | --- | --- |
-| `zeroclaw-runtime` | Agent loop, security policy, SOP engine, cron, SubAgents, RPC | `DroidHost::agent_turn`/`run_agent_tool_loop` (`cli/host.cpp`) — one bounded tool-calling loop | **Partial** — now has a real security-policy layer beyond the bearer token: side-effecting tools require human approval before executing (Phase 6, done, `POST /api/agent/tool_decision`); no SOP engine, no cron scheduler (`TaskQueue` is a dispatch queue, not a scheduler), no SubAgents/RPC |
-| `zeroclaw-config` | TOML schema, secrets encryption, autonomy levels, workspace resolution | `HostConfig` (`cli/host.hpp`) + CLI flags + `connectors.json` | **Partial** — flat JSON/CLI flags not TOML, token is plaintext (env var or CLI arg, never echoed back — see `CLAUDE.md`), no autonomy levels, no workspace concept |
-| `zeroclaw-api` | Public traits: `ModelProvider`, `Channel`, `Tool`, `Memory`, `Observer`, `RuntimeAdapter`, `Peripheral` (kernel ABI) | `ai::ModelProvider` (`src/ai/model_provider.hpp`) is the `ModelProvider` equivalent; `net::Connector` is the closest thing to a `Channel`/`Peripheral` abstraction; `ai::ToolDefinition`/`ToolCall` is the Tool ABI | **Partial** — `ModelProvider` now exists as a real interface (Phase 1, done); `Connector` still covers what ZeroClaw splits into `Channel`+`Peripheral`; no `Memory`/`Observer` trait abstractions (though `MemoryStore` now exists as a concrete class, see `zeroclaw-memory` below) |
-| `zeroclaw-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai::ModelProvider` interface + `ai::OllamaProvider` (`src/ai/model_provider.{hpp,cpp}`, adapting the tested `ai/ollama_client.cpp`) | **Have the abstraction, one implementation** — `agent_turn` (`cli/host.cpp`) is coded against `ai::ModelProvider`, not Ollama directly (Phase 1, done); adding Anthropic/OpenAI means implementing the interface, no router/retry wrapper yet since there's nothing to route between |
-| `zeroclaw-channels` | 30+ messaging integrations (Discord, Slack, Telegram, …) | None | **Missing entirely** — `Connector` generalizes the concept but nothing implements a messaging-channel connector yet |
-| `zeroclaw-gateway` | HTTP/WebSocket gateway, web dashboard, webhook ingress | `tools::MiniHttpServer` + `cli/http_mount.cpp` | **Partial** — REST exists; no WebSocket, no dashboard UI, webhook auth is the same bearer-token gate as everything else |
-| `zeroclaw-tools` | Callable tool implementations (browser, HTTP, PDF, hardware probes) | `filesystem_tools.cpp`, `command_runner.cpp`, `window_list.cpp`, `app_index.cpp`, `intent/open_intent.cpp`, `ffmpeg_tool.cpp`, `system_info.cpp` | **Have**, functionally — not split into a separate module boundary, all linked straight into `cli/`/`src/`. `system_info.cpp` is droidcli's environment-grounding tool (OS, architecture, real Desktop path via the Windows Known Folder API - Phase 7, done) - the ZeroClaw comparison doesn't have a named equivalent for "know what machine you're actually on," but it's the same self-contained-capability shape as every other tool here |
-| `zeroclaw-tool-call-parser` | Model-side tool-call syntax parsing/normalization | `ai::ollama_client`'s `tool_calls` JSON parsing | **Partial** — handles Ollama's native tool-call format only, nothing to normalize across providers since there's only one |
-| `zeroclaw-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability + procedural memory, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); the same database also now holds `command_lessons` - model-recorded "this broke, this fixed it" pairs the agent can search before repeating a past mistake (Phase 8, done) - a form of procedural/lessons-learned memory, distinct from conversation history but living in the same store; still no embeddings, no vector retrieval - deliberately out of scope, see the extension plan below |
-| `zeroclaw-plugins` | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
-| `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | GPIO/I2C/SPI/USB, specialized hardware | None | **Not planned** — engine/hardware code was explicitly removed at 0.2.0 (`AGENTS.md` guardrails) |
-| `zeroclaw-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `db/droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); no debouncer/watchdog abstraction yet |
-| `zeroclaw-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.jsonl` | **Have JSONL + partial attribution** — one JSON object per line, `session_id` attribution on `"chat"`-channel entries (Phase 3, done); no `record!`/`scope!`-equivalent macros (C++ has no direct analog), no Observer bridge |
-| `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | `core::spawn()` (`src/core/spawn.hpp`/`.cpp`) + `DroidHost::log_thread_event` | **Have** (Phase 5, done) — named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." into `logs/log.jsonl` under the `"thread"` channel; used by `cli/tui.cpp`'s `poller` and `chat_worker`. Not a thread pool/scheduler, same one-thread-in-one-thread-out semantics as a bare `std::thread` |
-| `zeroclaw-macros` | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |
-| `zerocode` | Terminal UI | `cli/tui.cpp` (FTXUI) | **Have** |
+The **droidcli module** column names the logical grouping each row belongs to
+(matching the tier diagram above, e.g. `RUNTIME`/`droidcli-runtime`) - it is
+not a separate CMake target or library. droidcli stays one static library
+plus one executable; these are conceptual module boundaries within
+`src/`/`cli/`, named consistently so this table and the diagram use the same
+vocabulary, not a claim that droidcli is secretly an 18-target build.
+
+| ZeroClaw crate | droidcli module | Role | droidcli equivalent | Status |
+| --- | --- | --- | --- | --- |
+| `zeroclaw-runtime` | `droidcli-runtime` | Agent loop, security policy, SOP engine, cron, SubAgents, RPC | `DroidHost::agent_turn`/`run_agent_tool_loop` (`cli/host.cpp`) — one bounded tool-calling loop | **Partial** — real security-policy layer beyond the bearer token: side-effecting tools require human approval before executing (Phase 6, done, `POST /api/agent/tool_decision`); `TaskQueue` now has one-shot delayed scheduling (`Task::scheduled_for_ms`, Phase 9, "in N minutes") but no *recurring* cron and no SOP engine/SubAgents/RPC |
+| `zeroclaw-config` | `droidcli-config` | TOML schema, secrets encryption, autonomy levels, workspace resolution | `HostConfig` (`cli/host.hpp`) + CLI flags + `connectors.json` | **Partial** — flat JSON/CLI flags not TOML, token is plaintext (env var or CLI arg, never echoed back — see `CLAUDE.md`), no autonomy levels, no workspace concept |
+| `zeroclaw-api` | `droidcli-api` *(interface only, cross-cutting — not its own .cpp module)* | Public traits: `ModelProvider`, `Channel`, `Tool`, `Memory`, `Observer`, `RuntimeAdapter`, `Peripheral` (kernel ABI) | `ai::ModelProvider` (`src/ai/model_provider.hpp`) is the `ModelProvider` equivalent; `net::Connector` is the closest thing to a `Channel`/`Peripheral` abstraction; `ai::ToolDefinition`/`ToolCall` is the Tool ABI | **Partial** — `ModelProvider` now exists as a real interface (Phase 1, done); `Connector` still covers what ZeroClaw splits into `Channel`+`Peripheral`; no `Memory`/`Observer` trait abstractions (though `MemoryStore` now exists as a concrete class, see `zeroclaw-memory` below) |
+| `zeroclaw-providers` | `droidcli-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai::ModelProvider` interface + `ai::OllamaProvider` (`src/ai/model_provider.{hpp,cpp}`, adapting the tested `ai/ollama_client.cpp`) | **Have the abstraction, one implementation** — `agent_turn` (`cli/host.cpp`) is coded against `ai::ModelProvider`, not Ollama directly (Phase 1, done); adding Anthropic/OpenAI means implementing the interface, no router/retry wrapper yet since there's nothing to route between |
+| `zeroclaw-channels` | `droidcli-channels` *(planned, Phase 4 - not started)* | 30+ messaging integrations (Discord, Slack, Telegram, …) | None | **Missing entirely** — `Connector` generalizes the concept but nothing implements a messaging-channel connector yet |
+| `zeroclaw-gateway` | `droidcli-gateway` | HTTP/WebSocket gateway, web dashboard, webhook ingress | `tools::MiniHttpServer` + `cli/http_mount.cpp` | **Partial** — REST exists; no WebSocket, no dashboard UI, webhook auth is the same bearer-token gate as everything else |
+| `zeroclaw-tools` | `droidcli-tools` | Callable tool implementations (browser, HTTP, PDF, hardware probes) | `filesystem_tools.cpp`, `command_runner.cpp`, `window_list.cpp`, `app_index.cpp`, `intent/open_intent.cpp`, `ffmpeg_tool.cpp`, `system_info.cpp` | **Have**, functionally — not split into a separate module boundary, all linked straight into `cli/`/`src/`. `system_info.cpp` is droidcli's environment-grounding tool (OS, architecture, real Desktop path via the Windows Known Folder API - Phase 7, done) - the ZeroClaw comparison doesn't have a named equivalent for "know what machine you're actually on," but it's the same self-contained-capability shape as every other tool here |
+| `zeroclaw-tool-call-parser` | `droidcli-providers` *(folded in, not a separate module)* | Model-side tool-call syntax parsing/normalization | `ai::ollama_client`'s `tool_calls` JSON parsing | **Partial** — handles Ollama's native tool-call format only, nothing to normalize across providers since there's only one |
+| `zeroclaw-memory` | `droidcli-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability + procedural memory, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); the same database also now holds `command_lessons` - model-recorded "this broke, this fixed it" pairs the agent can search before repeating a past mistake (Phase 8, done) - a form of procedural/lessons-learned memory, distinct from conversation history but living in the same store; still no embeddings, no vector retrieval - deliberately out of scope, see the extension plan below |
+| `zeroclaw-plugins` | — | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
+| `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | `droidcli-hardware` *(proposed — see "Hardware awareness" below, not yet built)* | GPIO/I2C/SPI/USB, specialized hardware | None | **Under discussion, scoped narrower than the ZeroClaw crate** — read-only local hardware/environment enumeration (what's plugged in, where this machine is), explicitly not GPIO/robotics control; see the new section below for why the original "not planned" verdict is being revisited for a narrower slice |
+| `zeroclaw-infra` | `droidcli-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `db/droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); a throttled watchdog now exists too (`DroidHost::tick_watchdog()`, Phase 9 - folded into the existing poll loop rather than a separate debouncer/thread abstraction) |
+| `zeroclaw-log` | `droidcli-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.jsonl` | **Have JSONL + partial attribution** — one JSON object per line, `session_id` attribution on `"chat"`-channel entries (Phase 3, done); no `record!`/`scope!`-equivalent macros (C++ has no direct analog), no Observer bridge |
+| `zeroclaw-spawn` | `droidcli-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | `core::spawn()` (`src/core/spawn.hpp`/`.cpp`) + `DroidHost::log_thread_event` | **Have** (Phase 5, done) — named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." into `logs/log.jsonl` under the `"thread"` channel; used by `cli/tui.cpp`'s `poller` and `chat_worker`. Not a thread pool/scheduler, same one-thread-in-one-thread-out semantics as a bare `std::thread` |
+| `zeroclaw-macros` | — | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |
+| `zerocode` | `droidcli-tui` | Terminal UI | `cli/tui.cpp` (FTXUI) | **Have** |
 
 ### What this means for droidcli
 
@@ -1173,6 +1180,408 @@ to write that down, not a smarter way to write it.
 unrelated query returns no results (the `LIKE` matching isn't just returning
 everything), and confirmed the row persists in `db/droidcli_memory.sqlite3`
 across a process restart the same way `memory_entries` already does.
+
+### Phase 9 — Self-health awareness and a scheduler, folded into the existing poll loop ✅ implemented
+
+**Goal:** two gaps identified against the ZeroClaw comparison that sit
+between what Phases 1-8 already closed and the not-yet-started Edge tier
+(Channels): the daemon had no live view of its *own* health (Ollama could go
+unreachable mid-session and nothing would notice until a call happened to
+fail), and `TaskQueue` was a dispatch queue with no notion of "run this
+later" - both are runtime-reliability gaps, not new capability surface, so
+neither needed a new subsystem to close.
+
+**What shipped:**
+
+- **A scheduler with no new thread or subsystem.** `app::Task` gained
+  `scheduled_for_ms` (`src/app/tasks.hpp`) - an absolute epoch-ms deadline, 0
+  meaning "runnable immediately" (unchanged default behavior).
+  `TaskQueue::claim_next()` (`src/app/tasks.cpp`) skips a pending task whose
+  deadline hasn't arrived yet without blocking tasks behind it in the list.
+  `parse_task_request_from_json` accepts an optional `"delay_ms"` (relative,
+  resolved to an absolute deadline at parse time using the same wall-clock
+  read `created_at_ms` already takes) - `POST /api/tasks`/the `enqueue_task`
+  agent tool with `{"delay_ms":120000}` is "do this in 2 minutes." Because
+  `DroidHost::tick()` already calls `tick_tasks()` every ~200ms poll
+  iteration (see `cli/droidcli.cpp`'s headless/TUI loops), a scheduled task
+  becomes claimable within one iteration of its deadline with zero new
+  threads - the scheduler *is* the existing loop, not a parallel one.
+  `net::extract_json_int_field` (`src/net/json.hpp`/`.cpp`) was added as the
+  int64_t-scoped counterpart to the existing string/bool field extractors
+  there, since `scheduled_for_ms`/`delay_ms` can exceed `int32_t`'s range
+  (host.cpp's pre-existing `extract_json_int_field` local helper stays
+  `int32_t`-scoped for `timeout_ms`/`max_bytes`, which never need more).
+- **A watchdog folded into `tick()`, not a background thread.**
+  `DroidHost::tick_watchdog()` (`cli/host.cpp`) pings Ollama's `/api/tags`
+  at most every `kWatchdogIntervalSeconds` (15s), caching the result into
+  `ollama_reachable_`/`ollama_last_check_ms_`/`ollama_last_check_error_`
+  rather than blocking the ~200ms poll loop on a network call every tick.
+  It logs (via `append_app_log`, channel `"watchdog"`) only on a
+  reachable-to-unreachable transition or back, not every check, so a
+  long-running daemon with Ollama simply off doesn't spam the log. Skipped
+  entirely under `--no-ai`, so a deliberately-disabled AI backend never
+  manufactures false "unreachable" noise. This lives in `cli/` (a real
+  network call), same as `build_ollama_status_json`'s existing on-demand
+  ping - it's a second, throttled, cached call site for the same check, not
+  a new I/O concern.
+- **`GET /api/agent/self_status` + a `self_status` agent tool**
+  (`DroidHost::build_self_status_json()`, `cli/host.cpp`) - the answer to
+  "am I actually capable of acting right now": `ai_enabled`, cached
+  `ollama_reachable`/`ollama_last_check_ms`/`ollama_last_check_error`,
+  connector/task counts, `memory_store_open`, and a count of failures among
+  the last 20 app-log entries. Read-only (not gated by
+  `tool_call_requires_approval`), and the system prompt
+  (`HostConfig::system_prompt`, `cli/host.hpp`) tells the model to call it
+  before claiming it can't do something, or right after an unexplained tool
+  failure - and that a degraded Ollama connection doesn't mean the rest of
+  the host stopped working; every non-AI tool keeps functioning and the
+  model should say so honestly rather than going silent.
+- **A pre-existing tool-contract bug fixed in passing:** `enqueue_task`
+  (both the route and the agent tool) returned `{"success":bool,...}`
+  instead of `{"ok":bool,...}` - a live violation of the hard "every
+  agent-tool result carries `\"ok\"`, first field" rule from `AGENTS.md`
+  (Phase 6). Found while extending this exact tool for scheduling, fixed in
+  the same change since a caller can't safely check `enqueue_task`'s success
+  without knowing which field name to trust.
+- **TUI**: the Tasks panel (`cli/tui.cpp`) gained a `WHEN` column showing a
+  live countdown (`"in Ns"`) for a still-pending scheduled task, blank/`"now"`
+  otherwise. The App Log panel (built earlier but never mounted - the right
+  column was literally labeled "Reserved") is now mounted there, so watchdog
+  transitions and scheduled/queued task dispatch (`tick_tasks()` now calls
+  `append_app_log` under channel `"task"` on every completion/failure, which
+  it didn't before this phase) are visible without a `curl`.
+
+**Deliberately not done:** no absolute `"run_at_ms"` field (only relative
+`"delay_ms"`) - covers the stated use case ("do this in N minutes") without
+the int64_t epoch-timestamp ergonomics of an absolute field; no SOP/cron
+*recurring* schedule (this is one-shot "run once, later," not "run every N
+minutes") - see the still-open `zeroclaw-runtime` gap (SOP engine, cron,
+SubAgents/RPC) in the crate-by-crate mapping above, deliberately left for
+a later phase if a real recurring-task need shows up; no OS-level watchdog
+that restarts a wedged process (a real `--daemon`/Windows Service, per the
+Roadmap section above, is a separate, larger piece of work - this phase's
+watchdog only notices and reports Ollama degradation, it doesn't supervise
+the process itself).
+
+**Verified:** `ctest` green (9/9, including a new `task_queue_test` case
+proving a far-future-scheduled task is skipped by `claim_next()` without
+blocking an immediately-runnable task queued behind it). End-to-end smoke
+test against a running `droidcli --headless --no-ai`: `GET
+/api/agent/self_status` returned a well-formed snapshot; a task enqueued
+with `"delay_ms":3000` stayed `"status":"pending"` at +1s and was `"status":
+"done"` at +4s, with `"task"`-channel entries appearing in `GET
+/api/app/log` for its dispatch.
+
+**Phase 9 follow-up: log coloring, tool-execution visibility, and a
+fabrication-check gap found by dogfooding.** Immediately after this phase
+landed, watching real `logs/log.jsonl` output surfaced two further problems:
+
+- **The TUI's App Log panel (just mounted in this phase) was unreadable
+  plain text.** `cli/tui.cpp`'s `LogRow` (replacing a flattened
+  `std::vector<std::string>`) keeps `channel`/`success` structured through to
+  render time, so the log panel now colors: any `success:false` entry red
+  regardless of channel; a real tool execution (`"tool <name>(...) -> ..."`,
+  logged only when `execute_agent_tool` actually ran something - see the
+  `append_app_log("chat", ...)` call sites around `run_agent_tool_loop` in
+  `cli/host.cpp`) bold green, visually distinct from the assistant's own
+  narration text in the same `"chat"` channel; an actual OS-level process
+  launch (`"run"`/`"ffmpeg"`/`"open"`/`"process"` channels -
+  `is_process_launch_channel()`) bold magenta; `"watchdog"` yellow, `"task"`
+  cyan, `"thread"` dimmed. The green tool-execution marker is the direct
+  answer to "is it actually launching something": if a chat turn's claims
+  aren't followed by a green `tool ...` line, nothing ran, regardless of what
+  the assistant's text said.
+- **That last point wasn't hypothetical - a real transcript showed it
+  happening**, and exposed a real gap in `looks_like_unverified_action_claim()`
+  (`cli/host.cpp`, see Phase 6/7 above). A model said "I am currently using
+  the 'list_open_windows' function..." with zero `tool_calls` that hop, and
+  two turns later said "the process is still ongoing... I will need a few
+  more seconds" - also zero tool calls. Neither tripped the existing
+  claim-phrase-plus-action-verb heuristic: the first had no matching claim
+  phrase at all ("I am currently using" wasn't in the list), and the second
+  matched a claim phrase ("I will") but no action verb (the sentence was
+  about "completing the search," and neither "complete" nor "search" was in
+  the verb list). Fixed with two changes: a new `kOngoingProcessPhrases` set
+  ("is still ongoing," "a few more seconds," "currently using," etc.) that
+  marks fabrication **unconditionally**, with no action-verb corroboration
+  needed - because in this architecture (`agent_turn` is one bounded,
+  synchronous request/response per `run_agent_tool_loop` call) nothing ever
+  continues running after the HTTP response is sent, so any claim that work
+  is ongoing elsewhere is categorically false, not just probably; and a
+  broadened `kActionVerbs` adding `search`/`list`/`find`/`check`-family verbs
+  that the original file/media-centric list didn't cover. Same
+  nudge-then-honest-refusal handling from Phase 6/7 applies once the claim is
+  flagged - only the detection surface grew.
+
+**Verified:** `ctest` green (9/9) after these changes; the new phrase/verb
+sets were checked by hand against both real sentences from the transcript
+that motivated them, confirming each now flags as fabricated.
+
+### Phase 10 — Hardware awareness (read-only, opt-in) ✅ implemented
+
+**Goal:** the crate-by-crate mapping above carried `zeroclaw-hardware`/
+`aardvark-sys`/`robot-kit` as "not planned," inherited wholesale from the
+0.2.0 decision to remove engine code. That verdict conflated two very
+different things: GPIO/I2C/SPI/USB device *control* (genuinely out of
+scope - droidcli is not becoming a robotics runtime) and read-only local
+hardware *inventory* (what is this machine made of - CPU, GPU, RAM, disk),
+which is a much narrower, much lower-risk ask closer in spirit to
+`system_info.cpp`'s existing "know what machine you're actually on." This
+phase builds only the second thing. Scoped via three explicit decisions
+(asked and confirmed before writing any code, since this reverses a written
+guardrail): no geolocation, no network scanning - CPU/GPU/RAM/disk only, no
+connected-peripheral or live-sensor enumeration; and consent via a one-time
+startup opt-in flag rather than a per-call approval gate.
+
+**What shipped:**
+
+- **`cli/hardware_info.{hpp,cpp}`** - `HardwareInfo` (`cpu_name`,
+  `cpu_core_count`, `total_ram_bytes`, `core::Array<GpuAdapter>`,
+  `core::Array<DiskVolume>`) and `scan_hardware_info()`, following
+  `system_info.hpp`'s exact shape (a plain struct + one query function,
+  gathered once, not polled). No WMI/COM/DXGI dependency added - CPU name
+  comes from the same registry key (`HARDWARE\DESCRIPTION\System\
+  CentralProcessor\0\ProcessorNameString`) Task Manager reads, GPU adapters
+  from `EnumDisplayDevicesA` (user32, already an implicit link via
+  `window_list.cpp`'s `EnumWindows`), RAM from `GlobalMemoryStatusEx`, and
+  per-drive disk capacity from `GetLogicalDrives`/`GetDiskFreeSpaceExA`
+  filtered to `DRIVE_FIXED` only (no network shares/removable media). POSIX
+  gets a best-effort equivalent (`/proc/cpuinfo`, `sysconf`, `statvfs`) with
+  GPU enumeration left empty rather than shelling out to `lspci`, which
+  would violate the "no shelling out for a core query" precedent every other
+  `detect_*` function here follows.
+- **`HostConfig::enable_hardware_scan`** (`cli/host.hpp`), off by default,
+  turned on only by the `--enable-hardware-scan` CLI flag
+  (`cli/droidcli.cpp`) - the human's one-time opt-in, checked once at
+  `DroidHost::initialize()` (same call site `system_info_`/`installed_apps_`
+  are populated from). When off, `hardware_info_` stays default-constructed
+  and `build_hardware_info_json()` reports `{"ok":true,"enabled":false,
+  "error":"..."}` rather than fabricating zeroed-out data as if it were real -
+  a caller (human or model) always gets an honest answer about *why* there's
+  no data, not silence or a plausible-looking empty result.
+- **`GET /api/hardware`, and a `get_hardware_info` agent tool** - read-only
+  (not gated by `tool_call_requires_approval`, same reasoning as
+  `get_system_info`/`self_status`: the human already consented once, at
+  startup, so a per-call pause buys nothing). The tool description and a new
+  system-prompt sentence (`HostConfig::system_prompt`) both tell the model to
+  report an `enabled:false` result honestly (and how to turn scanning on)
+  rather than claiming the data doesn't exist for some other reason.
+- **`droidcli-hardware`** added to the crate-by-crate mapping table above as
+  a real (if narrow) row instead of "None" - the first ZeroClaw-crate gap
+  closed that the original comparison had marked "not planned."
+
+**Explicit non-goals, by design, not by omission:** no geolocation (IP-based
+or the Windows Location API) - "where it is" was scoped to local-machine
+context only, not physical/geographic location; no connected-peripheral
+enumeration (USB devices, monitors, audio devices) or live sensors (battery,
+temperature) - static CPU/GPU/RAM/disk inventory only; no device *control* of
+any kind (no GPIO/I2C/SPI/USB drive capability) - `zeroclaw-hardware`'s
+robotics-adjacent scope remains genuinely out of scope, this phase does not
+walk that line back.
+
+**Verified:** `ctest` green (9/9, no new unit test - this is a `cli/`-only
+real-OS-query module, same testing posture as `system_info.cpp`/`app_index.cpp`,
+which also have no dedicated `ctest` coverage). End-to-end smoke test against
+two running instances: `--headless --no-ai` (no scan flag) returned
+`{"enabled":false}` with the explanatory error; `--headless --no-ai
+--enable-hardware-scan` returned real data - actual CPU name/core count,
+total RAM, one real GPU adapter, and three real fixed-drive volumes with
+correct total/free byte counts.
+
+### Phase 11 — Diagnosed a real "open Blender" incident: three fixes, not one ✅ implemented
+
+**Goal:** a real transcript ("Ok great can you now open Blender?") showed
+the agent take two hops (one fabrication nudge) and never call
+`open_application`, instead replying with garbled leaked-role text
+(`"assistant\n\nYes, please."`), followed - 14 seconds later, with no
+logged cause at all - by Blender actually launching. Tracing this by hand
+against the code (not just the log) found three separate, independent bugs
+stacked on top of each other, not one:
+
+1. **The reliable path never got a chance to run.** `intent::parse_open_intent`
+   (Phase 0/pre-dating this session, `src/intent/open_intent.cpp`) is the
+   deterministic, LLM-free recognizer that should have caught this - but
+   `strip_leading_courtesy` didn't know "great " or "now " as filler, so
+   "Ok great can you now open Blender?" only got as far as stripping "ok ",
+   leaving "great can you now open blender?" with no verb at position 0.
+   Fell through to the unreliable local-model path instead of the
+   deterministic one. Fixed by adding those (and other real-world
+   acknowledgement/adverb filler words: "cool", "nice", "awesome", "sure",
+   "alright", "yes", "yeah", "just", "quickly", "really") to the same
+   courtesy-prefix list `strip_leading_courtesy` already loops over -
+   verified end-to-end against a running instance: `POST
+   /api/apps/quick_open` with the exact failing sentence now resolves
+   `matched:true`, `resolved_path` pointing at the real Blender install.
+   New regression case in `tests/intent_test.cpp`.
+2. **A second, previously undetected model-degradation pattern.** Phase 7's
+   notes already documented a nudged small local model degrading into
+   literal `assistant\n\n` role-token fragments as an *observed* failure
+   mode, but nothing detected it as fabrication - `"assistant\n\nYes,
+   please."` contains no claim phrase and no action verb (it isn't
+   *claiming* anything, it's just broken), so it passed
+   `looks_like_unverified_action_claim` and reached the user as if it were a
+   real answer to "can you open Blender." Fixed with a new, structural (not
+   phrase-based) detector, `looks_like_degenerate_role_leak()` (`cli/host.cpp`):
+   flags a reply whose trimmed text opens with a bare chat-role label
+   (`assistant`/`system`/`user`) standing alone before a newline - a real
+   sentence never opens that way. Runs unconditionally (unlike the
+   claim-based check, not suppressed just because a tool call already
+   succeeded earlier in the turn - garbled text is garbled regardless), and
+   feeds the same nudge-then-honest-refusal path Phase 6/7 already built.
+3. **The reliable path, once it does run, was invisible in the log** - this
+   is why the Blender launch 14 seconds later looked like it came from
+   nowhere. `cli/tui.cpp`'s quick-open confirmation flow
+   (`perform_quick_open`, the yes/no reply handling) called
+   `host.open_application` directly, which logs only its own bare `"open"`-
+   channel line - no record of what was recognized, what was asked, or
+   whether the human confirmed or declined. Fixed with a new public
+   `DroidHost::log_quick_open_event()` (`cli/host.cpp`/`.hpp`, mirroring
+   `log_thread_event`'s existing pattern for a TUI-originated event needing
+   to reach `append_app_log`) - `cli/tui.cpp` now logs the moment of
+   recognition, a decline, and a confirmed launch, all under a new
+   `"quick_open"` channel. Given its own coloring in the TUI's App Log panel
+   (`is_process_launch_channel()`, alongside `run`/`ffmpeg`/`open`/`process`)
+   from Phase 9's log-coloring follow-up, so a quick-open launch reads as
+   unmistakably as any other process launch instead of a bare unexplained
+   `"open"` line.
+
+**Why three fixes instead of a single patch:** each bug independently
+explained part of the transcript, and fixing only one would have left a
+misleading picture - e.g. fixing only the intent-recognizer gap (1) without
+fixing the invisible logging (3) would have made an already-flaky
+interaction (needing two attempts) look less broken in logs than it
+actually was, and fixing only the degenerate-output detector (2) without
+(1) would still leave natural phrasings of "open X" falling through to the
+unreliable path more often than necessary.
+
+**Verified:** `ctest` green (9/9, including the new `intent_test` case).
+`POST /api/apps/quick_open` end-to-end smoke-tested against a running
+instance with the exact failing sentence from the transcript.
+
+### Phase 12 — Automatic command-failure retry, and a third lie caught ✅ implemented
+
+**Goal:** a real transcript showed the agent asking permission to retry a
+failed `run_ffmpeg` call *four separate times across four separate user
+messages*, never once retrying on its own within a turn despite having the
+exact `failure_reason` and a mostly-unused hop budget (`kMaxHops` was 5;
+typically 1-2 hops were spent per attempt). It ended by falsely telling the
+user "I can only assist with tasks and provide information... execution of
+any commands or actions is beyond my capabilities" - false, and demonstrably
+so, since the same session had run `run_ffmpeg` successfully minutes
+earlier for an image. Phase 6/7/11 already stop the model from *claiming*
+success it didn't earn; this phase makes it actually *keep trying* on a
+real, earned failure instead of stopping to ask, and stops a third kind of
+lie (denying a capability it demonstrably has).
+
+**What shipped:**
+
+- **`kMaxHops` raised from 5 to 9** (`run_agent_tool_loop`, `cli/host.cpp`) -
+  the retry mechanism below can spend up to `kMaxCommandRetryNudges` hops on
+  its own, stacked on top of the pre-existing fabrication/capability-denial
+  nudges and the hop(s) actually spent calling tools; 5 left no real room for
+  a multi-attempt retry loop.
+- **A new nudge, `kMaxCommandRetryNudges = 3`** ("at least 3 times," per the
+  request that motivated this): when the model lands on a hop with no new
+  `tool_calls` and the *most recent action this turn* was a failed
+  `run_command`/`run_ffmpeg` call (`"ok":false`), instead of accepting
+  whatever text it wrote (typically "want me to try again?") as the final
+  answer, `run_agent_tool_loop` injects a system message quoting the real
+  `failure_reason` and instructing it to call the tool again immediately
+  with a corrected command - then `continue`s the loop, exactly like the
+  Phase 6 unverified-claim nudge does. Capped at 3 for the same reason that
+  nudge is capped at 1: a command wrong in a way the model can't diagnose
+  from the error text alone will just keep failing, and an unbounded retry
+  loop guarantees burning the whole hop budget instead of ever reaching an
+  honest report. Once the budget is spent and it's still failing, the loop
+  overrides the response itself with the real last error (`"I tried
+  run_ffmpeg 4 time(s) and it kept failing. Last error: ..."`) rather than
+  silently giving up or asking the user to run it themselves.
+- **`looks_like_capability_denial()`** (`cli/host.cpp`) - a third fabrication
+  detector alongside `looks_like_unverified_action_claim`/
+  `looks_like_degenerate_role_leak`, catching the specific lie observed:
+  phrases like "I can only assist," "beyond my capabilities," "you'll need
+  to run [it] yourself." Unlike the other two, this isn't a false claim of
+  *success* - it's a false claim of *incapacity* - so it gets its own
+  corrective nudge (`kCapabilityDenialNudge`, reasserting the real tool
+  list) rather than the "I wasn't able to complete this" honest-refusal
+  text, which would be the wrong correction for this specific lie. If the
+  model still denies capability after one nudge, the loop overrides with a
+  message telling the *user* the truth ("I incorrectly told you I can't
+  execute commands, which isn't true") rather than let the lie stand
+  unchallenged.
+- **System prompt** (`HostConfig::system_prompt`, `cli/host.hpp`) gained an
+  explicit instruction matching the new mechanism: don't stop and ask
+  permission to retry a failed command, read `failure_reason` and retry
+  immediately, multiple automatic attempts are available; and a direct
+  reassertion that command execution is a real, always-available capability,
+  never something to tell the user to do themselves.
+
+**Explicit non-goal:** this is not a general "fix the ffmpeg syntax" ability
+upgrade - a local model that doesn't know `sine=frequency=440` is valid
+`lavfi` syntax may still exhaust all 3 retries without succeeding. The goal
+is that when that happens, the user gets an honest "I tried N times, here's
+the real last error" instead of (a) silence, (b) a request to approve each
+individual retry by hand, or (c) a lie about being unable to try at all.
+Phase 8's persistent command-fix memory (`search_command_fixes`/
+`record_command_fix`) is the complementary piece that helps the *next*
+attempt at a similar command start from a known-working fix instead of from
+scratch - this phase and that one compound.
+
+**Verified:** `ctest` green (9/9) after the change; `POST /api/agent/turn`
+smoke-tested against a `--no-ai` instance to confirm the surrounding
+control flow (session handling, the disabled-AI error path) is unaffected.
+The retry mechanism itself is `cli/`-only logic gated on a real Ollama model
+producing the exact flaky behavior it corrects - not something `ctest`
+(engine-free, network-free by design) can exercise, and no live Ollama
+instance was available to replay the full multi-retry conversation
+end-to-end in this pass; the control-flow correctness (nudge counters,
+`continue`/`break` paths, the exhausted-budget report) was verified by
+careful code reading against the exact transcript that motivated it,
+consistent with how the Phase 6/7/11 nudge mechanisms it extends were also
+built incrementally against real observed transcripts rather than a
+from-scratch design.
+
+### Phase 13 — Every chat-pane entry reaches the durable log, none of it committed ✅ implemented
+
+**Goal:** the App Log panel (Phase 9) and Agent Chat panel showed different,
+incomplete pictures of the same session. Everything that round-trips
+through `agent_turn()`/`agent_tool_decision()` already logs itself
+server-side (`DroidHost::append_app_log` calls throughout
+`run_agent_tool_loop`) - but a real audit of every `chat_entries.push_back`
+call site in `cli/tui.cpp` found a second class of chat-pane content that
+never reached `logs/log.jsonl` at all: approval-flow replies ("yes"/"no" to
+a gated tool or a quick-open confirmation), the resulting "Approved."/
+"Declined."/"Cancelled." banners, clipboard-copy feedback, the new-session/
+welcome banners, and caught-exception messages. All of it was visible on
+screen and invisible in the log - a developer debugging from `logs/log.jsonl`
+alone would see a gap exactly where the human made a decision.
+
+**What shipped:**
+
+- **`DroidHost::log_chat_entry(role, text)`** (`cli/host.hpp`/`.cpp`) - a
+  public logging hook mirroring `log_quick_open_event`/`log_thread_event`'s
+  existing pattern, writing under the `"chat"` channel with
+  `direction=role`, `success=(role != "error")`.
+- **`push_chat_entry` in `cli/tui.cpp`** - a local lambda wrapping
+  `chat_entries.push_back` with a `host.log_chat_entry` call, used at every
+  site identified as previously TUI-local-only. Deliberately **not** used at
+  the three sites that are already logged server-side (the message just
+  before it's sent to `agent_turn()`, the parsed response entries flushed
+  from `chat_work.pending_entries`, and history replayed from
+  `MemoryStore` on TUI resume) - each of those is commented explaining why,
+  since logging them again would duplicate the same line under a second
+  timestamp rather than close a real gap.
+- **No new git-ignore work needed** - `logs/*`/`db/*` (only `README.md`
+  placeholders tracked) already covered this before Phase 13; this phase is
+  about *completeness* of what reaches those already-ignored files, not
+  their ignore status. Confirmed unchanged in `.gitignore`.
+
+**Verified:** `ctest` green (9/9) - this is TUI-local, real-terminal logic
+(FTXUI) with no automated coverage the way `cli/hardware_info.cpp` etc. also
+have none; correctness here is a straightforward, mechanical audit (every
+`chat_entries.push_back` call site enumerated and either converted or
+commented with why not) rather than something requiring a live model to
+exercise, unlike Phase 12's retry loop.
 
 ---
 

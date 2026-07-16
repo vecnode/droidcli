@@ -142,4 +142,42 @@ bool extract_json_bool_field(
 	return false;
 }
 
+bool extract_json_int_field(
+	const core::String& json,
+	const core::String& field_name,
+	int64_t& out_value,
+	const size_t search_from)
+{
+	const core::String needle = "\"" + field_name + "\":";
+	const size_t field_index = json.find(needle, search_from);
+	if (field_index == core::String::npos)
+	{
+		return false;
+	}
+
+	size_t cursor = field_index + needle.size();
+	while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'))
+	{
+		++cursor;
+	}
+
+	const size_t start = cursor;
+	if (cursor < json.size() && json[cursor] == '-')
+	{
+		++cursor;
+	}
+	const size_t digits_start = cursor;
+	while (cursor < json.size() && json[cursor] >= '0' && json[cursor] <= '9')
+	{
+		++cursor;
+	}
+	if (cursor == digits_start)
+	{
+		return false;
+	}
+
+	out_value = std::stoll(json.substr(start, cursor - start));
+	return true;
+}
+
 } // namespace droidcli::net

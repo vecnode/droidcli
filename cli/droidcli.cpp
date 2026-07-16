@@ -247,6 +247,7 @@ void print_usage()
 		"  --config <path>        JSON file with a top-level \"connectors\" array, loaded at startup\n"
 		"  --token <value>        Bearer token for the HTTP API (else DROIDCLI_API_TOKEN env var, else generated)\n"
 		"  --no-ai                 Disable Ollama / /ai/chat and the agent tool-calling loop\n"
+		"  --enable-hardware-scan  Opt in to a one-time local CPU/GPU/RAM/disk inventory scan at startup\n"
 		"  --ollama-url <url>      Ollama base URL (default http://127.0.0.1:11434)\n"
 		"  --ollama-model <name>   Ollama model name (default llama3.2)\n"
 		"  --headless              Skip the interactive TUI; run the plain foreground daemon loop only\n"
@@ -278,6 +279,7 @@ int main(int argc, char** argv)
 
 	const int port = parse_port(argc, argv, 30080);
 	const bool enable_ai = !has_flag(argc, argv, "--no-ai");
+	const bool enable_hardware_scan = has_flag(argc, argv, "--enable-hardware-scan");
 	const std::string ollama_url = parse_string_arg(argc, argv, "--ollama-url", "http://127.0.0.1:11434");
 	const std::string ollama_model = parse_string_arg(argc, argv, "--ollama-model", "llama3.2");
 	const std::string config_path = parse_string_arg(argc, argv, "--config", "");
@@ -297,6 +299,7 @@ int main(int argc, char** argv)
 	droidcli::cli::DroidHost host;
 	droidcli::cli::HostConfig host_config;
 	host_config.enable_ai = enable_ai;
+	host_config.enable_hardware_scan = enable_hardware_scan;
 	host_config.ollama_url = ollama_url;
 	host_config.ollama_model = ollama_model;
 
@@ -345,6 +348,8 @@ int main(int argc, char** argv)
 	std::cout << "  POST /api/open   POST /api/apps/find   GET /api/apps/open    [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/fs/read  /api/fs/write  /api/fs/list  /api/fs/stat  /api/fs/which  GET /api/fs/cwd   [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/agent/turn                   [Bearer token required]" << std::endl;
+	std::cout << "  GET  /api/agent/self_status             [Bearer token required]" << std::endl;
+	std::cout << "  GET  /api/hardware                     [Bearer token required] (requires --enable-hardware-scan)" << std::endl;
 	std::cout << "  GET  /api/ollama/setup-status          [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/ollama/install   POST /api/ollama/start   POST /api/ollama/pull   [Bearer token required]" << std::endl;
 	if (enable_ai)

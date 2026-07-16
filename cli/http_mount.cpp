@@ -212,10 +212,20 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.build_system_info_json());
 			return true;
 		}
+		if (is_get && path == "/api/hardware")
+		{
+			set_json(response, host.build_hardware_info_json());
+			return true;
+		}
 
 		if (is_get && path == "/api/agent/tools")
 		{
 			set_json(response, host.build_agent_tools_json());
+			return true;
+		}
+		if (is_get && path == "/api/agent/self_status")
+		{
+			set_json(response, host.build_self_status_json());
 			return true;
 		}
 		if (is_post && path == "/api/agent/turn")

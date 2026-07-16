@@ -72,6 +72,29 @@ int main()
 	assert(!parse_task_request_from_json("{}", invalid, invalid_error));
 	assert(!invalid_error.empty());
 
+	// A task scheduled far in the future must not be claimed yet, and must
+	// not block an immediately-runnable task queued behind it.
+	Task scheduled;
+	droidcli::core::String scheduled_error;
+	const droidcli::core::String scheduled_request_json =
+		"{\"command\":\"run\",\"payload_json\":\"{}\",\"delay_ms\":600000}";
+	assert(parse_task_request_from_json(scheduled_request_json, scheduled, scheduled_error));
+	assert(scheduled.scheduled_for_ms > 0);
+
+	TaskQueue scheduler_queue;
+	const droidcli::core::String scheduled_id = scheduler_queue.enqueue(scheduled);
+
+	Task immediate;
+	immediate.command = "run";
+	const droidcli::core::String immediate_id = scheduler_queue.enqueue(immediate);
+
+	auto next_claim = scheduler_queue.claim_next();
+	assert(next_claim.has_value());
+	assert(next_claim->id == immediate_id);
+
+	assert(scheduler_queue.find(scheduled_id)->status == "pending");
+	assert(!scheduler_queue.claim_next().has_value());
+
 	std::cout << "task_queue_test passed" << std::endl;
 	return 0;
 }
