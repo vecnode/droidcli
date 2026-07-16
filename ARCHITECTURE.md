@@ -1844,6 +1844,67 @@ text; copy → move → delete chained correctly end-to-end (confirmed via
 `ls`, not just the JSON response) and directory-delete correctly refused
 with a clear error instead of attempting anything destructive.
 
+### Phase 16 — Placeholder-path rejection for the new file tools, and a harder problem named honestly ✅ implemented
+
+**Goal:** the very first real use of Phase 15's `copy_file` showed a gap
+Phase 15 didn't cover: asked to "copy the green image on the Desktop," the
+model called `copy_file` with `source_path`/`destination_path` of
+`"/path/to/Desktop/green_image.png"` / `"/path/to/Desktop/new_green_image.png"`
+- a literal documentation-style template path, not a real one. It failed
+(correctly), and on the next attempt (after the user pointed out the file
+wasn't even on the Desktop) the model guessed a *different*, still-wrong
+path (`Documents\green.jpg`) rather than ever calling `list_dir` to find out
+what's actually there - despite the system prompt already saying to do
+exactly that. Phase 7's `substitute_bare_desktop_token()` doesn't help here:
+it only fixes a bare `desktop/...` token at a word boundary, and
+`"/path/to/Desktop/..."` doesn't have one - `"Desktop"` there is preceded by
+`"to/"`, not whitespace or a quote.
+
+**What shipped:**
+
+- **`looks_like_placeholder_path()`** (`cli/host.cpp`) - a new, narrow guard
+  checked before `copy_file`/`move_path`/`delete_file` ever touch the
+  filesystem: rejects a path containing `"path/to/"`, `"path\to\"`, `"<"`,
+  or common template filenames (`your_file`, `example.txt`,
+  `filename.ext`) with `ok:false` and an error telling the model to call
+  `list_dir`/`stat_path` first, instead of letting an obviously-fake path
+  reach `CreateFile` and fail with a confusing OS error the model then has
+  to reinterpret.
+- **`substitute_bare_desktop_token()` extended to the three new file
+  tools** - it already covered `run_command`/`run_ffmpeg` (Phase 7) but was
+  never wired into `copy_file`/`move_path`/`delete_file` when they shipped
+  in Phase 15. Each now resolves a bare `desktop/...` token in any of its
+  path arguments and reports `resolved_source_path`/
+  `resolved_destination_path`/`resolved_path` when a substitution happened,
+  matching `run_command`'s existing `resolved_command` convention.
+- **Tool descriptions and the system prompt** (`cli/host.cpp`,
+  `HostConfig::system_prompt` in `cli/host.hpp`) now say explicitly: when
+  the user refers to a file by description ("the green image on the
+  Desktop") rather than an exact path, call `list_dir` on the real
+  directory first - a guessed or template path is rejected outright, not
+  attempted.
+
+**A third bug in the same transcript, named but not fixed here:** asked
+"can you copy and paste a file," the model called `read_clipboard`
+(reasonably - the clipboard actually held `"llama3.1:8b"`, leftover from an
+earlier model-picker selection), then reported *"I have copied the contents
+of the file 'lama3.1' and pasted it into this chat window. The contents are
+8 bytes long."* - inventing a file name and a byte count that appear
+nowhere in the real, successful tool result. Every guard in this hardening
+log so far (Phase 6/11/12/15) catches a mismatch between *whether* a tool
+succeeded and what the model claims - this is different: the tool
+genuinely succeeded, and the model fabricated *specifics about its content*
+on top of a truthful success. Detecting that generically means comparing
+free-text claims against arbitrary JSON field values, not checking for a
+missing `"ok"` or an absent `tool_calls` entry - a meaningfully harder,
+still-open problem. Recorded here deliberately unsolved rather than papered
+over with a narrow, single-case regex that wouldn't generalize.
+
+**Verified:** `ctest` green (10/10). `POST /api/fs/copy` smoke-tested with
+the exact placeholder path from the transcript (`ok:false`, clear error) and
+with a bare `desktop/...` token (resolves correctly, reports
+`resolved_source_path`/`resolved_destination_path`).
+
 ---
 
 ## Extension points

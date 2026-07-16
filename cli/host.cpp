@@ -545,6 +545,34 @@ core::String substitute_bare_desktop_token(const core::String& args, const core:
 	return result;
 }
 
+// Catches a distinct, previously-observed failure mode from Phase 7's bare-
+// desktop-token substitution above, but not fixed by it: a model inventing
+// an entire plausible-looking *template* path - "/path/to/Desktop/
+// green_image.png" - rather than a bare relative token. That specific
+// string is the generic placeholder convention used in documentation/
+// examples everywhere; a model that's seen a million code samples reaches
+// for it when it doesn't actually know the real path, instead of calling
+// list_dir/stat_path to find out. substitute_bare_desktop_token can't catch
+// this - "Desktop" here isn't at a word boundary, it's preceded by "to/".
+// Checked as its own guard, at the tool-execution layer, on any path
+// argument a filesystem tool receives.
+bool looks_like_placeholder_path(const core::String& path)
+{
+	core::String lowered;
+	lowered.reserve(path.size());
+	for (const unsigned char character : path)
+	{
+		lowered += static_cast<char>(std::tolower(character));
+	}
+	return lowered.find("path/to/") != core::String::npos
+		|| lowered.find("path\\to\\") != core::String::npos
+		|| lowered.find("<") != core::String::npos
+		|| lowered.find("your_file") != core::String::npos
+		|| lowered.find("yourfile") != core::String::npos
+		|| lowered.find("example.txt") != core::String::npos
+		|| lowered.find("filename.ext") != core::String::npos;
+}
+
 const char* const kUnverifiedActionClaimNudge =
 	"Your last response claimed an action was done or about to be done, but no tool call backs "
 	"that up anywhere in this conversation turn - nothing has actually happened. If you intend to "
@@ -2084,29 +2112,84 @@ core::String DroidHost::copy_file_json(const core::String& body)
 {
 	const core::String source_path = net::extract_json_string_field(body, "source_path");
 	const core::String destination_path = net::extract_json_string_field(body, "destination_path");
-	const FileOpResult result = cli::copy_file(source_path, destination_path);
-	append_app_log("fs", "out", "copy " + source_path + " -> " + destination_path, result.ok);
-	return "{" + net::json_bool_field("ok", result.ok) + ","
-		+ net::json_string_field("error", result.error_message) + "}";
+
+	if (looks_like_placeholder_path(source_path) || looks_like_placeholder_path(destination_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"this looks like a placeholder path (e.g. \"/path/to/...\"), not a real one - "
+				"call list_dir or stat_path on the actual directory first to find the real file, "
+				"then retry with that exact path") + "}";
+	}
+
+	const core::String resolved_source = substitute_bare_desktop_token(source_path, system_info_.desktop_path);
+	const core::String resolved_destination = substitute_bare_desktop_token(destination_path, system_info_.desktop_path);
+	const FileOpResult result = cli::copy_file(resolved_source, resolved_destination);
+	append_app_log("fs", "out", "copy " + resolved_source + " -> " + resolved_destination, result.ok);
+
+	core::String response = "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message);
+	if (resolved_source != source_path || resolved_destination != destination_path)
+	{
+		response += "," + net::json_string_field("resolved_source_path", resolved_source)
+			+ "," + net::json_string_field("resolved_destination_path", resolved_destination);
+	}
+	return response + "}";
 }
 
 core::String DroidHost::move_path_json(const core::String& body)
 {
 	const core::String source_path = net::extract_json_string_field(body, "source_path");
 	const core::String destination_path = net::extract_json_string_field(body, "destination_path");
-	const FileOpResult result = cli::move_path(source_path, destination_path);
-	append_app_log("fs", "out", "move " + source_path + " -> " + destination_path, result.ok);
-	return "{" + net::json_bool_field("ok", result.ok) + ","
-		+ net::json_string_field("error", result.error_message) + "}";
+
+	if (looks_like_placeholder_path(source_path) || looks_like_placeholder_path(destination_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"this looks like a placeholder path (e.g. \"/path/to/...\"), not a real one - "
+				"call list_dir or stat_path on the actual directory first to find the real file, "
+				"then retry with that exact path") + "}";
+	}
+
+	const core::String resolved_source = substitute_bare_desktop_token(source_path, system_info_.desktop_path);
+	const core::String resolved_destination = substitute_bare_desktop_token(destination_path, system_info_.desktop_path);
+	const FileOpResult result = cli::move_path(resolved_source, resolved_destination);
+	append_app_log("fs", "out", "move " + resolved_source + " -> " + resolved_destination, result.ok);
+
+	core::String response = "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message);
+	if (resolved_source != source_path || resolved_destination != destination_path)
+	{
+		response += "," + net::json_string_field("resolved_source_path", resolved_source)
+			+ "," + net::json_string_field("resolved_destination_path", resolved_destination);
+	}
+	return response + "}";
 }
 
 core::String DroidHost::delete_file_json(const core::String& body)
 {
 	const core::String path = net::extract_json_string_field(body, "path");
-	const FileOpResult result = cli::delete_file(path);
-	append_app_log("fs", "out", "delete " + path, result.ok);
-	return "{" + net::json_bool_field("ok", result.ok) + ","
-		+ net::json_string_field("error", result.error_message) + "}";
+
+	if (looks_like_placeholder_path(path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"this looks like a placeholder path (e.g. \"/path/to/...\"), not a real one - "
+				"call list_dir or stat_path on the actual directory first to find the real file, "
+				"then retry with that exact path") + "}";
+	}
+
+	const core::String resolved_path = substitute_bare_desktop_token(path, system_info_.desktop_path);
+	const FileOpResult result = cli::delete_file(resolved_path);
+	append_app_log("fs", "out", "delete " + resolved_path, result.ok);
+
+	core::String response = "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message);
+	if (resolved_path != path)
+	{
+		response += "," + net::json_string_field("resolved_path", resolved_path);
+	}
+	return response + "}";
 }
 
 core::String DroidHost::read_clipboard_json() const
@@ -2249,25 +2332,25 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"copy_file",
-		"Copy a single file from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. Only files, not directories.",
+		"Copy a single file from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. Only files, not directories. If you are not certain of the exact source filename, call list_dir on its directory first to find the real name - do not guess or invent a path (e.g. a template like \"/path/to/file.png\"), that is rejected outright rather than attempted. A bare \"desktop/...\" token is auto-resolved to the real Desktop folder - report the location from the result's \"resolved_source_path\"/\"resolved_destination_path\" fields when present, not from what you originally typed.",
 		"{\"type\":\"object\",\"properties\":{"
-		"\"source_path\":{\"type\":\"string\",\"description\":\"file to copy\"},"
+		"\"source_path\":{\"type\":\"string\",\"description\":\"file to copy - the real path, not a guess\"},"
 		"\"destination_path\":{\"type\":\"string\",\"description\":\"where to copy it to\"}"
 		"},\"required\":[\"source_path\",\"destination_path\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
 		"move_path",
-		"Move/rename a file or directory from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file.",
+		"Move/rename a file or directory from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. If you are not certain of the exact source path, call list_dir/stat_path first to find the real one - a guessed or template path (e.g. \"/path/to/file.png\") is rejected outright rather than attempted. A bare \"desktop/...\" token is auto-resolved to the real Desktop folder - report the location from \"resolved_source_path\"/\"resolved_destination_path\" when present.",
 		"{\"type\":\"object\",\"properties\":{"
-		"\"source_path\":{\"type\":\"string\",\"description\":\"file or directory to move\"},"
+		"\"source_path\":{\"type\":\"string\",\"description\":\"file or directory to move - the real path, not a guess\"},"
 		"\"destination_path\":{\"type\":\"string\",\"description\":\"where to move it to\"}"
 		"},\"required\":[\"source_path\",\"destination_path\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
 		"delete_file",
-		"Permanently delete a single file from the local filesystem. Only files, not directories - this never does a recursive directory delete. This is destructive and cannot be undone - only use it for a file the user actually asked to remove.",
+		"Permanently delete a single file from the local filesystem. Only files, not directories - this never does a recursive directory delete. This is destructive and cannot be undone - only use it for a file the user actually asked to remove, and only a real path confirmed via list_dir/stat_path, never a guess.",
 		"{\"type\":\"object\",\"properties\":{"
-		"\"path\":{\"type\":\"string\",\"description\":\"file to delete\"}"
+		"\"path\":{\"type\":\"string\",\"description\":\"file to delete - the real path, not a guess\"}"
 		"},\"required\":[\"path\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
