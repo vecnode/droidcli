@@ -15,6 +15,7 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 namespace droidcli::cli {
 namespace {
@@ -308,6 +309,7 @@ bool tool_call_requires_approval(const core::String& tool_name)
 		|| tool_name == "copy_file"
 		|| tool_name == "move_path"
 		|| tool_name == "delete_file"
+		|| tool_name == "create_directory"
 		|| tool_name == "write_clipboard";
 }
 
@@ -596,6 +598,14 @@ core::String summarize_command_failure(const CommandRunResult& result)
 // The distinguishing signal from a real absolute path is position, not just
 // the character: a real "C:\Users\...\Desktop\..." has several characters
 // before "Desktop", never just one lone separator at the very start.
+//
+// Also matches a leading "./" or ".\" ("./desktop/new_folder") - a real
+// transcript showed exactly this shape reach write_file untouched (the
+// character before "Desktop" is a separator at cursor==2, not cursor==1, so
+// the single-leading-separator case above never fired) and land in
+// droidcli's own working directory instead of the real Desktop. Same
+// position-based distinction as the leading-separator case: a real absolute
+// path never starts with a literal ".".
 core::String substitute_bare_desktop_token(const core::String& args, const core::String& desktop_path)
 {
 	if (desktop_path.empty())
@@ -615,21 +625,25 @@ core::String substitute_bare_desktop_token(const core::String& args, const core:
 	size_t cursor = 0;
 	while (cursor < args.size())
 	{
+		const bool leading_separator = cursor == 1 && (args[0] == '/' || args[0] == '\\');
+		const bool leading_dot_separator = cursor == 2 && args[0] == '.' && (args[1] == '/' || args[1] == '\\');
 		const bool at_word_boundary = cursor == 0
 			|| args[cursor - 1] == ' ' || args[cursor - 1] == '"' || args[cursor - 1] == '\''
-			|| (cursor == 1 && (args[0] == '/' || args[0] == '\\'));
+			|| leading_separator || leading_dot_separator;
 		const bool matches_slash = lowered.compare(cursor, 8, "desktop/") == 0;
 		const bool matches_backslash = lowered.compare(cursor, 8, "desktop\\") == 0;
 
 		if (at_word_boundary && (matches_slash || matches_backslash))
 		{
-			// The cursor==1 leading-separator case above already appended that
-			// lone '/' or '\' to result during the cursor==0 iteration - drop
-			// it here so the substitution doesn't leave a stray separator in
-			// front of desktop_path's own drive letter (e.g. "/C:\Users\...").
-			if (cursor == 1 && !result.empty() && (result.back() == '/' || result.back() == '\\'))
+			// The leading_separator/leading_dot_separator cases above already
+			// appended those 1-2 literal prefix characters to result during
+			// the earlier cursor==0(/1) iterations - drop them here so the
+			// substitution doesn't leave a stray "/" or "./" in front of
+			// desktop_path's own drive letter (e.g. "/C:\Users\..." or
+			// "./C:\Users\...").
+			if ((leading_separator || leading_dot_separator) && result.size() >= cursor)
 			{
-				result.pop_back();
+				result.resize(result.size() - cursor);
 			}
 			result += desktop_path;
 			result += matches_slash ? '/' : '\\';
@@ -698,7 +712,76 @@ bool looks_like_placeholder_path(const core::String& path)
 		|| lowered.find("your_file") != core::String::npos
 		|| lowered.find("yourfile") != core::String::npos
 		|| lowered.find("example.txt") != core::String::npos
-		|| lowered.find("filename.ext") != core::String::npos;
+		|| lowered.find("filename.ext") != core::String::npos
+		// A real transcript showed the model guess "/Users/username/Desktop/
+		// folder_name" for read_file - a documentation-convention placeholder
+		// exactly like "path/to/" above, just a different one (the generic
+		// "username" a man page/Stack Overflow answer uses in place of a
+		// real one), and it slipped through untouched since none of the
+		// patterns above matched it. Substring match also catches
+		// "yourusername".
+		|| lowered.find("username") != core::String::npos;
+}
+
+// A structural safety net beyond substitute_bare_desktop_token's own pattern
+// coverage: that function only rewrites specific recognized token shapes
+// (Phase 7/18/23's bare/leading-separator/leading-dot-slash cases) and
+// deliberately leaves anything that already looks like a real absolute path
+// untouched, since "Desktop" preceded by more path is indistinguishable from
+// an already-correct "C:\Users\...\Desktop\..." by pattern alone. But a
+// model can still type an absolute-*looking* path with its own invented
+// "desktop" segment that was never one of those recognized shapes at all -
+// e.g. a literal "C:\desktop\hello" (root-level, not the real per-user
+// Desktop) - and nothing catches that. There is exactly one real Desktop
+// location; checked here, after substitution has already run, on the fully
+// resolved path: any "desktop" path segment (bounded by separators, so this
+// doesn't false-positive on a real folder that merely contains "desktop" as
+// part of a longer name) that ISN'T the real, resolved desktop_path prefix
+// is never legitimate, full stop - there is no second "desktop" folder
+// anywhere on the machine that a path should ever be rooted at.
+bool looks_like_invented_desktop_path(const core::String& resolved_path, const core::String& real_desktop_path)
+{
+	if (real_desktop_path.empty())
+	{
+		return false;
+	}
+
+	core::String lowered_path;
+	lowered_path.reserve(resolved_path.size());
+	for (const unsigned char character : resolved_path)
+	{
+		lowered_path += static_cast<char>(std::tolower(character));
+	}
+	core::String lowered_desktop;
+	lowered_desktop.reserve(real_desktop_path.size());
+	for (const unsigned char character : real_desktop_path)
+	{
+		lowered_desktop += static_cast<char>(std::tolower(character));
+	}
+
+	if (lowered_path.rfind(lowered_desktop, 0) == 0)
+	{
+		// Already correctly rooted at the real Desktop.
+		return false;
+	}
+
+	size_t search_position = 0;
+	while (true)
+	{
+		const size_t found = lowered_path.find("desktop", search_position);
+		if (found == core::String::npos)
+		{
+			return false;
+		}
+		const bool left_boundary = found == 0 || lowered_path[found - 1] == '/' || lowered_path[found - 1] == '\\';
+		const size_t after = found + 7;
+		const bool right_boundary = after == lowered_path.size() || lowered_path[after] == '/' || lowered_path[after] == '\\';
+		if (left_boundary && right_boundary)
+		{
+			return true;
+		}
+		search_position = after;
+	}
 }
 
 // A real transcript showed write_file "successfully" create two garbage
@@ -2194,8 +2277,37 @@ core::String DroidHost::read_file(const core::String& body)
 	int32_t max_bytes = 65536;
 	extract_json_int_field(body, "max_bytes", max_bytes);
 
-	const FileReadResult result = cli::read_file(path, max_bytes);
-	append_app_log("fs", "in", "read " + path, result.ok);
+	// Same guard/resolution trio every other filesystem tool already has -
+	// read_file was left out of it, and a real transcript showed the model's
+	// literal-placeholder guess ("/Users/username/Desktop/folder_name")
+	// reach the OS untouched instead of being rejected up front with
+	// guidance toward list_dir/get_system_info.
+	if (looks_like_placeholder_path(path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("content", "") + ","
+			+ "\"size_bytes\":0,"
+			+ net::json_bool_field("truncated", false) + ","
+			+ net::json_string_field("error",
+				"this looks like a placeholder path (e.g. \"/Users/username/...\"), not a real one - "
+				"call list_dir on the actual directory (or get_system_info for the real username/"
+				"Desktop path) first, then retry with that exact path") + "}";
+	}
+	const core::String resolved_path = default_bare_filename_to_desktop(
+		substitute_bare_desktop_token(path, system_info_.desktop_path), system_info_.desktop_path);
+	if (looks_like_invented_desktop_path(resolved_path, system_info_.desktop_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("content", "") + ","
+			+ "\"size_bytes\":0,"
+			+ net::json_bool_field("truncated", false) + ","
+			+ net::json_string_field("error",
+				"this path invents its own \"desktop\" location instead of using the real one - "
+				"the actual Desktop is " + system_info_.desktop_path + ", use that exact path") + "}";
+	}
+
+	const FileReadResult result = cli::read_file(resolved_path, max_bytes);
+	append_app_log("fs", "in", "read " + resolved_path, result.ok);
 
 	std::ostringstream stream;
 	stream << '{';
@@ -2204,6 +2316,10 @@ core::String DroidHost::read_file(const core::String& body)
 	stream << "\"size_bytes\":" << result.size_bytes << ',';
 	stream << net::json_bool_field("truncated", result.truncated) << ',';
 	stream << net::json_string_field("error", result.error_message);
+	if (resolved_path != path)
+	{
+		stream << ',' << net::json_string_field("resolved_path", resolved_path);
+	}
 	stream << '}';
 	return stream.str();
 }
@@ -2233,6 +2349,13 @@ core::String DroidHost::write_file(const core::String& body)
 	}
 	const core::String resolved_path = default_bare_filename_to_desktop(
 		substitute_bare_desktop_token(path, system_info_.desktop_path), system_info_.desktop_path);
+	if (looks_like_invented_desktop_path(resolved_path, system_info_.desktop_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"this path invents its own \"desktop\" location instead of using the real one - "
+				"the actual Desktop is " + system_info_.desktop_path + ", use that exact path") + "}";
+	}
 
 	if (looks_like_mismatched_binary_content(resolved_path, content))
 	{
@@ -2413,8 +2536,26 @@ core::String DroidHost::copy_file_json(const core::String& body)
 		substitute_bare_desktop_token(source_path, system_info_.desktop_path), system_info_.desktop_path);
 	const core::String resolved_destination = default_bare_filename_to_desktop(
 		substitute_bare_desktop_token(destination_path, system_info_.desktop_path), system_info_.desktop_path);
+	if (looks_like_invented_desktop_path(resolved_source, system_info_.desktop_path)
+		|| looks_like_invented_desktop_path(resolved_destination, system_info_.desktop_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"one of these paths invents its own \"desktop\" location instead of using the real one - "
+				"the actual Desktop is " + system_info_.desktop_path + ", use that exact path") + "}";
+	}
 	const FileOpResult result = cli::copy_file(resolved_source, resolved_destination);
 	append_app_log("fs", "out", "copy " + resolved_source + " -> " + resolved_destination, result.ok);
+
+	// Same immediate, independent ground-truth check as write_file/
+	// create_directory (Phase 18/23) - a fresh stat_path() on the
+	// destination right after the copy, not a repeat of what copy_file's
+	// own return value already claims.
+	StatResult verification;
+	if (result.ok)
+	{
+		verification = cli::stat_path(resolved_destination);
+	}
 
 	core::String response = "{" + net::json_bool_field("ok", result.ok) + ","
 		+ net::json_string_field("error", result.error_message);
@@ -2422,6 +2563,11 @@ core::String DroidHost::copy_file_json(const core::String& body)
 	{
 		response += "," + net::json_string_field("resolved_source_path", resolved_source)
 			+ "," + net::json_string_field("resolved_destination_path", resolved_destination);
+	}
+	if (result.ok)
+	{
+		response += "," + net::json_bool_field("verified_exists", verification.ok && verification.exists && verification.is_file)
+			+ "," + ("\"verified_size_bytes\":" + std::to_string(verification.size_bytes));
 	}
 	return response + "}";
 }
@@ -2444,8 +2590,28 @@ core::String DroidHost::move_path_json(const core::String& body)
 		substitute_bare_desktop_token(source_path, system_info_.desktop_path), system_info_.desktop_path);
 	const core::String resolved_destination = default_bare_filename_to_desktop(
 		substitute_bare_desktop_token(destination_path, system_info_.desktop_path), system_info_.desktop_path);
+	if (looks_like_invented_desktop_path(resolved_source, system_info_.desktop_path)
+		|| looks_like_invented_desktop_path(resolved_destination, system_info_.desktop_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"one of these paths invents its own \"desktop\" location instead of using the real one - "
+				"the actual Desktop is " + system_info_.desktop_path + ", use that exact path") + "}";
+	}
 	const FileOpResult result = cli::move_path(resolved_source, resolved_destination);
 	append_app_log("fs", "out", "move " + resolved_source + " -> " + resolved_destination, result.ok);
+
+	// Immediate, independent ground-truth check (Phase 24, same pattern as
+	// write_file/create_directory/copy_file): a real move means the
+	// destination now exists AND the source is gone - checking only one side
+	// would miss a "copied but didn't remove the original" half-failure.
+	StatResult destination_check;
+	StatResult source_check;
+	if (result.ok)
+	{
+		destination_check = cli::stat_path(resolved_destination);
+		source_check = cli::stat_path(resolved_source);
+	}
 
 	core::String response = "{" + net::json_bool_field("ok", result.ok) + ","
 		+ net::json_string_field("error", result.error_message);
@@ -2453,6 +2619,11 @@ core::String DroidHost::move_path_json(const core::String& body)
 	{
 		response += "," + net::json_string_field("resolved_source_path", resolved_source)
 			+ "," + net::json_string_field("resolved_destination_path", resolved_destination);
+	}
+	if (result.ok)
+	{
+		response += "," + net::json_bool_field("verified_exists", destination_check.ok && destination_check.exists)
+			+ "," + net::json_bool_field("verified_source_removed", source_check.ok && !source_check.exists);
 	}
 	return response + "}";
 }
@@ -2472,14 +2643,81 @@ core::String DroidHost::delete_file_json(const core::String& body)
 
 	const core::String resolved_path = default_bare_filename_to_desktop(
 		substitute_bare_desktop_token(path, system_info_.desktop_path), system_info_.desktop_path);
+	if (looks_like_invented_desktop_path(resolved_path, system_info_.desktop_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"this path invents its own \"desktop\" location instead of using the real one - "
+				"the actual Desktop is " + system_info_.desktop_path + ", use that exact path") + "}";
+	}
 	const FileOpResult result = cli::delete_file(resolved_path);
 	append_app_log("fs", "out", "delete " + resolved_path, result.ok);
+
+	// Immediate, independent ground-truth check (Phase 24): a real delete
+	// means the path no longer exists - a fresh stat_path() confirms that,
+	// rather than trusting delete_file's own return value alone.
+	StatResult verification;
+	if (result.ok)
+	{
+		verification = cli::stat_path(resolved_path);
+	}
 
 	core::String response = "{" + net::json_bool_field("ok", result.ok) + ","
 		+ net::json_string_field("error", result.error_message);
 	if (resolved_path != path)
 	{
 		response += "," + net::json_string_field("resolved_path", resolved_path);
+	}
+	if (result.ok)
+	{
+		response += "," + net::json_bool_field("verified_deleted", verification.ok && !verification.exists);
+	}
+	return response + "}";
+}
+
+core::String DroidHost::create_directory_json(const core::String& body)
+{
+	const core::String path = net::extract_json_string_field(body, "path");
+
+	if (looks_like_placeholder_path(path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"this looks like a placeholder path (e.g. \"/path/to/...\"), not a real one - "
+				"call list_dir or stat_path on the actual parent directory first to find the real "
+				"location, then retry with that exact path") + "}";
+	}
+
+	const core::String resolved_path = default_bare_filename_to_desktop(
+		substitute_bare_desktop_token(path, system_info_.desktop_path), system_info_.desktop_path);
+	if (looks_like_invented_desktop_path(resolved_path, system_info_.desktop_path))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error",
+				"this path invents its own \"desktop\" location instead of using the real one - "
+				"the actual Desktop is " + system_info_.desktop_path + ", use that exact path") + "}";
+	}
+	const FileOpResult result = cli::create_directory(resolved_path);
+	append_app_log("fs", "out", "mkdir " + resolved_path, result.ok);
+
+	// Same ground-truth pattern as write_file (Phase 18): a fresh stat_path()
+	// after the fact confirms a real directory actually exists there now,
+	// not just that the create call itself claims to have succeeded.
+	StatResult verification;
+	if (result.ok)
+	{
+		verification = cli::stat_path(resolved_path);
+	}
+
+	core::String response = "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message);
+	if (resolved_path != path)
+	{
+		response += "," + net::json_string_field("resolved_path", resolved_path);
+	}
+	if (result.ok)
+	{
+		response += "," + net::json_bool_field("verified_is_directory", verification.ok && verification.exists && verification.is_dir);
 	}
 	return response + "}";
 }
@@ -2497,8 +2735,23 @@ core::String DroidHost::write_clipboard_json(const core::String& body)
 	const core::String text = net::extract_json_string_field(body, "text");
 	const ClipboardWriteResult result = write_text_to_clipboard(text);
 	append_app_log("clipboard", "out", "wrote " + std::to_string(text.size()) + " chars to clipboard", result.ok);
+
+	// Immediate, independent ground-truth check (Phase 24, same pattern as
+	// the filesystem tools): read the clipboard back right after writing it
+	// and confirm it actually matches, rather than trusting the write call's
+	// own report - a real risk here specifically, since another application
+	// (or the user, mid-copy) can win a race for clipboard ownership between
+	// this write and whenever the model reports success.
+	bool verified_matches = false;
+	if (result.ok)
+	{
+		const ClipboardReadResult verification = read_text_from_clipboard();
+		verified_matches = verification.ok && verification.text == text;
+	}
+
 	return "{" + net::json_bool_field("ok", result.ok) + ","
-		+ net::json_string_field("error", result.error_message) + "}";
+		+ net::json_string_field("error", result.error_message) + ","
+		+ net::json_bool_field("verified_matches", verified_matches) + "}";
 }
 
 core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
@@ -2581,7 +2834,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"read_file",
-		"Read a file's contents from the local filesystem. Caps the read at max_bytes (default 65536) to avoid overloading context - the result reports whether the file was truncated.",
+		"Read a file's contents from the local filesystem. Caps the read at max_bytes (default 65536) to avoid overloading context - the result reports whether the file was truncated. If you are not certain of the exact path, call list_dir on the real directory (or get_system_info for the real username/Desktop path) first - do not guess or invent a path (e.g. a template like \"/Users/username/...\"), that is rejected outright rather than attempted. A bare \"desktop/...\" token or a bare filename with no directory at all is resolved against the real Desktop - report the location from \"resolved_path\" when present.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"path\":{\"type\":\"string\",\"description\":\"file path, absolute or relative to droidcli's working directory\"},"
 		"\"max_bytes\":{\"type\":\"integer\",\"description\":\"optional read cap, default 65536\"}"
@@ -2624,7 +2877,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"copy_file",
-		"Copy a single file from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. Only files, not directories. If you are not certain of the exact source filename, call list_dir on its directory first to find the real name - do not guess or invent a path (e.g. a template like \"/path/to/file.png\"), that is rejected outright rather than attempted. A bare \"desktop/...\" token is auto-resolved to the real Desktop folder, and a bare filename with no directory at all in either source_path or destination_path defaults to the real Desktop too, not droidcli's own working directory - report the location from the result's \"resolved_source_path\"/\"resolved_destination_path\" fields when present, not from what you originally typed.",
+		"Copy a single file from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. Only files, not directories. If you are not certain of the exact source filename, call list_dir on its directory first to find the real name - do not guess or invent a path (e.g. a template like \"/path/to/file.png\"), that is rejected outright rather than attempted. A bare \"desktop/...\" token is auto-resolved to the real Desktop folder, and a bare filename with no directory at all in either source_path or destination_path defaults to the real Desktop too, not droidcli's own working directory - report the location from the result's \"resolved_source_path\"/\"resolved_destination_path\" fields when present, not from what you originally typed. The result also includes \"verified_exists\"/\"verified_size_bytes\", a fresh, independent filesystem check on the destination performed right after the copy - ground truth, not a repeat of what you asked for.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"source_path\":{\"type\":\"string\",\"description\":\"file to copy - the real path, not a guess\"},"
 		"\"destination_path\":{\"type\":\"string\",\"description\":\"where to copy it to\"}"
@@ -2632,7 +2885,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"move_path",
-		"Move/rename a file or directory from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. If you are not certain of the exact source path, call list_dir/stat_path first to find the real one - a guessed or template path (e.g. \"/path/to/file.png\") is rejected outright rather than attempted. A bare \"desktop/...\" token is auto-resolved to the real Desktop folder, and a bare filename with no directory at all in either source_path or destination_path defaults to the real Desktop too, not droidcli's own working directory - report the location from \"resolved_source_path\"/\"resolved_destination_path\" when present.",
+		"Move/rename a file or directory from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. If you are not certain of the exact source path, call list_dir/stat_path first to find the real one - a guessed or template path (e.g. \"/path/to/file.png\") is rejected outright rather than attempted. A bare \"desktop/...\" token is auto-resolved to the real Desktop folder, and a bare filename with no directory at all in either source_path or destination_path defaults to the real Desktop too, not droidcli's own working directory - report the location from \"resolved_source_path\"/\"resolved_destination_path\" when present. The result also includes \"verified_exists\" (the destination, checked fresh right after the move) and \"verified_source_removed\" (the source no longer exists) - ground truth, not a repeat of what you asked for; a real move means both are true, not just one.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"source_path\":{\"type\":\"string\",\"description\":\"file or directory to move - the real path, not a guess\"},"
 		"\"destination_path\":{\"type\":\"string\",\"description\":\"where to move it to\"}"
@@ -2640,9 +2893,16 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"delete_file",
-		"Permanently delete a single file from the local filesystem. Only files, not directories - this never does a recursive directory delete. This is destructive and cannot be undone - only use it for a file the user actually asked to remove, and only a real path confirmed via list_dir/stat_path, never a guess. A bare filename with no directory at all defaults to the real Desktop, same as the other file tools - report the location from \"resolved_path\" when present.",
+		"Permanently delete a single file from the local filesystem. Only files, not directories - this never does a recursive directory delete. This is destructive and cannot be undone - only use it for a file the user actually asked to remove, and only a real path confirmed via list_dir/stat_path, never a guess. A bare filename with no directory at all defaults to the real Desktop, same as the other file tools - report the location from \"resolved_path\" when present. The result also includes \"verified_deleted\", a fresh, independent filesystem check performed right after the delete confirming the path no longer exists - ground truth, not a repeat of what you asked for.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"path\":{\"type\":\"string\",\"description\":\"file to delete - the real path, not a guess\"}"
+		"},\"required\":[\"path\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"create_directory",
+		"Create a real directory (folder) on the local filesystem, creating any missing parent directories too. This is the tool for 'create a folder'/'make a directory' - write_file creates a FILE, never a real directory, even with empty content. Idempotent: succeeds (ok:true) if the directory already exists. A bare name with no directory at all defaults to the real Desktop, same as the other file tools - report the location from \"resolved_path\" when present. The result also includes \"verified_is_directory\", a fresh, independent filesystem check performed right after creation - ground truth, not a repeat of what you asked for.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"path\":{\"type\":\"string\",\"description\":\"the directory to create\"}"
 		"},\"required\":[\"path\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
@@ -2652,7 +2912,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"write_clipboard",
-		"Replace the OS clipboard's current content with the given text, so the user can paste it (e.g. with Ctrl+V) into any other application.",
+		"Replace the OS clipboard's current content with the given text, so the user can paste it (e.g. with Ctrl+V) into any other application. The result includes \"verified_matches\", a fresh read-back of the clipboard performed right after the write confirming it actually holds the exact text you set - ground truth, not a repeat of what you asked for; another application (or the user, mid-copy) can race for clipboard ownership, so trust this field over assuming the write stuck.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"text\":{\"type\":\"string\",\"description\":\"text to place on the clipboard\"}"
 		"},\"required\":[\"text\"]}"});
@@ -2709,7 +2969,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"get_known_locations",
-		"Get a view of the system's locations: where droidcli is right now (current working directory, the user's real Desktop folder) plus every name -> path mapping remembered so far via remember_location, across this and prior sessions. Call this before falling back to list_dir when the user refers to a place by a name you might already know (e.g. 'open Release_1 again' or 'the folder we made earlier') - if it's already remembered, you can act on the real path directly instead of searching for it again. Takes no arguments.",
+		"Get a view of the system's locations: where droidcli is right now (current working directory, the user's real Desktop folder), other real OS locations on this machine (Home/profile folder, Documents, Downloads, where installed applications live), and every name -> path mapping remembered so far via remember_location, across this and prior sessions. Call this before falling back to list_dir when the user refers to a place by name (their Home folder, Downloads, 'Release_1 again', 'the folder we made earlier') - if it's a real OS location or already remembered, you can act on the real path directly instead of searching for it again. Takes no arguments.",
 		"{\"type\":\"object\",\"properties\":{}}"});
 
 	return tools;
@@ -2800,6 +3060,10 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "delete_file")
 	{
 		return delete_file_json(arguments_json);
+	}
+	if (tool_name == "create_directory")
+	{
+		return create_directory_json(arguments_json);
 	}
 	if (tool_name == "read_clipboard")
 	{
@@ -2976,6 +3240,38 @@ core::String DroidHost::list_known_locations_json() const
 	// dump of the known_locations table.
 	stream << net::json_string_field("cwd", system_info_.cwd) << ',';
 	stream << net::json_string_field("desktop_path", system_info_.desktop_path) << ',';
+	// The rest of what droidcli already knows about this machine's layout
+	// (Known Folder lookups, cli/system_info.cpp - same "real OS query, never
+	// a guessed path" contract as desktop_path), so "known locations" answers
+	// more than just what's been explicitly remembered via remember_location.
+	// A given entry is skipped entirely if it couldn't be resolved (e.g. no
+	// POSIX equivalent of "where installed applications live"), rather than
+	// showing an empty/misleading path.
+	stream << "\"system_locations\":[";
+	{
+		bool first_system_location = true;
+		const std::pair<const char*, const core::String*> kSystemLocations[] = {
+			{"Home", &system_info_.home_path},
+			{"Documents", &system_info_.documents_path},
+			{"Downloads", &system_info_.downloads_path},
+			{"Program Files (apps)", &system_info_.program_files_path},
+		};
+		for (const auto& location : kSystemLocations)
+		{
+			if (location.second->empty())
+			{
+				continue;
+			}
+			if (!first_system_location)
+			{
+				stream << ',';
+			}
+			first_system_location = false;
+			stream << '{' << net::json_string_field("name", location.first) << ','
+				<< net::json_string_field("path", *location.second) << '}';
+		}
+	}
+	stream << "],";
 	stream << "\"known_locations\":[";
 	for (size_t index = 0; index < locations.size(); ++index)
 	{
@@ -3477,20 +3773,38 @@ core::String DroidHost::run_agent_tool_loop(
 				break;
 			}
 
-			// Was the most recent action this turn a run_command/run_ffmpeg
-			// call that failed? If so, the model landing here with plain text
-			// and no new tool_calls means it's either asking the user's
-			// permission to retry, or has otherwise stalled - in both cases
-			// it already has the real error in front of it and hop budget to
-			// spare, so it should retry itself rather than hand the decision
-			// back to the user. See "Phase 12" in ARCHITECTURE.md.
+			// Was the most recent action this turn a retriable tool call that
+			// failed? If so, the model landing here with plain text and no
+			// new tool_calls means it's either asking the user's permission
+			// to retry, or has otherwise stalled - in both cases it already
+			// has the real error in front of it and hop budget to spare, so
+			// it should retry itself rather than hand the decision back to
+			// the user. Originally just run_command/run_ffmpeg (Phase 12);
+			// extended to the filesystem tools too (Phase 23) - a real
+			// transcript showed a failed read_file/write_file only ever get
+			// the "don't lie about it" fabrication nudge, never a push to
+			// actually retry with a corrected path, so it took several user
+			// turns to even get the real Desktop path via get_system_info.
 			core::String failed_command_tool;
 			core::String failed_command_reason;
 			bool last_action_was_failed_command = false;
 			if (!actions.empty())
 			{
 				const PendingToolActionRecord& last_action = actions.back();
-				if (last_action.tool == "run_command" || last_action.tool == "run_ffmpeg")
+				static const char* const kRetriableTools[] = {
+					"run_command", "run_ffmpeg",
+					"read_file", "write_file", "copy_file", "move_path", "delete_file", "create_directory"
+				};
+				bool is_retriable_tool = false;
+				for (const char* retriable_tool : kRetriableTools)
+				{
+					if (last_action.tool == retriable_tool)
+					{
+						is_retriable_tool = true;
+						break;
+					}
+				}
+				if (is_retriable_tool)
 				{
 					bool action_ok = true;
 					net::extract_json_bool_field(last_action.result_json, "ok", action_ok);
@@ -3518,8 +3832,11 @@ core::String DroidHost::run_agent_tool_loop(
 				const core::String nudge = last_action_was_failed_command
 					? ("Your last " + failed_command_tool + " call failed: " + failed_command_reason
 						+ ". Do not ask the user whether to retry - analyze this exact error yourself "
-						"and call " + failed_command_tool + " again right now with a corrected command. "
-						"You have " + std::to_string(retries_left) + " automatic retr" + (retries_left == 1 ? "y" : "ies")
+						"and call " + failed_command_tool + " again right now with corrected input (a "
+						"corrected command, path, or argument, whichever the error points to) - use "
+						"list_dir/stat_path/get_system_info first if you need the real path/username "
+						"rather than guessing again. You have " + std::to_string(retries_left)
+						+ " automatic retr" + (retries_left == 1 ? "y" : "ies")
 						+ " left after this one before you must report the real error honestly instead of "
 						"trying again.")
 					: core::String(kCapabilityDenialNudge);

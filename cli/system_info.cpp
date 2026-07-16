@@ -96,15 +96,17 @@ core::String detect_username()
 	return "unknown";
 }
 
-// The real Desktop folder via the Windows Known Folder API - not a guessed
-// "C:\Users\" + username + "\Desktop" concatenation, which silently gives
-// the wrong answer the moment the Desktop is OneDrive-redirected or the
-// system locale renames the folder. Empty on failure, never a plausible-
-// looking wrong path.
-core::String detect_desktop_path()
+// Resolves any Windows Known Folder ID to a real path - not a guessed
+// string concatenation (e.g. "C:\Users\" + username + "\Desktop"), which
+// silently gives the wrong answer the moment a folder is OneDrive-redirected
+// or the system locale renames it. Empty on failure, never a plausible-
+// looking wrong path. Shared by detect_desktop_path and every other Known
+// Folder lookup below - one resolution path, not five copies of the same
+// PWSTR/WideCharToMultiByte dance.
+core::String detect_known_folder(REFKNOWNFOLDERID folder_id)
 {
 	PWSTR wide_path = nullptr;
-	const HRESULT result = SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &wide_path);
+	const HRESULT result = SHGetKnownFolderPath(folder_id, 0, nullptr, &wide_path);
 	if (result != S_OK || wide_path == nullptr)
 	{
 		if (wide_path != nullptr)
@@ -123,6 +125,35 @@ core::String detect_desktop_path()
 	}
 	CoTaskMemFree(wide_path);
 	return path;
+}
+
+core::String detect_desktop_path()
+{
+	return detect_known_folder(FOLDERID_Desktop);
+}
+
+core::String detect_home_path()
+{
+	return detect_known_folder(FOLDERID_Profile);
+}
+
+core::String detect_documents_path()
+{
+	return detect_known_folder(FOLDERID_Documents);
+}
+
+core::String detect_downloads_path()
+{
+	return detect_known_folder(FOLDERID_Downloads);
+}
+
+// "Where installed applications live" - the answer to a location query, not
+// a substitute for the installed-apps index (a list of what's actually
+// there). FOLDERID_ProgramFiles resolves to the correct Program Files for
+// droidcli's own bitness (native 64-bit Program Files on a 64-bit build).
+core::String detect_program_files_path()
+{
+	return detect_known_folder(FOLDERID_ProgramFiles);
 }
 
 #else
@@ -163,19 +194,42 @@ core::String detect_username()
 	return user != nullptr ? core::String(user) : "unknown";
 }
 
-// Best-effort $HOME/Desktop - POSIX has no equivalent of Windows' Known
-// Folder API, and not every distro/desktop environment even has a Desktop
-// folder by convention, so this is a plausible guess, not a verified path
-// the way detect_desktop_path() is on Windows. Empty (not a guess) if
+// Best-effort $HOME-relative guesses - POSIX has no equivalent of Windows'
+// Known Folder API, and not every distro/desktop environment even has these
+// folders by convention, so these are plausible guesses, not verified paths
+// the way the Windows Known Folder lookups are. Empty (not a guess) if
 // $HOME isn't set.
-core::String detect_desktop_path()
+core::String detect_home_path()
 {
 	const char* home = std::getenv("HOME");
-	if (home == nullptr || home[0] == '\0')
-	{
-		return {};
-	}
-	return core::String(home) + "/Desktop";
+	return home != nullptr && home[0] != '\0' ? core::String(home) : core::String();
+}
+
+core::String detect_desktop_path()
+{
+	const core::String home = detect_home_path();
+	return home.empty() ? core::String() : home + "/Desktop";
+}
+
+core::String detect_documents_path()
+{
+	const core::String home = detect_home_path();
+	return home.empty() ? core::String() : home + "/Documents";
+}
+
+core::String detect_downloads_path()
+{
+	const core::String home = detect_home_path();
+	return home.empty() ? core::String() : home + "/Downloads";
+}
+
+// No POSIX equivalent of "where installed applications live" - package
+// managers scatter binaries across /usr/bin, /usr/local/bin, /opt, Flatpak/
+// Snap's own trees, etc. with no single answer. Honestly empty rather than
+// guessing one.
+core::String detect_program_files_path()
+{
+	return {};
 }
 
 #endif
@@ -196,6 +250,10 @@ SystemInfo get_system_info()
 	info.username = detect_username();
 	info.cwd = get_current_working_directory();
 	info.desktop_path = detect_desktop_path();
+	info.home_path = detect_home_path();
+	info.documents_path = detect_documents_path();
+	info.downloads_path = detect_downloads_path();
+	info.program_files_path = detect_program_files_path();
 	return info;
 }
 

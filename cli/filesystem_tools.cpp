@@ -373,4 +373,38 @@ FileOpResult delete_file(const core::String& path)
 	return result;
 }
 
+FileOpResult create_directory(const core::String& path)
+{
+	FileOpResult result;
+	if (path.empty())
+	{
+		result.error_message = "path is empty";
+		return result;
+	}
+
+	std::error_code error;
+	const fs::path target(path);
+	if (fs::exists(target, error))
+	{
+		if (fs::is_directory(target, error))
+		{
+			// Idempotent - "create a folder" that's already there isn't a
+			// failure, same as `mkdir -p`.
+			result.ok = true;
+			return result;
+		}
+		result.error_message = "path already exists as a file, not a directory: " + path;
+		return result;
+	}
+
+	const bool created = fs::create_directories(target, error);
+	if (error || !created)
+	{
+		result.error_message = "create_directory failed: " + (error ? error.message() : core::String("unknown error"));
+		return result;
+	}
+	result.ok = true;
+	return result;
+}
+
 } // namespace droidcli::cli

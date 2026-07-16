@@ -178,29 +178,57 @@ std::vector<TaskRow> parse_tasks(const std::string& json)
 }
 
 // One remembered name -> path mapping from DroidHost::list_known_locations_json()
-// (see KnownLocation, cli/memory_store.hpp) - the Locations panel's list
-// below the current cwd/desktop_path line.
+// (see KnownLocation, cli/memory_store.hpp) - the Locations panel's second
+// bullet group, below the system-locations one.
 struct LocationRow {
 	std::string name;
 	std::string resolved_path;
 	std::string updated_at;
 };
 
+// One system-level location (cwd, Desktop, Home, Documents, Downloads,
+// Program Files - see SystemInfo, cli/system_info.hpp) - "where we are and
+// what this machine looks like," not something the model explicitly
+// remembered. Same {name, path} shape as LocationRow so both render as
+// identical bullets in the Locations panel; kept as a separate struct/list
+// since these two groups have different provenance (a live OS query vs. a
+// persisted memory) worth keeping visually distinct.
+struct LocationEntry {
+	std::string name;
+	std::string path;
+};
+
 // Parsed GET /api/locations response: {"ok":true,"cwd":...,"desktop_path":...,
+// "system_locations":[{"name":...,"path":...}],
 // "known_locations":[{"name":...,"resolved_path":...,"updated_at":...}]}.
-// cwd/desktop_path are handed back separately (not folded into locations)
-// since they're "where we are right now," not something remembered.
 struct LocationsSnapshot {
-	std::string cwd;
-	std::string desktop_path;
-	std::vector<LocationRow> locations;
+	std::vector<LocationEntry> system_locations;
+	std::vector<LocationRow> remembered;
 };
 
 LocationsSnapshot parse_locations(const std::string& json)
 {
 	LocationsSnapshot snapshot;
-	snapshot.cwd = net::extract_json_string_field(json, "cwd");
-	snapshot.desktop_path = net::extract_json_string_field(json, "desktop_path");
+	const std::string cwd = net::extract_json_string_field(json, "cwd");
+	if (!cwd.empty())
+	{
+		snapshot.system_locations.push_back(LocationEntry{"Current Directory", cwd});
+	}
+	const std::string desktop_path = net::extract_json_string_field(json, "desktop_path");
+	if (!desktop_path.empty())
+	{
+		snapshot.system_locations.push_back(LocationEntry{"Desktop", desktop_path});
+	}
+	for (const std::string& object : extract_json_object_array(json, "system_locations"))
+	{
+		LocationEntry entry;
+		entry.name = net::extract_json_string_field(object, "name");
+		entry.path = net::extract_json_string_field(object, "path");
+		if (!entry.name.empty())
+		{
+			snapshot.system_locations.push_back(entry);
+		}
+	}
 	for (const std::string& object : extract_json_object_array(json, "known_locations"))
 	{
 		LocationRow row;
@@ -209,7 +237,7 @@ LocationsSnapshot parse_locations(const std::string& json)
 		row.updated_at = net::extract_json_string_field(object, "updated_at");
 		if (!row.name.empty())
 		{
-			snapshot.locations.push_back(row);
+			snapshot.remembered.push_back(row);
 		}
 	}
 	return snapshot;
@@ -1197,27 +1225,36 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	Component locations_view = Renderer([&]() -> Element
 	{
 		Elements rows;
-		if (!locations.cwd.empty())
+		// One bullet per location: a short "* Name" line (bold, so it reads
+		// at a glance), then the real path indented on the line(s) below it -
+		// paragraph() (not text()) wraps a long path within the panel's width
+		// instead of overflowing off the right edge, matching every other
+		// panel in this file. Name first/small, path below/potentially much
+		// longer, rather than one "Name: path" line that gets unreadable the
+		// moment the path is long.
+		auto add_location_bullet = [&](const std::string& name, const std::string& path, Color name_color)
 		{
-			rows.push_back(paragraph("cwd: " + locations.cwd) | dim);
-		}
-		if (!locations.desktop_path.empty())
+			rows.push_back(text("* " + name) | bold | color(name_color));
+			rows.push_back(paragraph("  " + path) | dim);
+		};
+
+		for (const LocationEntry& entry : locations.system_locations)
 		{
-			rows.push_back(paragraph("Desktop: " + locations.desktop_path) | dim);
+			add_location_bullet(entry.name, entry.path, Color::White);
 		}
-		if (!rows.empty())
+		if (!locations.system_locations.empty())
 		{
 			rows.push_back(separator());
 		}
-		if (locations.locations.empty())
+		if (locations.remembered.empty())
 		{
 			rows.push_back(text("(no locations remembered yet)") | dim);
 		}
 		else
 		{
-			for (const LocationRow& location : locations.locations)
+			for (const LocationRow& location : locations.remembered)
 			{
-				rows.push_back(paragraph(location.name + " -> " + location.resolved_path) | color(Color::Cyan));
+				add_location_bullet(location.name, location.resolved_path, Color::Cyan);
 			}
 		}
 		return vbox(rows) | yframe | flex;

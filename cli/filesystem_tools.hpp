@@ -104,4 +104,14 @@ FileOpResult move_path(const core::String& source_path, const core::String& dest
 // delete is a categorically worse mistake than an accidental file delete.
 FileOpResult delete_file(const core::String& path);
 
+// Creates a real directory (std::filesystem::create_directories, so any
+// missing parent directories are created too) at path. Idempotent: ok:true
+// if the directory already exists, since "create a folder" that's already
+// there isn't a failure. ok:false if path already exists as a *file* -
+// creating a directory over an existing file is never the right silent
+// resolution. Added because "create a folder" was previously faked via
+// write_file with empty content, which creates an empty *file*, not a real
+// directory - a real transcript showed the user correctly notice this.
+FileOpResult create_directory(const core::String& path);
+
 } // namespace droidcli::cli

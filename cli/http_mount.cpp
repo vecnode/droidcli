@@ -222,6 +222,11 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.delete_file_json(request.body));
 			return true;
 		}
+		if (is_post && path == "/api/fs/mkdir")
+		{
+			set_json(response, host.create_directory_json(request.body));
+			return true;
+		}
 		if (is_get && path == "/api/clipboard")
 		{
 			set_json(response, host.read_clipboard_json());

@@ -2181,6 +2181,227 @@ command that writes a bare relative output filename and no `work_dir`
 reports `resolved_work_dir` as the real Desktop and the file is confirmed
 there afterward, not in the droidcli working directory.
 
+### Phase 21 — droidcli's own built-in knowledge of Windows itself (Recycle Bin, Settings pages, ...) ✅ implemented
+
+**Goal:** two real transcripts showed `open_application` fail on "Recycle
+Bin" and "Sound Settings" - neither is an installed application (no Add/
+Remove Programs entry, no discoverable `.exe` by that name), so
+`find_installed_app_match`/`collect_installed_app_matches` never find them,
+and a literal `CreateProcess("Sound Settings")` can never succeed no matter
+how it's spelled. The model has no way to know this distinction on its own -
+it needs droidcli to actually know what's part of Windows itself versus what
+has to be looked up as an installed application.
+
+**What shipped:**
+
+- **`find_well_known_windows_target()`** (`cli/host.cpp`) - a small, hand-
+  maintained table mapping common names (Recycle Bin, Sound/Display/Network/
+  Bluetooth Settings, Windows Update, Control Panel, Task Manager, Device
+  Manager, Disk Management, This PC, Downloads folder) to a real
+  executable + argument `CreateProcess` can actually launch - no
+  `ShellExecute` needed, since `explorer.exe` accepts a `shell:`/`ms-settings:`
+  URI as an ordinary command-line argument and hands it to the shell itself.
+  Narrow and evidence-driven (two observed failures), not an attempt at an
+  exhaustive Windows/CLSID list.
+- **Wired into `DroidHost::open_application()` itself**, checked only after
+  both the normal App Paths/PATH resolution and the installed-apps index
+  come up empty - so a real installed app of the same name always takes
+  priority, and this fallback works identically regardless of whether the
+  request came through the deterministic quick-open bypass or the model
+  calling `open_application` directly (one shared resolution path, not two
+  copies).
+- **`try_quick_open_json`** additionally reports `resolved_windows_target`/
+  `windows_target_display_name` (candidates empty only) so the TUI's
+  quick-open confirmation prompt reads "Open Sound Settings (a built-in
+  Windows location, not an installed app)?" instead of the generic "isn't in
+  the installed-apps index" message - display-only, the launch itself
+  already works via the shared fallback above regardless of this field.
+
+**Verified:** `ctest` green (10/10). Live-probed against a running
+`--headless --no-ai` instance: `POST /api/open` with `path_or_name` of
+`"Recycle Bin"` and, separately, `"Sound Settings"` both return `ok:true`
+with a real PID; `POST /api/apps/quick_open` for "open Sound Settings"
+returns `resolved_windows_target:true` with the correct display name and
+underlying `explorer.exe ms-settings:sound` target.
+
+### Phase 22 — More of what droidcli already knows about this machine, and a real bullet-point Locations panel ✅ implemented
+
+**Goal:** the Locations panel only showed `cwd`/Desktop as flat "label:
+path" lines - the user asked for more of what droidcli already has real OS
+access to (Home, "where the apps are," ...) and a clearer per-location
+layout instead of a single long line that gets unreadable once the path is
+long.
+
+**What shipped:**
+
+- **`SystemInfo` extended** (`cli/system_info.{hpp,cpp}`) with `home_path`
+  (`FOLDERID_Profile`), `documents_path` (`FOLDERID_Documents`),
+  `downloads_path` (`FOLDERID_Downloads`), and `program_files_path`
+  (`FOLDERID_ProgramFiles` - "where the apps are," distinct from the
+  installed-apps index, which is a *list* of what's there, not a path).
+  `detect_desktop_path()`'s Known-Folder-lookup logic was factored out into
+  a shared `detect_known_folder()` helper reused by all four new lookups,
+  rather than four more copies of the same PWSTR/WideCharToMultiByte dance.
+  POSIX fallbacks are `$HOME`-relative best-effort guesses, same honesty
+  contract as the existing Desktop fallback (empty, not a wrong guess, if
+  `$HOME` isn't set); `program_files_path` is honestly empty on POSIX - no
+  single answer exists across package managers.
+- **`list_known_locations_json()`** (`cli/host.cpp`) now also returns a
+  `system_locations` array (`{"name":...,"path":...}`) built from these four
+  fields, each entry skipped entirely (not shown empty) if it couldn't be
+  resolved.
+- **The Locations panel** (`cli/tui.cpp`, `locations_view`) now renders every
+  location - cwd, Desktop, the four new system locations, and every
+  remembered `known_locations` entry - as a bullet: a short bold `"* Name"`
+  line, then the real path on its own `paragraph()`-wrapped line below it,
+  instead of one long `"Name: path"` line. System locations and remembered
+  locations are visually separated (a `separator()` between the two groups)
+  and colored differently (white vs. cyan) since they have different
+  provenance - a live OS query versus a persisted memory.
+
+**Verified:** `ctest` green (10/10). Live-probed against a running
+`--headless --no-ai` instance: `GET /api/locations` returns real, resolved
+paths for Home/Documents/Downloads/Program Files alongside cwd/Desktop and
+the previously-remembered location from Phase 19's smoke test, confirming
+it persisted across the restart.
+
+### Phase 23 — A real `create_directory` tool, `read_file` gets the same guards as the other file tools, and the retry-nudge covers file ops too ✅ implemented
+
+**Goal:** a real transcript showed three compounding gaps in one exchange:
+"create a folder" was faked via `write_file` with empty content (which
+creates a *file*, not a directory) at a path `substitute_bare_desktop_token`
+didn't recognize (`./desktop/new_folder` - "desktop" starts at index 2 there,
+past both the bare-token and single-leading-separator cases Phases 7/18
+covered); the model's own attempt to fix it guessed a literal placeholder
+path (`/Users/username/Desktop/folder_name`) that `read_file` - unlike every
+other file tool - had no guard against at all; and every failure only ever
+triggered the "don't lie about it" fabrication nudge (Phase 6/17), never a
+push to actually retry with a corrected path, so it took four user turns to
+even get the real Desktop path via `get_system_info`.
+
+**What shipped:**
+
+- **`create_directory`** (`cli/filesystem_tools.{hpp,cpp}`, `cli/host.cpp`) -
+  a real directory via `std::filesystem::create_directories` (so missing
+  parents are created too), idempotent (`ok:true` if the directory already
+  exists, matching `mkdir -p`), `ok:false` if the path already exists as a
+  file. Gated (`tool_call_requires_approval`), gets the same placeholder-path/
+  desktop-token/bare-filename-defaults-to-Desktop treatment as
+  `copy_file`/`move_path`/`delete_file`, and the same post-creation
+  `stat_path()` ground-truth check as `write_file`
+  (`verified_is_directory`). New `POST /api/fs/mkdir` route.
+- **`substitute_bare_desktop_token` extended** (`cli/host.cpp`) to also
+  recognize a leading `./`/`.\` ("desktop" starting at index 2, one past the
+  single-leading-separator case Phase 18 added) as a word boundary - same
+  position-based distinction as before: a real absolute path never starts
+  with a literal `.`.
+- **`read_file` wired into the same guard/resolution trio** every other
+  filesystem tool already has: `looks_like_placeholder_path`,
+  `substitute_bare_desktop_token`, `default_bare_filename_to_desktop`. It was
+  the one file tool left out of all three.
+- **`looks_like_placeholder_path` extended** with a `"username"` pattern -
+  `/Users/username/...` is the exact same "documentation-convention
+  placeholder" shape as `path/to/...`, just a different one (the generic
+  `username` a man page or Stack Overflow answer uses in place of a real
+  one), and none of the existing patterns caught it.
+- **The Phase 12 command-retry-nudge extended** from `run_command`/
+  `run_ffmpeg` only to also cover `read_file`/`write_file`/`copy_file`/
+  `move_path`/`delete_file`/`create_directory` - a failed file-tool call now
+  gets the same "analyze the real error and retry with corrected input
+  yourself, don't ask permission" push those two already had, pointing the
+  model at `list_dir`/`stat_path`/`get_system_info` if it needs the real
+  path/username instead of guessing again.
+
+**Verified:** `ctest` green (10/10). Live-probed against a running
+`--headless --no-ai` instance: `create_directory` on a bare name creates a
+real directory on the Desktop (confirmed idempotent on a second call);
+`./desktop/...` now resolves to the real Desktop instead of droidcli's own
+working directory; `read_file` against the exact placeholder path from the
+transcript (`/Users/username/Desktop/folder_name`) is now rejected with a
+clear error instead of reaching the OS.
+
+### Phase 24 — Ground-truth verification made uniform across every mutating tool ✅ implemented
+
+**Goal:** `write_file` (Phase 18) and `create_directory` (Phase 23) each got
+an independent post-action `stat_path()` check instead of trusting their own
+return value - but `copy_file`, `move_path`, `delete_file`, and
+`write_clipboard` didn't get the same treatment, so "did this actually
+happen" was answered reliably for some mutating tools and not others. Asked
+directly: the checker should cover every tool that changes state, not just
+the two that happened to get hardened first.
+
+**What shipped:** the same "immediate, independent re-check via the same OS
+API, not a repeat of the operation's own report" pattern, extended to the
+remaining four mutating tools:
+
+- **`copy_file`** — `verified_exists`/`verified_size_bytes` on the
+  destination, checked fresh right after the copy.
+- **`move_path`** — `verified_exists` (destination) *and*
+  `verified_source_removed` (source) - checking only one side would miss a
+  "copied but didn't remove the original" half-failure, which a plain
+  `std::filesystem::rename` success wouldn't otherwise surface.
+- **`delete_file`** — `verified_deleted`, confirming the path genuinely no
+  longer exists.
+- **`write_clipboard`** — `verified_matches`, a read-back of the clipboard
+  performed right after the write. This one has a real failure mode the
+  filesystem tools don't: another application (or the user, mid-copy) can
+  win a race for clipboard ownership between the write and whenever the
+  model reports success, so a self-reported "ok" here is weaker evidence
+  than it is for a file write.
+
+All four fields are populated inline, in the same request/response - "real
+time" in the sense that matters here: before the tool's result ever reaches
+the model, not a delayed or asynchronous check bolted on afterward.
+
+**Verified:** `ctest` green (10/10). Live-probed end-to-end against a running
+`--headless --no-ai` instance: wrote a file, copied it
+(`verified_exists`/`verified_size_bytes` on the copy), moved the copy
+(`verified_exists` on the new location, `verified_source_removed` on the
+old), deleted it (`verified_deleted`), and wrote/verified a clipboard value
+(`verified_matches`) - all five ground-truth fields confirmed correct via
+independent checks, not just the tool's own `"ok"`.
+
+### Phase 25 — There is exactly one real Desktop; a structural check against ever inventing a second one ✅ implemented
+
+**Goal:** every prior Desktop-path phase (7/18/20/23) fixed a specific
+*pattern* the model was observed typing (a bare token, a leading separator, a
+leading `./`) - but `substitute_bare_desktop_token` deliberately leaves
+anything that already *looks* like a real absolute path untouched, since
+`"Desktop"` preceded by more path is indistinguishable from an already-
+correct `"C:\Users\...\Desktop\..."` by pattern alone. That leaves a gap: a
+model can type an absolute-*looking* path with its own invented `"desktop"`
+segment that was never one of the recognized shapes at all - e.g. a literal
+`"C:\desktop\hello"` (root-level, not the real per-user Desktop) - and
+nothing catches it, since it doesn't match any specific bad pattern, it just
+isn't the *one real path*.
+
+**What shipped:**
+
+- **`looks_like_invented_desktop_path()`** (`cli/host.cpp`) - a structural
+  check, not another pattern to add to the list: after
+  `substitute_bare_desktop_token`/`default_bare_filename_to_desktop` have
+  already run, does the resolved path contain a `"desktop"` path segment
+  (bounded by separators, so a real folder that merely contains "desktop" as
+  part of a longer name never false-positives) that ISN'T the real, resolved
+  `desktop_path` prefix? If so, it's rejected outright with the real
+  `desktop_path` spelled out in the error - there is no second `"desktop"`
+  folder anywhere on the machine a path should ever be rooted at, so any
+  survivor here is definitionally wrong, not just probably wrong. Wired into
+  all six file tools (`read_file`, `write_file`, `copy_file`, `move_path`,
+  `delete_file`, `create_directory`).
+- **`HostConfig::system_prompt`** (`cli/host.hpp`) states this directly:
+  there is exactly one real Desktop folder (`desktop_path`), never construct
+  or guess a second one - if a path has "desktop" in it anywhere and isn't
+  exactly the real one, that's wrong.
+
+**Verified:** `ctest` green (10/10). Live-probed against a running
+`--headless --no-ai` instance (via PowerShell - Bash/MSYS mangles backslashes
+in a JSON body's Windows paths, which produced a false alarm on first try): a
+literal `C:\desktop\hello` is now rejected with the real Desktop path spelled
+out in the error; a bare name, a `desktop/...` token, and the real absolute
+Desktop path all still succeed exactly as before - the guard doesn't
+false-positive on any of the three already-legitimate shapes.
+
 ---
 
 ## Extension points
@@ -2226,7 +2447,8 @@ inside `DroidHost::run_agent_tool_loop`.
 | `substitute_bare_desktop_token` | `host.cpp:523` | Rewrites a bare `desktop/...`/`desktop\...` token (preceded by whitespace, a quote, start-of-string, or - as of Phase 18 - a single leading `/`/`\`) into the real, OS-resolved Desktop path. Deliberately does *not* touch a `"Desktop"` appearing mid-path in an already-correct absolute path (there it's preceded by more path, not a word boundary) - distinguished by *position*, not just the preceding character. |
 | `looks_like_placeholder_path` | `host.cpp:581` | Rejects a path containing `path/to/`, `path\to\`, `<`, or a common template filename (`your_file`, `example.txt`, `filename.ext`) before a filesystem tool ever touches disk - catches a model inventing a plausible-looking documentation-style path instead of calling `list_dir`/`stat_path` to find the real one, a shape `substitute_bare_desktop_token` can't catch (no word-boundary "desktop" token to rewrite). |
 | `looks_like_mismatched_binary_content` | `host.cpp:613` | Checked before `write_file` ever writes: if the path ends in a recognized binary/image extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.bmp`), the content must start with that format's real magic bytes or the write is rejected. Catches a model writing literal placeholder/narration text to a path that claims to be a real image. |
-| `write_file` post-write verification | `host.cpp:2050` | After a successful write, calls `stat_path()` on the resolved path and reports `verified_exists`/`verified_size_bytes` - ground truth from a fresh, independent filesystem look, not the write call's own self-reported byte count. |
+| `looks_like_invented_desktop_path` | `host.cpp` (Phase 25) | Structural, not pattern-based: after Desktop-token substitution has already run, does the resolved path still contain a `"desktop"` path segment (bounded by separators) that ISN'T the real, resolved `desktop_path` prefix? There is exactly one real Desktop location, so any survivor here is definitionally invented, not just probably wrong - catches an absolute-*looking* path with its own guessed `"desktop"` segment (e.g. `C:\desktop\hello`, root-level) that never matched any of `substitute_bare_desktop_token`'s specific recognized shapes. Checked in all six file tools. |
+| Post-action ground-truth verification | `write_file`/`create_directory`/`copy_file`/`move_path`/`delete_file` (`host.cpp`), `write_clipboard_json` (`host.cpp:2625`) | After a successful mutating call, an independent re-check via the same OS API confirms the claimed effect actually happened, inline before the result reaches the model - `verified_exists`/`verified_size_bytes` (write/copy), `verified_is_directory` (mkdir), `verified_exists`+`verified_source_removed` (move - both sides, not just one), `verified_deleted` (delete), `verified_matches` (clipboard read-back, since another application can race for ownership). Extended from just `write_file`/`create_directory` (Phase 18/23) to all six in Phase 24 - "did this actually happen" should be answered reliably for every mutating tool, not just the ones hardened first. |
 | `remember_location_json` pre-store verification | `host.cpp:2756` | Before a name → path mapping is persisted, resolves it (`substitute_bare_desktop_token`) and requires a live `stat_path()` to confirm the path exists *right now* - a location is only remembered if it's real at the moment of remembering, not trusted on the model's word. |
 
 ### Deterministic bypasses (`src/intent/`, portable core, no LLM call)
