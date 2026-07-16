@@ -3086,4 +3086,9 @@ void DroidHost::log_quick_open_event(const core::String& summary, const bool suc
 	append_app_log("quick_open", "out", summary, success);
 }
 
+void DroidHost::log_chat_entry(const core::String& role, const core::String& text)
+{
+	append_app_log("chat", role, text, role != "error");
+}
+
 } // namespace droidcli::cli

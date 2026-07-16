@@ -901,6 +901,24 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		host.log_thread_event(thread_name, event);
 	};
 
+	// Every entry that lands in the chat pane should also land in the durable
+	// log (logs/log.jsonl, git-ignored - see logs/README.md), not just the
+	// half of the conversation that happens to round-trip through
+	// agent_turn()/agent_tool_decision() (those already log themselves inside
+	// DroidHost). Approval-flow replies, "Approved."/"Cancelled." banners,
+	// clipboard feedback, session banners, and caught-exception messages were
+	// previously chat_entries.push_back-only - visible on screen, invisible in
+	// logs/history. Use this instead of chat_entries.push_back directly for
+	// any TUI-local entry (an entry built from an already-logged agent_turn/
+	// agent_tool_decision response, e.g. parse_chat_response's output, should
+	// keep using push_back as before - logging it again here would duplicate
+	// the same content under two log lines).
+	auto push_chat_entry = [&](const std::string& role, const std::string& text)
+	{
+		host.log_chat_entry(role, text);
+		chat_entries.push_back(ChatEntry{role, text});
+	};
+
 	// Fires the actual launch for a confirmed quick-open request and reports
 	// the result - reuses DroidHost::open_application (the same path
 	// find_application/open_application tool calls go through), so a quick
@@ -1520,7 +1538,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				chat_input_text.clear();
 				if (!reply.empty())
 				{
-					chat_entries.push_back(ChatEntry{"user", reply});
+					push_chat_entry("user", reply);
 				}
 				const std::string lower_reply = to_lower(reply);
 				const bool approved = lower_reply == "yes" || lower_reply == "y";
@@ -1528,8 +1546,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				const std::string reason = (approved || bare_decline) ? std::string() : reply;
 				const std::string decision_session_id = pending_tool_approval.session_id;
 
-				chat_entries.push_back(ChatEntry{"info",
-					approved ? "Approved. Running..." : "Declined."});
+				push_chat_entry("info", approved ? "Approved. Running..." : "Declined.");
 
 				agent_turn_in_flight = true;
 				pending_tool_approval = PendingToolApproval{};
@@ -1561,7 +1578,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				chat_input_text.clear();
 				if (!reply.empty())
 				{
-					chat_entries.push_back(ChatEntry{"user", reply});
+					push_chat_entry("user", reply);
 				}
 				const std::string lower_reply = to_lower(reply);
 
@@ -1579,7 +1596,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					if (lower_reply == "cancel" || lower_reply == "no")
 					{
 						host.log_quick_open_event("declined - user did not confirm opening " + pending_open.app_name, false);
-						chat_entries.push_back(ChatEntry{"info", "Cancelled."});
+						push_chat_entry("info", "Cancelled.");
 						pending_open = PendingOpen{};
 					}
 					else if (is_number)
@@ -1593,12 +1610,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 						}
 						else
 						{
-							chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+							push_chat_entry("info", describe_pending_open_prompt(pending_open));
 						}
 					}
 					else
 					{
-						chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+						push_chat_entry("info", describe_pending_open_prompt(pending_open));
 					}
 				}
 				else if (lower_reply == "yes" || lower_reply == "y")
@@ -1616,12 +1633,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				else if (lower_reply == "no" || lower_reply == "n" || lower_reply == "cancel")
 				{
 					host.log_quick_open_event("declined - user did not confirm opening " + pending_open.app_name, false);
-					chat_entries.push_back(ChatEntry{"info", "Cancelled."});
+					push_chat_entry("info", "Cancelled.");
 					pending_open = PendingOpen{};
 				}
 				else
 				{
-					chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+					push_chat_entry("info", describe_pending_open_prompt(pending_open));
 				}
 				return true;
 			}
@@ -1634,14 +1651,14 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				{
 					const std::string message = chat_input_text;
 					chat_input_text.clear();
-					chat_entries.push_back(ChatEntry{"user", message});
+					push_chat_entry("user", message);
 					record_chat_history(message);
 
 					pending_open.active = true;
 					pending_open.app_name = quick_open.app_name;
 					pending_open.candidates = quick_open.candidates;
 					host.log_quick_open_event("recognized \"" + quick_open.app_name + "\" from \"" + message + "\" - awaiting confirmation");
-					chat_entries.push_back(ChatEntry{"info", describe_pending_open_prompt(pending_open)});
+					push_chat_entry("info", describe_pending_open_prompt(pending_open));
 					return true;
 				}
 			}
@@ -1665,6 +1682,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			chat_input_text.clear();
 			if (!message.empty())
 			{
+				// Not push_chat_entry: this message is about to be sent to
+				// agent_turn() (run_chat_turn below), which logs "user: <message>"
+				// itself the moment it runs - logging it again here first would
+				// duplicate the same line under two timestamps.
 				chat_entries.push_back(ChatEntry{"user", message});
 				record_chat_history(message);
 			}
@@ -1759,6 +1780,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			}
 			rebuild_connector_entries();
 
+			// Not push_chat_entry: pending_entries are parsed straight out of
+			// an agent_turn()/agent_tool_decision() response body, and every
+			// hop of that call already logged itself server-side (DroidHost's
+			// own append_app_log calls in run_agent_tool_loop) - logging here
+			// too would duplicate each assistant/tool line under a second
+			// timestamp.
 			std::lock_guard<std::mutex> chat_lock(chat_work.mutex);
 			for (ChatEntry& entry : chat_work.pending_entries)
 			{
@@ -1864,15 +1891,15 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			const std::string transcript = format_chat_transcript(chat_entries);
 			if (transcript.empty())
 			{
-				chat_entries.push_back(ChatEntry{"info", "Nothing to copy yet."});
+				push_chat_entry("info", "Nothing to copy yet.");
 			}
 			else if (copy_text_to_clipboard(transcript))
 			{
-				chat_entries.push_back(ChatEntry{"info", "Copied the chat transcript to the clipboard."});
+				push_chat_entry("info", "Copied the chat transcript to the clipboard.");
 			}
 			else
 			{
-				chat_entries.push_back(ChatEntry{"error", "Could not copy to the clipboard."});
+				push_chat_entry("error", "Could not copy to the clipboard.");
 			}
 			return true;
 		}
@@ -1888,7 +1915,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			pending_new_session = true;
 			current_session_id.clear();
 			chat_entries.clear();
-			chat_entries.push_back(ChatEntry{"info", "Starting a new session on your next message."});
+			push_chat_entry("info", "Starting a new session on your next message.");
 			return true;
 		}
 
@@ -1902,8 +1929,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// one, or a name to pull a new one" is visible without typing anything
 	// first. Safe to touch chat_entries directly here (single-threaded,
 	// before screen.Loop() starts).
-	chat_entries.push_back(ChatEntry{"info",
-		"Welcome to droidcli " + std::string(version_string) + ". Type a message below and press Enter to chat."});
+	push_chat_entry("info",
+		"Welcome to droidcli " + std::string(version_string) + ". Type a message below and press Enter to chat.");
 
 	// Resume the last session this TUI process was on, if any (see
 	// current_session_id's declaration above and "Persistent memory" in
@@ -1922,6 +1949,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				current_session_id = last_session_id;
 				for (const ChatEntry& entry : resumed)
 				{
+					// Not push_chat_entry: this content is already in
+					// MemoryStore/logs/log.jsonl from when it was first said -
+					// re-logging it here on every resume would duplicate the
+					// same conversation turn under a new timestamp each time
+					// the TUI restarts.
 					chat_entries.push_back(entry);
 				}
 			}
@@ -1929,11 +1961,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	}
 	catch (const std::exception& e)
 	{
-		chat_entries.push_back(ChatEntry{"error", std::string("internal error: ") + e.what()});
+		push_chat_entry("error", std::string("internal error: ") + e.what());
 	}
 	catch (...)
 	{
-		chat_entries.push_back(ChatEntry{"error", "internal error: unknown exception"});
+		push_chat_entry("error", "internal error: unknown exception");
 	}
 
 	try
@@ -1943,16 +1975,16 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		const std::string prompt = describe_setup_prompt(initial_state, initial_status);
 		if (!prompt.empty())
 		{
-			chat_entries.push_back(ChatEntry{"info", prompt});
+			push_chat_entry("info", prompt);
 		}
 	}
 	catch (const std::exception& e)
 	{
-		chat_entries.push_back(ChatEntry{"error", std::string("internal error: ") + e.what()});
+		push_chat_entry("error", std::string("internal error: ") + e.what());
 	}
 	catch (...)
 	{
-		chat_entries.push_back(ChatEntry{"error", "internal error: unknown exception"});
+		push_chat_entry("error", "internal error: unknown exception");
 	}
 
 	// An exception escaping a std::thread's entry function calls

@@ -1541,6 +1541,48 @@ consistent with how the Phase 6/7/11 nudge mechanisms it extends were also
 built incrementally against real observed transcripts rather than a
 from-scratch design.
 
+### Phase 13 — Every chat-pane entry reaches the durable log, none of it committed ✅ implemented
+
+**Goal:** the App Log panel (Phase 9) and Agent Chat panel showed different,
+incomplete pictures of the same session. Everything that round-trips
+through `agent_turn()`/`agent_tool_decision()` already logs itself
+server-side (`DroidHost::append_app_log` calls throughout
+`run_agent_tool_loop`) - but a real audit of every `chat_entries.push_back`
+call site in `cli/tui.cpp` found a second class of chat-pane content that
+never reached `logs/log.jsonl` at all: approval-flow replies ("yes"/"no" to
+a gated tool or a quick-open confirmation), the resulting "Approved."/
+"Declined."/"Cancelled." banners, clipboard-copy feedback, the new-session/
+welcome banners, and caught-exception messages. All of it was visible on
+screen and invisible in the log - a developer debugging from `logs/log.jsonl`
+alone would see a gap exactly where the human made a decision.
+
+**What shipped:**
+
+- **`DroidHost::log_chat_entry(role, text)`** (`cli/host.hpp`/`.cpp`) - a
+  public logging hook mirroring `log_quick_open_event`/`log_thread_event`'s
+  existing pattern, writing under the `"chat"` channel with
+  `direction=role`, `success=(role != "error")`.
+- **`push_chat_entry` in `cli/tui.cpp`** - a local lambda wrapping
+  `chat_entries.push_back` with a `host.log_chat_entry` call, used at every
+  site identified as previously TUI-local-only. Deliberately **not** used at
+  the three sites that are already logged server-side (the message just
+  before it's sent to `agent_turn()`, the parsed response entries flushed
+  from `chat_work.pending_entries`, and history replayed from
+  `MemoryStore` on TUI resume) - each of those is commented explaining why,
+  since logging them again would duplicate the same line under a second
+  timestamp rather than close a real gap.
+- **No new git-ignore work needed** - `logs/*`/`db/*` (only `README.md`
+  placeholders tracked) already covered this before Phase 13; this phase is
+  about *completeness* of what reaches those already-ignored files, not
+  their ignore status. Confirmed unchanged in `.gitignore`.
+
+**Verified:** `ctest` green (9/9) - this is TUI-local, real-terminal logic
+(FTXUI) with no automated coverage the way `cli/hardware_info.cpp` etc. also
+have none; correctness here is a straightforward, mechanical audit (every
+`chat_entries.push_back` call site enumerated and either converted or
+commented with why not) rather than something requiring a live model to
+exercise, unlike Phase 12's retry loop.
+
 ---
 
 ## Extension points

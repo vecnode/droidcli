@@ -351,6 +351,21 @@ public:
 	// hard to diagnose from logs/log.jsonl alone.
 	void log_quick_open_event(const core::String& summary, bool success = true);
 
+	// Public logging hook for TUI-local chat-pane entries that never round-trip
+	// through agent_turn()/agent_tool_decision() - approval-prompt replies,
+	// "Approved."/"Declined."/"Cancelled." banners, clipboard-copy feedback,
+	// new-session/resume banners, and caught-exception messages. Those calls
+	// already log themselves (every "chat" channel entry from run_agent_tool_loop
+	// goes through append_app_log); this covers everything the TUI itself
+	// prints into the chat pane without going through DroidHost first, so the
+	// durable log (logs/log.jsonl, git-ignored - see logs/README.md) and
+	// db/droidcli_memory.sqlite3's history are a complete record of what
+	// actually appeared on screen, not just the model-driven half of it.
+	// role is the same ChatEntry role string the TUI already uses
+	// ("user"/"info"/"error"/etc) - logged as-is under the "chat" channel,
+	// direction=role, success=(role != "error").
+	void log_chat_entry(const core::String& role, const core::String& text);
+
 	// Public logging hook for host-owned background threads spawned via
 	// core::spawn() (see ARCHITECTURE.md's "Spawn attribution") to report
 	// their lifecycle - "spawned"/"joined"/"threw: <what>" - under the
