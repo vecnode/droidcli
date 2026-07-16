@@ -86,6 +86,10 @@ add_executable(droidcli_intent_test tests/intent_test.cpp)
 target_link_libraries(droidcli_intent_test PRIVATE droidcli_core)
 add_test(NAME intent_test COMMAND droidcli_intent_test)
 
+add_executable(droidcli_pending_command_test tests/pending_command_test.cpp)
+target_link_libraries(droidcli_pending_command_test PRIVATE droidcli_core)
+add_test(NAME pending_command_test COMMAND droidcli_pending_command_test)
+
 add_executable(droidcli_model_provider_test tests/model_provider_test.cpp)
 target_link_libraries(droidcli_model_provider_test PRIVATE droidcli_core)
 add_test(NAME model_provider_test COMMAND droidcli_model_provider_test)

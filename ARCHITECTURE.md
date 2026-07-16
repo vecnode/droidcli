@@ -1583,6 +1583,95 @@ have none; correctness here is a straightforward, mechanical audit (every
 commented with why not) rather than something requiring a live model to
 exercise, unlike Phase 12's retry loop.
 
+### Phase 14 — Deterministic command confirmation: a plain "yes" no longer re-asks the model ✅ implemented
+
+**Goal:** a real transcript showed the model successfully create a green
+image, then - asked for a blue one - propose the (correct) ffmpeg command as
+text and ask "Would you like me to execute this command as well?" instead of
+calling the tool. The user replied "yes." That single word then had to be
+reinterpreted by the same unreliable model from scratch: it returned an
+*empty* response three times in a row (Phase 12's `kMaxEmptyRetries` caught
+this honestly), and once told twice more to just do it, fabricated a new
+constraint - "I can only execute one command at a time" - rather than ever
+calling `run_ffmpeg`. Phase 12 already makes a *failed* command retry
+itself; this phase addresses a different gap: the tool was never attempted
+at all, because a bare "yes" carries no structural signal for the model to
+act on, only more natural-language ambiguity for it to mis-resolve.
+
+**Design:** `try_quick_open_json`/`intent::parse_open_intent` already
+established the fix for this *class* of problem - when a request has a
+narrow, high-confidence, deterministically-recognizable shape, don't ask an
+unreliable local model to decide, recognize it directly. This phase applies
+the same idea to "the assistant proposed a command and asked permission,
+the user said yes."
+
+**What shipped:**
+
+- **`src/intent/pending_command.{hpp,cpp}`** (new portable core module,
+  `droidcli-tools`-shaped, `tests/pending_command_test.cpp` registered in
+  `CMakeLists.txt`, `#include`d into `droidcli_core.cpp`):
+  - `extract_proposed_command(assistant_text)` - requires BOTH a
+    permission-asking phrase ("would you like me to execute/run this?",
+    "should I run this?", etc.) AND an actual command (a fenced code block,
+    handling a bare "ffmpeg" language-hint line correctly, or a bare
+    "ffmpeg ..." line) in the same message - a message that merely *shows*
+    an example command without offering to run it must not match, same
+    false-positive discipline `parse_open_intent` already established for
+    "how do I open a file in Python."
+  - `is_bare_affirmative(message)` - a small fixed whitelist ("yes"/"y"/"do
+    it"/"go ahead"/...), not a heuristic - kept narrow because it's only
+    ever checked after `extract_proposed_command` already matched, so the
+    combined false-positive risk stays low without needing this half to be
+    permissive.
+  - Anonymous-namespace helpers had to be named uniquely
+    (`pending_command_to_lower_ascii`/`_trim_ascii`) rather than reusing
+    `open_intent.cpp`'s names of the same shape - both `.cpp` files are
+    `#include`d into the single `droidcli_core.cpp` translation unit, so
+    identically-named anonymous-namespace functions collide as duplicate
+    definitions at compile time despite living in separate source files.
+- **`DroidHost::agent_turn`** (`cli/host.cpp`) captures the previous
+  Assistant-role transcript entry before appending the new user message,
+  and - if `extract_proposed_command` matches it and `is_bare_affirmative`
+  matches the new message - executes the extracted command directly via
+  `execute_agent_tool`, bypassing `tool_call_requires_approval`'s gate
+  entirely: the user's "yes" to the assistant's own explicit offer already
+  *is* the approval, so a second "\[AGENT WANTS TO\]... approve?" prompt
+  right after would be redundant, the same reasoning `try_quick_open_json`
+  already applies to its own one-confirmation flow.
+- **Hands off to the existing loop at `hop=1`, not a parallel code path**:
+  after recording the tool result, `agent_turn` calls
+  `run_agent_tool_loop(session_id, tools, provider, 1, {}, 0, seeded_actions)`
+  - the deterministic execution replaces only hop 0's "decide which tool to
+    call" step; everything downstream (Phase 6's fabrication guard, Phase
+    12's retry-on-failure nudge reading the same `seeded_actions`, the
+    final response shape) is the same bounded loop every other turn goes
+    through, not a second, parallel tool-execution mechanism.
+- **Capability-denial detector broadened** (`looks_like_capability_denial`,
+  `cli/host.cpp`): added phrases for the fabricated-constraint variant this
+  transcript surfaced - "I can only execute one command at a time" - distinct
+  from outright denying capability, but the same underlying lie (a false
+  reason not to call a tool it can actually call again).
+
+**Explicit non-goal:** this recognizes one specific, common shape (assistant
+proposes → user confirms with a bare word) - it does not attempt to parse
+arbitrary follow-up phrasing like "yes but make it bigger" (correctly
+rejected by `is_bare_affirmative`, which requires an exact whitelist match)
+or a command proposed several turns back (only the *immediately* preceding
+Assistant message is checked). Both fall through to the normal LLM loop, same
+as anything `parse_open_intent` doesn't recognize.
+
+**Verified:** `ctest` green (10/10, including the new `pending_command_test`
+- covers the exact real transcript specimen, a language-hint fence variant,
+a bare unfenced ffmpeg line, a non-ffmpeg fenced command, and both
+false-positive-avoidance cases: an example command with no offer to run it,
+and permission phrasing with no command present). `POST /api/agent/turn`
+smoke-tested against a `--no-ai` instance to confirm the pre-existing
+disabled-AI error path is unaffected. Like Phase 12, the deterministic
+branch itself needs a live Ollama model actually proposing a command in the
+exact shape this recognizes to exercise end-to-end - not available in this
+pass, so correctness there rests on the core module's test coverage plus
+careful reading of the `agent_turn` control flow, not a live replay.
+
 ---
 
 ## Extension points
