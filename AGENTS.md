@@ -4,6 +4,24 @@ Guidance for AI coding agents (and humans) working in this repository. Keep
 changes consistent with the conventions below. This file is the canonical agent
 guide; `CLAUDE.md` defers to it.
 
+## Current focus
+
+droidcli's Core-tier feature set (provider abstraction, persistent memory,
+structured logging, task scheduling, a self-health watchdog, a read-only
+hardware inventory) is largely in place — see "Current status and next
+hardening priorities" in `ARCHITECTURE.md` for the up-to-date read and the
+ranked list of what's next (a real background service, a recurring
+scheduler, config hardening, then the Edge/Channel tier). The single largest
+area of active work right now is **agent-turn reliability**: the local
+models droidcli runs against are small and tool-calling-tuned but
+frequently unreliable, so `DroidHost::agent_turn`/`run_agent_tool_loop`
+(`cli/host.cpp`) carries a growing set of guards against specific, real
+observed failure modes — fabricated success claims, leaked model output,
+false capability denial, unretried command failures — plus a deterministic
+bypass for the highest-confidence request shapes. See the flowchart under
+"The agent turn" in `ARCHITECTURE.md` for how these fit together, and
+extension point 7 below before adding a new one.
+
 ## What this repository is
 
 **droidcli** is the **C++ agent controller and network trigger**, built as a
@@ -74,11 +92,15 @@ src/
   app/         tasks (persistent task queue)
   ai/          Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime
 cli/           droidcli host: DroidHost (config store, ConnectorRegistry +
-               TaskQueue, Ollama wiring, agent_turn tool-calling loop),
-               ProcessManager (PID-tracked launch of any launched_process
-               connector), command_runner (one-shot shell exec), HTTP route
-               mount (CustomRouteFn), droidcli.cpp entrypoint (incl. bearer
-               token resolution)
+               TaskQueue with one-shot scheduling, Ollama wiring, the
+               agent_turn tool-calling/reliability loop - see "The agent
+               turn" in ARCHITECTURE.md for its control-flow diagram),
+               MemoryStore (SQLite session history + command-fix lessons),
+               a throttled self-health watchdog, hardware_info (opt-in local
+               CPU/GPU/RAM/disk inventory), ProcessManager (PID-tracked
+               launch of any launched_process connector), command_runner
+               (one-shot shell exec), HTTP route mount (CustomRouteFn),
+               droidcli.cpp entrypoint (incl. bearer token resolution)
 tools/         mini_http_server (raw-socket HTTP server, bearer-token check,
                custom-route fallback hook) + sync_http_client (outbound HTTP/HTTPS)
 tests/         One *_test.cpp per core module (no engine, no network)
@@ -237,6 +259,24 @@ in one change so the core/host/test trio stays in sync:
      reproducible, not a one-off guess. Report what actually ran back to
      the model (a `"resolved_args"`/`"resolved_command"`-style field) so it
      can tell the user the truth instead of what it originally typed.
+7. **A deterministic recognizer that bypasses the LLM entirely** — for a
+   narrow, high-confidence request shape where waiting on (and trusting) the
+   local model's own tool-calling judgment has a demonstrated failure rate,
+   recognize the shape with pure string scanning instead. Two precedents,
+   both in `src/intent/` (portable, core, unit-tested — no LLM call, no I/O):
+   `open_intent.cpp` ("open X" phrasing → `try_quick_open_json`,
+   `cli/host.cpp`) and `pending_command.cpp` (the assistant's own previous
+   message proposed a command and asked permission → a bare "yes" executes
+   it directly, `DroidHost::agent_turn`, see "Phase 14" in `ARCHITECTURE.md`).
+   Both share the same discipline: false negatives (falling through to the
+   normal agent loop) are always safe, so recognition stays narrow and
+   requires multiple corroborating signals — a false positive that hijacks
+   an unrelated message is the failure mode to guard against, not the one to
+   optimize false negatives away. Don't reach for this for every
+   reliability problem — it's for requests with a genuinely narrow, common,
+   recognizable shape; anything else belongs in the reliability-nudge
+   mechanisms below instead (see `run_agent_tool_loop`, "The agent turn" in
+   `ARCHITECTURE.md`).
 
 **Every new core `src/<module>/*_test.cpp` must be registered in
 `CMakeLists.txt`** and pass under `ctest`.

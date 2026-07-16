@@ -107,7 +107,7 @@ Public entry point: `#include "droidcli_core.h"`.
 | `app/tasks`               | **Persistent task queue**: `Task` (incl. `result_json`), `TaskQueue` (enqueue/claim_next/complete/fail/find/list), JSON build/parse |
 | `ai/ollama_client`        | Ollama request/response shaping, incl. **tool-calling**: `ToolDefinition`/`ToolCall`, `"tools"` request field, `message.tool_calls` response parsing, `ChatRole::Tool` |
 | `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from any connector-registered inference peer. Single-shot (no tool-calling) - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
-| `ai/model_provider`       | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`) + `OllamaProvider` adapter over `ai/ollama_client`. `DroidHost::agent_turn` is coded against the interface - see "Provider abstraction" in the extension plan |
+| `ai/model_provider`       | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`) + `OllamaProvider` adapter over `ai/ollama_client`. `DroidHost::agent_turn` is coded against the interface - see "Phase 1" in the Chronological hardening log below |
 | `intent/open_intent`      | Deterministic "open X" phrase recognizer (pure string scanning, no LLM, no I/O) - backs `POST /api/apps/quick_open`, see "Quick-open" below |
 
 The droidcli host (`cli/`) additionally owns: the config store, the
@@ -375,27 +375,85 @@ you actually want.
 **Deliberately minimal**: no embeddings, no vector retrieval, no eviction
 policy. Durability (survive a restart) and queryability (`GET
 /api/agent/history`, `GET /api/agent/sessions`) are the whole scope - the
-extension plan below is explicit that semantic recall is separate,
-meaningfully bigger work that nothing in droidcli needs yet.
+"Chronological hardening log" below is explicit that semantic recall is a
+separate, meaningfully bigger piece of work that nothing in droidcli needs yet.
 
 ### The agent turn (`POST /api/agent/turn`)
 
-Drives a bounded (5-hop) tool-calling loop against a `ai::ModelProvider`
-(Ollama today via `ai::OllamaProvider` - see "Provider abstraction" in the
-extension plan below and `src/ai/model_provider.hpp`): the model sees a fixed
-tool set and can call any of them against this `DroidHost` instance before
-replying in natural language. The tool set is defined once, in
-`DroidHost::agent_tool_definitions()` (`cli/host.cpp`) - `GET
-/api/agent/tools` is its live source of truth (also rendered as the TUI's
-"Agent Tools" panel), so it's deliberately not duplicated here where it would
-just go stale as tools are added. Every message added to the transcript is
-also persisted via `MemoryStore` (see "Persistent memory" above).
+Drives a bounded (9-hop, `kMaxHops` in `cli/host.cpp` - raised from 5 once
+the retry mechanism below needed the extra room) tool-calling loop against a
+`ai::ModelProvider` (Ollama today via `ai::OllamaProvider` - see "Provider
+abstraction" in the hardening log below and `src/ai/model_provider.hpp`): the
+model sees a fixed tool set and can call any of them against this
+`DroidHost` instance before replying in natural language. The tool set is
+defined once, in `DroidHost::agent_tool_definitions()` (`cli/host.cpp`) -
+`GET /api/agent/tools` is its live source of truth (also rendered as the
+TUI's "Agent Tools" panel), so it's deliberately not duplicated here where it
+would just go stale as tools are added. Every message added to the
+transcript is also persisted via `MemoryStore` (see "Persistent memory"
+above).
 
 Side-effecting tools (anything that writes to disk, runs a shell command, or
 touches a connector/process/task) don't execute the instant the model
 requests them - the loop pauses for human approval first, and every tool
-result carries a uniform `"ok"` contract the model can trust. See "Phase 6 -
-Agent tool-result reliability & human-in-the-loop approval" below for both.
+result carries a uniform `"ok"` contract the model can trust. Most of what
+this loop actually *does* beyond "call tools until done" is reliability
+hardening earned from real, observed failures of the local model it runs
+against - see the flowchart below, then the hardening log further down for
+why each guard exists.
+
+```mermaid
+flowchart TD
+    Start(["POST /api/agent/turn\nnew user message"]) --> Pending{"Pending gated\ntool call for this\nsession?"}
+    Pending -- yes --> Abandon["Abandon it - record a\nsystem note in the transcript\n(Phase 6)"]
+    Abandon --> Deterministic
+    Pending -- no --> Deterministic{"Previous assistant message\nproposed a command AND\nthis message is a bare\n'yes'? (Phase 14)"}
+
+    Deterministic -- yes --> RunSeeded["Execute the proposed command\ndirectly - bypasses the approval\ngate, the user's 'yes' to the\nassistant's own offer already IS it"]
+    RunSeeded --> HopLoop
+
+    Deterministic -- no --> HopLoop["Hop loop (hop = 0..kMaxHops-1)"]
+
+    HopLoop --> Ask["provider.build_request(transcript, tools)\n→ Ollama"]
+    Ask --> Empty{"Empty response?\n(no text, no tool_calls)"}
+    Empty -- "yes, budget left" --> Retry["Retry same hop\n(kMaxEmptyRetries = 2)"]
+    Retry --> Ask
+    Empty -- "yes, exhausted" --> EmptyFinal["ok:true, placeholder text -\nnever surfaced as silence"]
+
+    Empty -- no --> HasTools{"Response has\ntool_calls?"}
+
+    HasTools -- yes --> Gated{"tool_call_requires_approval?\n(run_command, run_ffmpeg,\nwrite_file, open_application,\nlaunch/stop_connector, enqueue_task)"}
+    Gated -- yes --> Pause["Pause - return\npending_tool_call\n(POST /api/agent/tool_decision\nresolves it)"]
+    Gated -- no --> Execute["execute_agent_tool()\nrecord result in transcript"]
+    Execute --> NextHop["hop += 1"]
+    NextHop --> HopLoop
+
+    HasTools -- no --> Fabricated{"Fabrication checks\n(Phase 6/7/11/12)"}
+    Fabricated -- "unverified action claim\n(claim + no successful\ntool call this turn)" --> NudgeClaim["Nudge once\n(kMaxUnverifiedClaimNudges = 1)"]
+    Fabricated -- "leaked role token\n('assistant\\n\\n...')" --> NudgeClaim
+    Fabricated -- "capability denial\n('I can only assist',\n'one command at a time')" --> NudgeDenial["Nudge\n(shares kMaxCommandRetryNudges\nbudget = 3)"]
+    Fabricated -- "last action this turn was\na failed run_command/\nrun_ffmpeg" --> NudgeRetry["Inject the real failure_reason,\ndemand a corrected retry\n(kMaxCommandRetryNudges = 3)"]
+
+    NudgeClaim -- "budget left" --> HopLoop
+    NudgeDenial -- "budget left" --> HopLoop
+    NudgeRetry -- "budget left" --> HopLoop
+
+    NudgeClaim -- exhausted --> Honest["Override with an honest\nrefusal/last-real-error -\nnever pass the fabrication\nor the exhausted retry through"]
+    NudgeDenial -- exhausted --> Honest
+    NudgeRetry -- exhausted --> Honest
+
+    Fabricated -- none matched --> Final["Final assistant text,\nok:true, actions[] logged"]
+    Honest --> Final
+    EmptyFinal --> Final
+```
+
+The loop is deliberately linear and single-threaded per turn - no
+speculative parallel tool calls, no background continuation after the HTTP
+response returns (a model claiming otherwise is always wrong, see
+`looks_like_degenerate_role_leak`/`kOngoingProcessPhrases` in the hardening
+log). Every arrow that isn't a straight hop-to-hop transition exists because
+a specific, real transcript showed the local model fail that way - the
+hardening log below is the incident-by-incident record of why.
 
 ```sh
 curl -X POST http://127.0.0.1:30080/api/agent/turn \
@@ -417,7 +475,7 @@ Response shape:
 }
 ```
 
-If Ollama is disabled or unreachable, or the transcript budget (5 hops) runs
+If Ollama is disabled or unreachable, or the transcript budget (9 hops) runs
 out before a final natural-language reply, the response is still valid JSON
 (`ok:false` with an `error`, or `ok:true` with `budget_exhausted:true` and the
 last assistant text) rather than a crash. The model also never gets a blank
@@ -483,16 +541,21 @@ once instead of re-litigated per feature.
 **Bootstrapped self-knowledge, not blank-slate prompting.** The daemon already
 knows facts about the machine it runs on before the user ever types anything -
 the installed-apps index (`app_index.cpp`, scanned once at
-`DroidHost::initialize()`), the open-window snapshot (`window_list.cpp`), and
-`which`/PATH resolution. `HostConfig::system_prompt` and the count appended in
-`DroidHost::agent_turn()` (`cli/host.cpp`) exist to turn that bootstrapped
-state into something the model is *told as fact*, not something it has to be
-argued into believing it can do. As more startup-time system facts get added
-(installed shells/interpreters, GPU presence, disk space, logged-in user),
-the same pattern applies: scan once at `initialize()`, cache on `DroidHost`,
-and fold a concrete summary into the system prompt rather than leaving it
-purely tool-call-discoverable - a model should never have to be told twice
-that a capability exists.
+`DroidHost::initialize()`), the open-window snapshot (`window_list.cpp`),
+`which`/PATH resolution, and - since Phase 10 - CPU/GPU/RAM/disk inventory
+(`hardware_info.cpp`, opt-in via `--enable-hardware-scan`) and, since Phase 9,
+a live self-health snapshot (`self_status`: cached Ollama reachability,
+connector/task counts, recent failures) rather than only startup-time facts.
+`HostConfig::system_prompt` and the count appended in `DroidHost::agent_turn()`
+(`cli/host.cpp`) exist to turn that bootstrapped state into something the
+model is *told as fact*, not something it has to be argued into believing it
+can do. As more system facts get added (installed shells/interpreters,
+logged-in user, network interfaces), the same pattern applies: scan once at
+`initialize()` (or, for something that can change mid-run, check it on a
+throttled cadence the way Phase 9's watchdog does), cache on `DroidHost`, and
+fold a concrete summary into the system prompt rather than leaving it purely
+tool-call-discoverable - a model should never have to be told twice that a
+capability exists.
 
 **No MCP client, ever (see `AGENTS.md` guardrails).** Every new capability is
 a new `DroidHost` method plus a matching `agent_tool_definitions()` /
@@ -623,7 +686,7 @@ vocabulary, not a claim that droidcli is secretly an 18-target build.
 | `zeroclaw-gateway` | `droidcli-gateway` | HTTP/WebSocket gateway, web dashboard, webhook ingress | `tools::MiniHttpServer` + `cli/http_mount.cpp` | **Partial** — REST exists; no WebSocket, no dashboard UI, webhook auth is the same bearer-token gate as everything else |
 | `zeroclaw-tools` | `droidcli-tools` | Callable tool implementations (browser, HTTP, PDF, hardware probes) | `filesystem_tools.cpp`, `command_runner.cpp`, `window_list.cpp`, `app_index.cpp`, `intent/open_intent.cpp`, `ffmpeg_tool.cpp`, `system_info.cpp` | **Have**, functionally — not split into a separate module boundary, all linked straight into `cli/`/`src/`. `system_info.cpp` is droidcli's environment-grounding tool (OS, architecture, real Desktop path via the Windows Known Folder API - Phase 7, done) - the ZeroClaw comparison doesn't have a named equivalent for "know what machine you're actually on," but it's the same self-contained-capability shape as every other tool here |
 | `zeroclaw-tool-call-parser` | `droidcli-providers` *(folded in, not a separate module)* | Model-side tool-call syntax parsing/normalization | `ai::ollama_client`'s `tool_calls` JSON parsing | **Partial** — handles Ollama's native tool-call format only, nothing to normalize across providers since there's only one |
-| `zeroclaw-memory` | `droidcli-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability + procedural memory, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); the same database also now holds `command_lessons` - model-recorded "this broke, this fixed it" pairs the agent can search before repeating a past mistake (Phase 8, done) - a form of procedural/lessons-learned memory, distinct from conversation history but living in the same store; still no embeddings, no vector retrieval - deliberately out of scope, see the extension plan below |
+| `zeroclaw-memory` | `droidcli-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability + procedural memory, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); the same database also now holds `command_lessons` - model-recorded "this broke, this fixed it" pairs the agent can search before repeating a past mistake (Phase 8, done) - a form of procedural/lessons-learned memory, distinct from conversation history but living in the same store; still no embeddings, no vector retrieval - deliberately out of scope, see "Chronological hardening log" below |
 | `zeroclaw-plugins` | — | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
 | `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | `droidcli-hardware` *(proposed — see "Hardware awareness" below, not yet built)* | GPIO/I2C/SPI/USB, specialized hardware | None | **Under discussion, scoped narrower than the ZeroClaw crate** — read-only local hardware/environment enumeration (what's plugged in, where this machine is), explicitly not GPIO/robotics control; see the new section below for why the original "not planned" verdict is being revisited for a narrower slice |
 | `zeroclaw-infra` | `droidcli-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `db/droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); a throttled watchdog now exists too (`DroidHost::tick_watchdog()`, Phase 9 - folded into the existing poll loop rather than a separate debouncer/thread abstraction) |
@@ -632,73 +695,93 @@ vocabulary, not a claim that droidcli is secretly an 18-target build.
 | `zeroclaw-macros` | — | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |
 | `zerocode` | `droidcli-tui` | Terminal UI | `cli/tui.cpp` (FTXUI) | **Have** |
 
-### What this means for droidcli
+### Current status and next hardening priorities
 
-The honest read, as of Phases 1–3 and 5 landing: droidcli now has a real
-provider abstraction, durable/queryable session memory, structured JSONL
-logging, and named/observable background threads - every Core-tier gap
-against ZeroClaw except a proper `Channel`/`Memory`/`Observer` trait layer is
-closed at the concrete-implementation level. What's left is **no Edge tier**
-(no `channels`, a minimal `gateway`) - Phase 4, deliberately not started
-until a specific channel is wanted. That's consistent with what droidcli
-actually is right now — a single-machine, single-operator daemon reached
-over localhost HTTP or an in-process TUI, not yet a multi-channel assistant
-reachable from
-Discord/Slack/email.
+**As of Phase 14**, every Core-tier gap the original ZeroClaw comparison
+identified is closed at the concrete-implementation level except a formal
+`Channel`/`Memory`/`Observer` trait layer (which nothing in droidcli needs
+yet - see below): a real provider abstraction, durable/queryable session
+memory with a procedural "lessons learned" store, structured JSONL logging,
+named/observable background threads, self-health awareness with a folded-in
+watchdog, one-shot task scheduling, a read-only local hardware inventory,
+and - the largest single area of investment across Phases 6-14 - a
+reliability layer around the agent-turn loop that catches and corrects
+fabricated success claims, leaked model output, false capability denial,
+and unretried command failures in real time, plus a deterministic bypass for
+the highest-confidence request shapes (open an app, confirm a proposed
+command) so those never depend on the local model's tool-calling judgment
+at all. See the flowchart above for how those pieces fit together, and the
+hardening log below for the incident that motivated each one.
 
-Extension work, roughly in the order it would need to land to close the gap,
-without pretending a crate-per-crate port is the right target for a C++
-static library:
+**What droidcli still is, honestly:** a single-machine, single-operator
+daemon reached over localhost HTTP or an in-process TUI - not yet a
+background service that survives logoff/reboot, not yet reachable from a
+messaging platform, and still driven by whatever local model is loaded (this
+session's transcripts were all against small, tool-calling-tuned but
+frequently unreliable local models - the reliability layer above exists
+*because of*, not despite, that choice). Closing those gaps, roughly in
+priority order:
 
-1. ✅ **A real provider abstraction** — `ai::ModelProvider` (`src/ai/model_provider.hpp`)
-   exists; `agent_turn` (`cli/host.cpp`) is coded against the interface, not
-   `ai::ollama_client` directly. A second LLM backend (Anthropic/OpenAI/...)
-   is now additive: implement the interface, construct it instead of
-   `OllamaProvider` where it's selected. See "Phase 1" below for what
-   shipped and what's deliberately still out of scope (no router, no
-   multi-provider selection logic - nothing to route between yet).
-2. ✅ **Persistent, queryable memory** — `MemoryStore` (`cli/memory_store.hpp`,
-   SQLite-backed, matching `zeroclaw-infra`'s choice) now persists every
-   `agent_turn` message per-session; `GET /api/agent/history`/`GET
-   /api/agent/sessions` make it queryable. Verified: kill and restart
-   droidcli mid-conversation, resume with the same `session_id`, the history
-   is still there. See "Phase 2" below - embeddings/vector retrieval remain
-   explicitly out of scope.
-3. ✅ **Structured (JSONL) logging** — `append_app_log()` (`cli/host.cpp`)
-   writes `logs/log.jsonl` now, one JSON object per line, with `session_id`
-   attribution on `"chat"`-channel entries so a log line correlates with a
-   `MemoryStore` session. See "Phase 3" below - `hop_index` and an `Observer`
-   subscription mechanism remain deliberately out of scope for now.
-4. **A `Channel` concept, only once a channel is actually wanted** — do not
+1. **A real background service (`--daemon` is still a documented no-op).**
+   `--headless` (skip the TUI, keep the HTTP loop) is already the correct
+   foundation - a Windows Service (`ServiceMain`/`RegisterServiceCtrlHandler`)
+   and a systemd unit are two more host-side entry points around the same
+   `DroidHost`, not a redesign. This is the highest-leverage remaining item:
+   "always ready to act" (see the self-status/watchdog work in Phase 9) means
+   little if the process itself doesn't survive a reboot.
+2. **A recurring scheduler, not just one-shot delay.** Phase 9's
+   `Task::scheduled_for_ms` answers "run this once, in N minutes" - it does
+   not answer "run this every N minutes" (a cron/SOP concept). `TaskQueue`
+   would need a `recurrence` field and `tick_tasks()` would need to
+   re-enqueue on completion rather than terminate - additive to what already
+   exists, not a rewrite.
+3. **Config hardening**: flat JSON/CLI flags today, no TOML schema, no
+   autonomy levels, no workspace concept, and the bearer token is plaintext
+   (env var or CLI arg, never echoed back - see `CLAUDE.md`). A packaged,
+   unattended daemon (item 1) is a materially higher-value credential target
+   than an interactively-run one, so this should land before or alongside
+   real background operation, not after.
+4. **A `Channel` concept, only once a channel is actually wanted** - do not
    build `zeroclaw-channels`-equivalent plumbing speculatively. `Connector`
    already generalizes "a peer droidcli talks to"; a messaging channel is a
    new `Connector` kind (`kind: "messaging_peer"` or similar) plus inbound
    webhook handling in `http_mount.cpp`, not a new subsystem. `MemoryStore`'s
-   session model (Phase 2) is what would key each external conversation's
-   history once this lands.
-5. ✅ **`zeroclaw-spawn`'s attribution idea, not its `tokio` mechanism** —
-   `core::spawn()` (`src/core/spawn.hpp`) names each background thread and
-   reports "spawned"/"joined"/"threw: ..." through `DroidHost::log_thread_event`
-   into the structured log from (3). `cli/tui.cpp`'s `poller` and
-   `chat_worker` both go through it now. See "Phase 5" below.
+   session model is what would key each external conversation's history
+   once this lands.
+5. **A second `ai::ModelProvider` implementation** (Anthropic/OpenAI/...) -
+   the interface (Phase 1) already exists and `agent_turn` is coded against
+   it, so this is additive: implement the interface, construct it instead of
+   `OllamaProvider` where it's selected. Deliberately not started
+   speculatively - there's nothing to route between until a second
+   implementation is actually needed, and a real local-model reliability
+   story (Phases 6-14) mattered more first.
 
-`zeroclaw-hardware`/`aardvark-sys`/`robot-kit` and `zeroclaw-plugins` are
-intentionally out of scope — see the "No engine code" and "droidcli does not
-consume MCP servers" guardrails in `AGENTS.md`. Nothing above should be read
-as a commitment to build all five; it is a menu, ordered by how much later
-work each one unblocks, for when a specific product need asks for it.
+`zeroclaw-plugins` (dynamic plugin loading) remains intentionally out of
+scope - see the "droidcli does not consume MCP servers" guardrail in
+`AGENTS.md`; capabilities are native `DroidHost` methods, not a loadable
+surface. `zeroclaw-hardware`'s original GPIO/I2C/SPI/USB *device-control*
+scope also remains out of scope (see the "No engine code" guardrail) - Phase
+10's read-only hardware *inventory* is a deliberately narrower slice of that
+crate, not a reversal of the guardrail against device control.
 
 ---
 
-## Extension implementation plan (ZeroClaw parity)
+## Chronological hardening log
 
-Concrete, phased version of the ranked list above. Each phase is scoped to
-land independently — no phase requires a later one to compile, pass
-`ctest`, or be useful on its own. Do not start a phase before the previous
-one has landed; the ordering exists because each phase's interface choices
-constrain the next (the memory store in Phase 2 is keyed by whatever Phase
-1's provider abstraction settles on, the log schema in Phase 3 is the
-foundation Phase 5's attribution rides on).
+The full phase-by-phase record behind "Current status and next hardening
+priorities" above - read that section first for where droidcli actually
+stands today; treat this as the changelog/appendix that explains *why* each
+piece exists, not the entry point. Phases 1-5 were planned, ranked extension
+work (closing the original ZeroClaw Core-tier gaps); Phases 6 onward are
+overwhelmingly incident-driven - each one exists because a real transcript
+showed the local model fail in a specific, reproducible way, not because it
+was on a roadmap in advance. Each phase is scoped to land independently — no
+phase requires a later one to compile, pass `ctest`, or be useful on its
+own. Do not start a phase before the previous one has landed; the ordering
+exists because each phase's interface choices constrain the next (the
+memory store in Phase 2 is keyed by whatever Phase 1's provider abstraction
+settles on, the log schema in Phase 3 is the foundation Phase 5's
+attribution rides on).
 
 ### Phase 1 — Provider abstraction ✅ implemented
 
@@ -1001,8 +1084,10 @@ folded into a `## Extension points` bullet.
   `PendingOpen` "open this app?" confirmation flow rather than inventing a
   second pattern for the same kind of interaction.
 - **Reliability safety nets in `run_agent_tool_loop`**, each bounded
-  separately from the 5-hop tool-calling budget so they cost at most one
-  extra round-trip, never an infinite loop:
+  separately from the tool-calling hop budget (5 at the time this phase
+  landed, raised to 9 in Phase 12 once more of these nets needed their own
+  slice of it) so they cost at most one extra round-trip, never an infinite
+  loop:
   - *Empty-response retry* - a local tool-use model occasionally returns
     neither assistant text nor a tool call for a hop
     (`ai::ProviderResponse::http_success` stays `true`; there's just nothing
