@@ -58,7 +58,13 @@ const Connector* ConnectorRegistry::find_connector(const core::String& connector
 core::String build_connectors_json(const core::Array<Connector>& connectors)
 {
 	std::ostringstream stream;
-	stream << "{\"connectors\":[";
+	// "ok" first - this is also the list_connectors agent tool's result
+	// (see AGENTS.md's hard rule); a listing can't really fail, but the
+	// model's fabrication-guard scan (a_tool_call_already_succeeded_this_turn,
+	// cli/host.cpp) checks every action's result_json for this field, so its
+	// absence here previously made a legitimate, already-executed tool call
+	// invisible to that check.
+	stream << json_bool_field("ok", true) << ",\"connectors\":[";
 	for (size_t index = 0; index < connectors.size(); ++index)
 	{
 		if (index > 0)

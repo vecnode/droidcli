@@ -455,6 +455,16 @@ log). Every arrow that isn't a straight hop-to-hop transition exists because
 a specific, real transcript showed the local model fail that way - the
 hardening log below is the incident-by-incident record of why.
 
+**The "Fabricated checks" diamond above only works if every tool's JSON
+carries `"ok"`.** `a_tool_call_already_succeeded_this_turn` (the check that
+protects a truthful "I did it" from being second-guessed) works by scanning
+each action's `result_json` for `"ok":true` - a tool missing that field is
+invisible to it, and a genuinely successful call can get overridden with a
+false "I wasn't able to complete this" as a result. This happened for real
+(`open_application`, see "Phase 15" below) - any new agent tool must return
+`"ok"` as its first field or it silently weakens every guard in this
+diagram, not just its own correctness.
+
 ```sh
 curl -X POST http://127.0.0.1:30080/api/agent/turn \
   -H "Authorization: Bearer <token>" \
@@ -1756,6 +1766,83 @@ branch itself needs a live Ollama model actually proposing a command in the
 exact shape this recognizes to exercise end-to-end - not available in this
 pass, so correctness there rests on the core module's test coverage plus
 careful reading of the `agent_turn` control flow, not a live replay.
+
+### Phase 15 — Found the actual cause of "the agent lies after a real success," plus clipboard/file-management tools ✅ implemented
+
+**Goal:** a real transcript showed `open_application` genuinely launch
+Notepad (PID logged, `"launched":true`) - and the very next hop still got
+overridden with "I wasn't actually able to complete this," the same
+fabrication-guard override Phase 6/11 built to catch a *false* claim of
+success. This time the claim wasn't false. Tracing `a_tool_call_already_
+succeeded_this_turn` (`cli/host.cpp`, the check that's supposed to protect a
+truthful "I did it" from being second-guessed) found the actual defect: it
+works by scanning each action's `result_json` for `"ok":true` - and
+`open_application`'s JSON never had an `"ok"` field at all, only
+`"launched"`. The scan found nothing to trust, concluded no tool had
+succeeded, and let the override fire on a real success. This is exactly the
+failure `AGENTS.md`'s hard rule ("every agent-tool result carries `"ok"`,
+first field, always") exists to prevent - it had quietly regressed for one
+tool.
+
+**What shipped:**
+
+- **A full audit of every function reachable through `execute_agent_tool`**
+  turned up nine gaps, not one: `open_application` (missing entirely -
+  the confirmed cause above), `launch_connector`/`stop_connector` (had
+  `"success"` instead, the same historical naming gap `enqueue_task` had
+  before Phase 9's fix), and five read-only tools whose result had no
+  top-level `"ok"` at all - `list_connectors` (`net::build_connectors_json`),
+  `list_tasks` (`app::build_tasks_json`), `find_application`,
+  `list_open_windows`, `get_cwd`, `get_system_info`. All nine fixed. The
+  fabrication guard's success-scan runs over *every* action recorded this
+  turn, not just gated ones, so a read-only tool missing `"ok"` carried the
+  same risk of masking a real success recorded earlier in the same turn -
+  this wasn't only an issue for side-effecting tools.
+  `call_connector` is a deliberate exception: on success it returns the
+  proxied `http_peer`'s own response body verbatim, and injecting an `"ok"`
+  into a third party's response would misrepresent what that peer actually
+  said, not fix anything.
+- **Clipboard access**: new `cli/clipboard.{hpp,cpp}` (`read_text_from_
+  clipboard`/`write_text_to_clipboard`, Windows `CF_UNICODETEXT`, same
+  precedent as `command_runner.cpp`/`process_manager.cpp` being
+  Windows-first) - one implementation, shared by the TUI's existing `'y'`
+  transcript-copy keybinding (previously its own private copy of the same
+  Win32 calls) and two new agent tools: `read_clipboard` (read-only, not
+  gated) and `write_clipboard` (gated).
+- **File copy/move/delete**: `copy_file`/`move_path`/`delete_file` added to
+  `filesystem_tools.{hpp,cpp}`, all gated
+  (`tool_call_requires_approval`) - "asking for permission by default" per
+  the request that motivated this. `copy_file`/`delete_file` are
+  deliberately scoped to single files, not directories (`ok:false` with a
+  clear error otherwise) - a narrower, safer first cut than a recursive
+  tree copy or delete; `move_path` covers files or directories since
+  `std::filesystem::rename` does so safely in one atomic-per-volume
+  operation. New `GET/POST /api/clipboard`, `POST /api/fs/copy`,
+  `POST /api/fs/move`, `POST /api/fs/delete` routes.
+- **TUI panel redesign** (`cli/tui.cpp`): the "Agent Tools" panel no longer
+  lists the full static tool catalog (`GET /api/agent/tools` still exists
+  and remains the canonical list) - it's now a live activity terminal
+  derived from the same `LogRow` stream the App Log panel already polls,
+  filtered to real tool executions (`"tool <name>(...) -> ..."` under the
+  `"chat"` channel) and showing just the name, timestamped, colored by
+  success. A new "Apps" panel below it does the same for
+  launched/controlled applications (`"open"`/`"process"` channels, plus a
+  confirmed `"quick_open"` launch). All four left-column panels
+  (Connectors/Tasks/Agent Tools/Apps) now share equal flex weight so Agent
+  Tools is exactly as tall as Tasks, not whatever content-driven sizing
+  FTXUI would otherwise give it.
+
+**Explicit non-goal:** no recursive directory copy/delete (see above); no
+POSIX clipboard implementation (matches every other Windows-first module in
+`cli/`); the Agent Tools/Apps panels are read-only activity views, not a
+separate approval surface - the existing `PendingToolApproval`/quick-open
+confirmation flows are unchanged.
+
+**Verified:** `ctest` green (10/10, no regressions). Smoke-tested against a
+running `--no-ai` instance: clipboard write-then-read round-tripped exact
+text; copy → move → delete chained correctly end-to-end (confirmed via
+`ls`, not just the JSON response) and directory-delete correctly refused
+with a clear error instead of attempting anything destructive.
 
 ---
 

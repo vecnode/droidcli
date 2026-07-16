@@ -120,6 +120,7 @@ add_executable(droidcli
     cli/app_index.cpp
     cli/command_runner.cpp
     cli/droidcli.cpp
+    cli/clipboard.cpp
     cli/ffmpeg_tool.cpp
     cli/filesystem_tools.cpp
     cli/hardware_info.cpp

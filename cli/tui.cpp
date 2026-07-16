@@ -1,5 +1,6 @@
 #include "tui.hpp"
 
+#include "clipboard.hpp"
 #include "net/json.hpp"
 
 #include <ftxui/component/component.hpp>
@@ -150,31 +151,6 @@ std::vector<TaskRow> parse_tasks(const std::string& json)
 		net::extract_json_int_field(object, "scheduled_for_ms", scheduled_for_ms);
 		row.scheduled_for_ms = scheduled_for_ms;
 		if (!row.id.empty())
-		{
-			rows.push_back(row);
-		}
-	}
-	return rows;
-}
-
-struct ToolRow {
-	std::string name;
-	std::string description;
-};
-
-// The agent's fixed tool set (GET /api/agent/tools) - fetched once at
-// startup, not polled like tasks/connectors, since it never changes while
-// droidcli is running (agent_tool_definitions() is a fixed list built at
-// call time from DroidHost's own methods, not runtime state).
-std::vector<ToolRow> parse_tools(const std::string& json)
-{
-	std::vector<ToolRow> rows;
-	for (const std::string& object : extract_json_object_array(json, "tools"))
-	{
-		ToolRow row;
-		row.name = net::extract_json_string_field(object, "name");
-		row.description = net::extract_json_string_field(object, "description");
-		if (!row.name.empty())
 		{
 			rows.push_back(row);
 		}
@@ -604,59 +580,13 @@ std::string to_lower(const std::string& value)
 	return result;
 }
 
-// Copies `text` (UTF-8) to the OS clipboard. Windows-only for now, matching
-// this codebase's existing Windows-first precedent (command_runner.cpp,
-// process_manager.cpp) - a POSIX implementation (X11/Wayland clipboard, or
-// shelling out to pbcopy on macOS) is a reasonable future addition but not
-// implemented here.
+// Copies `text` (UTF-8) to the OS clipboard - now a thin wrapper over
+// cli::write_text_to_clipboard (clipboard.hpp/.cpp), shared with the
+// read_clipboard/write_clipboard agent tools (Phase 15, ARCHITECTURE.md)
+// rather than a second, TUI-only implementation of the same Win32 calls.
 bool copy_text_to_clipboard(const std::string& text)
 {
-#ifdef _WIN32
-	if (!OpenClipboard(nullptr))
-	{
-		return false;
-	}
-
-	// CF_UNICODETEXT (not CF_TEXT) so non-ASCII chat content - emoji from a
-	// model's reply, non-English text, etc. - survives the copy intact.
-	const int wide_length = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
-	if (wide_length <= 0)
-	{
-		CloseClipboard();
-		return false;
-	}
-
-	const HGLOBAL buffer_handle = GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(wide_length) * sizeof(wchar_t));
-	if (buffer_handle == nullptr)
-	{
-		CloseClipboard();
-		return false;
-	}
-
-	wchar_t* buffer = static_cast<wchar_t*>(GlobalLock(buffer_handle));
-	if (buffer == nullptr)
-	{
-		GlobalFree(buffer_handle);
-		CloseClipboard();
-		return false;
-	}
-	MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, buffer, wide_length);
-	GlobalUnlock(buffer_handle);
-
-	EmptyClipboard();
-	// The clipboard owns buffer_handle after a successful SetClipboardData -
-	// do not GlobalFree it ourselves.
-	const bool ok = SetClipboardData(CF_UNICODETEXT, buffer_handle) != nullptr;
-	if (!ok)
-	{
-		GlobalFree(buffer_handle);
-	}
-	CloseClipboard();
-	return ok;
-#else
-	(void)text;
-	return false;
-#endif
+	return write_text_to_clipboard(text).ok;
 }
 
 // One line describing what the user should type next for a given setup
@@ -845,9 +775,6 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	std::vector<std::string> connector_entries;
 	int selected_connector = 0;
 	std::vector<TaskRow> tasks;
-	// Fetched once here (not part of PolledState's periodic refresh) since
-	// the tool set is fixed for the process lifetime - see parse_tools().
-	const std::vector<ToolRow> tools = parse_tools(host.build_agent_tools_json());
 	std::vector<LogRow> log_lines;
 	std::vector<ChatEntry> chat_entries;
 	// Resizable-split pane widths (columns) - mutated directly by
@@ -1027,21 +954,95 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return vbox(rows) | frame | flex;
 	});
 
+	// A live activity terminal, not the static full tool catalog (GET
+	// /api/agent/tools still exists and is the canonical list for anyone
+	// who wants it - see ARCHITECTURE.md) - only tools actually invoked this
+	// session, most recent at the bottom, derived from the same log_lines
+	// the App Log panel already polls. A real tool execution is logged as
+	// "tool <name>(...) -> ..." under the "chat" channel (see
+	// execute_agent_tool call sites in cli/host.cpp) - this filters to
+	// exactly that line shape and pulls out just the name, so this panel
+	// answers "what has the agent actually run" at a glance instead of
+	// listing everything it's theoretically capable of.
 	Component tools_view = Renderer([&]() -> Element
 	{
 		Elements rows;
-		for (const ToolRow& tool : tools)
+		for (const LogRow& row : log_lines)
 		{
+			if (row.channel != "chat")
+			{
+				continue;
+			}
+			const bool declined = row.summary.rfind("tool declined ", 0) == 0;
+			const bool executed = !declined && row.summary.rfind("tool ", 0) == 0;
+			if (!declined && !executed)
+			{
+				continue;
+			}
+			const std::string prefix = declined ? "tool declined " : "tool ";
+			const std::string rest = row.summary.substr(prefix.size());
+			const size_t paren = rest.find('(');
+			const std::string tool_name = paren == std::string::npos ? rest : rest.substr(0, paren);
 			rows.push_back(hbox({
-				text(tool.name) | bold | size(WIDTH, EQUAL, 20),
-				paragraph(tool.description) | flex,
+				text("[" + row.timestamp + "] ") | dim,
+				text(tool_name) | bold | color(row.success ? Color::Green : Color::Red),
 			}));
 		}
-		if (tools.empty())
+		if (rows.empty())
 		{
-			rows.push_back(text("(no tools reported)") | dim);
+			rows.push_back(text("(no tools used yet this session)") | dim);
 		}
-		return vbox(rows) | frame | flex;
+		else
+		{
+			// Keep pinned to the newest entry, same rationale as log_view.
+			rows.back() |= focus;
+		}
+		return vbox(rows) | yframe | flex;
+	});
+
+	// Same "live terminal from the log" approach as tools_view above, for
+	// apps droidcli has launched or otherwise controls: open_application
+	// calls ("open" channel), launched_process connector launch/stop
+	// ("process" channel), and a confirmed quick-open launch ("quick_open"
+	// channel, only the "launching" entries - not the recognition/decline
+	// ones, which aren't a launch).
+	Component apps_view = Renderer([&]() -> Element
+	{
+		Elements rows;
+		for (const LogRow& row : log_lines)
+		{
+			std::string label;
+			if (row.channel == "open" || row.channel == "process")
+			{
+				label = row.summary;
+			}
+			else if (row.channel == "quick_open")
+			{
+				const size_t pos = row.summary.find("launching ");
+				if (pos == std::string::npos)
+				{
+					continue;
+				}
+				label = row.summary.substr(pos + 10);
+			}
+			else
+			{
+				continue;
+			}
+			rows.push_back(hbox({
+				text("[" + row.timestamp + "] ") | dim,
+				text(label) | color(row.success ? Color::Green : Color::Red),
+			}));
+		}
+		if (rows.empty())
+		{
+			rows.push_back(text("(no apps launched yet this session)") | dim);
+		}
+		else
+		{
+			rows.back() |= focus;
+		}
+		return vbox(rows) | yframe | flex;
 	});
 
 	// Mounted into right_column below (see "Phase 9" in ARCHITECTURE.md).
@@ -1722,10 +1723,14 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// nesting the resizable-split layout introduces.
 	Component left_column = Renderer(connector_menu, [&]() -> Element
 	{
+		// All four panels share equal flex weight, so "Agent Tools" is
+		// exactly as tall as "Tasks" (and Connectors/Apps) rather than
+		// whatever FTXUI's default content-driven sizing would give it.
 		Element connectors_panel = window(text(" Connectors  (l=launch, s=stop) "), connector_menu->Render()) | flex;
 		Element tasks_panel = window(text(" Tasks "), tasks_view->Render()) | flex;
 		Element tools_panel = window(text(" Agent Tools "), tools_view->Render()) | flex;
-		return vbox({ connectors_panel, tasks_panel, tools_panel });
+		Element apps_panel = window(text(" Apps "), apps_view->Render()) | flex;
+		return vbox({ connectors_panel, tasks_panel, tools_panel, apps_panel });
 	});
 
 	Component chat_column = Renderer(chat_input, [&]() -> Element

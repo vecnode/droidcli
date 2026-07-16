@@ -5,6 +5,7 @@
 #include "app/tasks.hpp"
 #include "process_manager.hpp"
 #include "filesystem_tools.hpp"
+#include "clipboard.hpp"
 #include "app_index.hpp"
 #include "memory_store.hpp"
 #include "window_list.hpp"
@@ -241,6 +242,24 @@ public:
 	core::String get_cwd_json() const;
 	// body: {"name":"..."}. Resolves an executable against PATH.
 	core::String which_executable_json(const core::String& body);
+	// body: {"source_path":"...","destination_path":"..."}. Files only, not
+	// directories; overwrites an existing destination file. Gated (see
+	// tool_call_requires_approval) - see "Phase 15" in ARCHITECTURE.md.
+	core::String copy_file_json(const core::String& body);
+	// body: {"source_path":"...","destination_path":"..."}. Files or
+	// directories (std::filesystem::rename); overwrites an existing
+	// destination file. Gated.
+	core::String move_path_json(const core::String& body);
+	// body: {"path":"..."}. Files only, not directories - no recursive delete.
+	// Gated.
+	core::String delete_file_json(const core::String& body);
+
+	// OS clipboard access (Phase 15, ARCHITECTURE.md) - the same
+	// implementation cli/tui.cpp's 'y' (copy chat transcript) keybinding
+	// uses (cli/clipboard.hpp). No arguments; read is not gated (read-only).
+	core::String read_clipboard_json() const;
+	// body: {"text":"..."}. Replaces the clipboard's current content. Gated.
+	core::String write_clipboard_json(const core::String& body);
 
 	// The host machine droidcli is actually running on (GET /api/system) -
 	// os_name/os_version/architecture/hostname/username/cwd, queried once at

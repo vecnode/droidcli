@@ -207,6 +207,31 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.which_executable_json(request.body));
 			return true;
 		}
+		if (is_post && path == "/api/fs/copy")
+		{
+			set_json(response, host.copy_file_json(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/fs/move")
+		{
+			set_json(response, host.move_path_json(request.body));
+			return true;
+		}
+		if (is_post && path == "/api/fs/delete")
+		{
+			set_json(response, host.delete_file_json(request.body));
+			return true;
+		}
+		if (is_get && path == "/api/clipboard")
+		{
+			set_json(response, host.read_clipboard_json());
+			return true;
+		}
+		if (is_post && path == "/api/clipboard")
+		{
+			set_json(response, host.write_clipboard_json(request.body));
+			return true;
+		}
 		if (is_get && path == "/api/system")
 		{
 			set_json(response, host.build_system_info_json());
