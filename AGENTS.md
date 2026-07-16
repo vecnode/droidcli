@@ -270,6 +270,16 @@ in one change so the core/host/test trio stays in sync:
      second copy. Anything with *any* directory information at all, even a
      relative one, is left untouched as the caller having already specified
      where.
+   - **If the tool can fail in a way the model has enough information to fix
+     itself** (a bad path, a bad argument — anything where the failure
+     reason points at a concrete correction, not an external/permanent
+     condition), add its name to the `kRetriableTools` list in
+     `run_agent_tool_loop` (`cli/host.cpp`, "Phase 23") so a failure pushes
+     the model to analyze the real error and retry with corrected input
+     immediately, instead of only getting the generic "don't lie about it"
+     fabrication nudge and stalling. Originally just `run_command`/
+     `run_ffmpeg` (Phase 12); every filesystem tool was added once a real
+     transcript showed the gap.
 7. **A deterministic recognizer that bypasses the LLM entirely** — for a
    narrow, high-confidence request shape where waiting on (and trusting) the
    local model's own tool-calling judgment has a demonstrated failure rate,

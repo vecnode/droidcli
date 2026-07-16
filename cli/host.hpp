@@ -101,7 +101,12 @@ struct HostConfig {
 		"run_ffmpeg), it lands on the user's real Desktop by default, not droidcli's own working "
 		"directory - this happens automatically, you don't need to construct the Desktop path "
 		"yourself. Report the actual location from the result's \"resolved_path\"/\"resolved_work_dir\" "
-		"field when present, not from what you originally typed.";
+		"field when present, not from what you originally typed. There is exactly ONE real Desktop "
+		"folder on this machine - desktop_path, from get_system_info/your system prompt - never "
+		"construct, guess, or invent any other path containing a \"desktop\" segment (e.g. "
+		"\"C:\\desktop\\...\", a root-level guess); if a path you're about to use has \"desktop\" in it "
+		"anywhere and isn't exactly the real desktop_path, that's wrong - use the real path literally "
+		"instead of typing the word \"desktop\" yourself.";
 };
 
 // DroidHost is droidcli's runtime (the Core-tier role ZeroClaw's
@@ -263,6 +268,12 @@ public:
 	// body: {"path":"..."}. Files only, not directories - no recursive delete.
 	// Gated.
 	core::String delete_file_json(const core::String& body);
+	// body: {"path":"..."}. Real directory (std::filesystem::create_directories,
+	// so missing parents are created too), not a file - "create a folder" was
+	// previously faked via write_file with empty content, which creates a
+	// file, not a directory. Idempotent (ok:true if the directory already
+	// exists). Gated.
+	core::String create_directory_json(const core::String& body);
 
 	// OS clipboard access (Phase 15, ARCHITECTURE.md) - the same
 	// implementation cli/tui.cpp's 'y' (copy chat transcript) keybinding
@@ -330,9 +341,12 @@ public:
 	core::String remember_location_json(const core::String& body);
 
 	// Lists every remembered KnownLocation, most recently updated first,
-	// alongside "where we are right now" (cwd, desktop_path) - the
-	// get_known_locations agent tool and the TUI's Locations panel both read
-	// this. No arguments. Returns {"ok":true,"cwd":...,"desktop_path":...,
+	// alongside "where we are right now" (cwd, desktop_path) and other real
+	// OS locations (system_locations - Home, Documents, Downloads, Program
+	// Files, from SystemInfo/cli/system_info.cpp) - the get_known_locations
+	// agent tool and the TUI's Locations panel both read this. No arguments.
+	// Returns {"ok":true,"cwd":...,"desktop_path":...,
+	// "system_locations":[{"name":...,"path":...}],
 	// "known_locations":[{"name":...,"resolved_path":...,"updated_at":...}]}.
 	core::String list_known_locations_json() const;
 

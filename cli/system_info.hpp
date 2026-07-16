@@ -24,6 +24,16 @@ struct SystemInfo {
 	// $HOME to fall back to) - a caller should treat that as "unknown", not
 	// assume the naive path is correct.
 	core::String desktop_path;
+	// Same Known Folder resolution as desktop_path, same "empty means
+	// unresolved, not a guess" contract - the user's home/profile folder
+	// (FOLDERID_Profile), Documents (FOLDERID_Documents), Downloads
+	// (FOLDERID_Downloads), and where installed applications actually live
+	// (FOLDERID_ProgramFiles) - the answer to "where are the apps," distinct
+	// from the installed-apps index (a list of what's there, not a path).
+	core::String home_path;
+	core::String documents_path;
+	core::String downloads_path;
+	core::String program_files_path;
 };
 
 // Queries the OS for name/version/architecture/hostname/username/cwd. Cheap
