@@ -78,4 +78,30 @@ struct WhichResult {
 // before running a bare command name.
 WhichResult which_executable(const core::String& name);
 
+struct FileOpResult {
+	bool ok = false;
+	core::String error_message;
+};
+
+// Copies a single file from source_path to destination_path, creating
+// destination parent directories if needed. Overwrites an existing
+// destination file, matching write_file's existing overwrite-by-default
+// convention - the gated approval step (tool_call_requires_approval,
+// cli/host.cpp) is the safety net, not a silent refuse-if-exists check.
+// Directories are deliberately not supported (ok:false with a clear error) -
+// a narrower, safer first cut than a recursive tree copy.
+FileOpResult copy_file(const core::String& source_path, const core::String& destination_path);
+
+// Moves/renames a single file or directory from source_path to
+// destination_path (std::filesystem::rename, so this also works across
+// directories on the same volume). Overwrites an existing destination file,
+// same convention as copy_file.
+FileOpResult move_path(const core::String& source_path, const core::String& destination_path);
+
+// Deletes a single file. Directories are deliberately not supported (ok:false
+// with a clear error, no recursive delete) - the same narrower-first-cut
+// reasoning as copy_file, and because an accidental recursive directory
+// delete is a categorically worse mistake than an accidental file delete.
+FileOpResult delete_file(const core::String& path);
+
 } // namespace droidcli::cli

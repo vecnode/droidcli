@@ -347,6 +347,8 @@ int main(int argc, char** argv)
 	std::cout << "  POST /api/run                          [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/open   POST /api/apps/find   GET /api/apps/open    [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/fs/read  /api/fs/write  /api/fs/list  /api/fs/stat  /api/fs/which  GET /api/fs/cwd   [Bearer token required]" << std::endl;
+	std::cout << "  POST /api/fs/copy  /api/fs/move  /api/fs/delete       [Bearer token required]" << std::endl;
+	std::cout << "  GET/POST /api/clipboard                 [Bearer token required]" << std::endl;
 	std::cout << "  POST /api/agent/turn                   [Bearer token required]" << std::endl;
 	std::cout << "  GET  /api/agent/self_status             [Bearer token required]" << std::endl;
 	std::cout << "  GET  /api/hardware                     [Bearer token required] (requires --enable-hardware-scan)" << std::endl;

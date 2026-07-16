@@ -217,9 +217,9 @@ bool extract_json_int_field(const core::String& json, const core::String& field_
 // approval before executing this tool, rather than auto-running it. Only
 // side-effecting tools are gated - anything read-only (list_dir, get_cwd,
 // get_system_info, which, list_connectors, list_tasks, list_open_windows,
-// find_application, connector_status, read_file, stat_path, call_connector)
-// keeps auto-running, since gating those would only make the agent slower
-// to answer plain questions for no safety benefit.
+// find_application, connector_status, read_file, stat_path, call_connector,
+// read_clipboard) keeps auto-running, since gating those would only make
+// the agent slower to answer plain questions for no safety benefit.
 bool tool_call_requires_approval(const core::String& tool_name)
 {
 	return tool_name == "run_command"
@@ -228,7 +228,11 @@ bool tool_call_requires_approval(const core::String& tool_name)
 		|| tool_name == "open_application"
 		|| tool_name == "launch_connector"
 		|| tool_name == "stop_connector"
-		|| tool_name == "enqueue_task";
+		|| tool_name == "enqueue_task"
+		|| tool_name == "copy_file"
+		|| tool_name == "move_path"
+		|| tool_name == "delete_file"
+		|| tool_name == "write_clipboard";
 }
 
 // Heuristic: does `text` claim an action was performed, or promise one is
@@ -1390,7 +1394,12 @@ core::String DroidHost::launch_connector(const core::String& connector_id)
 	append_app_log("process", "out",
 		ok ? ("launched connector: " + connector.id) : ("launch failed: " + error), ok);
 
-	return "{" + net::json_bool_field("success", ok) + ","
+	// "ok", not "success" - the same gap as open_application/enqueue_task
+	// before their fixes (see "Phase 15" in ARCHITECTURE.md): this is also
+	// the launch_connector agent tool's result, and "success" is exactly
+	// the kind of field name the fabrication guard's success scan does not
+	// look for.
+	return "{" + net::json_bool_field("ok", ok) + ","
 		+ net::json_string_field("error", error) + "}";
 }
 
@@ -1400,7 +1409,7 @@ core::String DroidHost::stop_connector(const core::String& connector_id)
 	const bool ok = process_manager_.stop(connector_id, error);
 	append_app_log("process", "out",
 		ok ? ("stopped connector: " + connector_id) : ("stop failed: " + error), ok);
-	return "{" + net::json_bool_field("success", ok) + ","
+	return "{" + net::json_bool_field("ok", ok) + ","
 		+ net::json_string_field("error", error) + "}";
 }
 
@@ -1809,6 +1818,14 @@ core::String DroidHost::open_application(const core::String& body)
 
 	std::ostringstream stream;
 	stream << '{';
+	// "ok" first, mirroring "launched" - this was the exact field missing
+	// that caused a real, confirmed incident: open_application succeeded
+	// (Notepad genuinely launched, PID logged) but the fabrication guard's
+	// a_tool_call_already_succeeded_this_turn scan (cli/host.cpp) found no
+	// "ok" field to read, concluded nothing had succeeded, and the loop
+	// went on to tell the user "I wasn't actually able to complete this" -
+	// a lie about a real success. See "Phase 15" in ARCHITECTURE.md.
+	stream << net::json_bool_field("ok", result.launched) << ',';
 	stream << net::json_bool_field("launched", result.launched) << ',';
 	stream << "\"pid\":" << result.pid << ',';
 	stream << net::json_string_field("error", result.error_message);
@@ -1822,7 +1839,7 @@ core::String DroidHost::find_applications_json(const core::String& body) const
 
 	std::lock_guard<std::mutex> lock(mutex_);
 	std::ostringstream stream;
-	stream << "{\"matches\":[";
+	stream << '{' << net::json_bool_field("ok", true) << ",\"matches\":[";
 	bool first = true;
 	const core::String normalized_query = normalize_for_match(query);
 	for (const InstalledApp& app : installed_apps_)
@@ -1890,7 +1907,7 @@ core::String DroidHost::list_open_windows_json() const
 	const core::Array<OpenWindowInfo> windows = cli::list_open_windows();
 
 	std::ostringstream stream;
-	stream << "{\"windows\":[";
+	stream << '{' << net::json_bool_field("ok", true) << ",\"windows\":[";
 	for (size_t index = 0; index < windows.size(); ++index)
 	{
 		if (index > 0)
@@ -1995,12 +2012,14 @@ core::String DroidHost::stat_path(const core::String& body)
 
 core::String DroidHost::get_cwd_json() const
 {
-	return "{" + net::json_string_field("cwd", get_current_working_directory()) + "}";
+	return "{" + net::json_bool_field("ok", true) + ","
+		+ net::json_string_field("cwd", get_current_working_directory()) + "}";
 }
 
 core::String DroidHost::build_system_info_json() const
 {
 	return "{"
+		+ net::json_bool_field("ok", true) + ","
 		+ net::json_string_field("os_name", system_info_.os_name) + ","
 		+ net::json_string_field("os_version", system_info_.os_version) + ","
 		+ net::json_string_field("architecture", system_info_.architecture) + ","
@@ -2059,6 +2078,52 @@ core::String DroidHost::which_executable_json(const core::String& body)
 		+ net::json_string_field("path", result.resolved_path) + ","
 		+ net::json_string_field("error", result.error_message)
 		+ "}";
+}
+
+core::String DroidHost::copy_file_json(const core::String& body)
+{
+	const core::String source_path = net::extract_json_string_field(body, "source_path");
+	const core::String destination_path = net::extract_json_string_field(body, "destination_path");
+	const FileOpResult result = cli::copy_file(source_path, destination_path);
+	append_app_log("fs", "out", "copy " + source_path + " -> " + destination_path, result.ok);
+	return "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message) + "}";
+}
+
+core::String DroidHost::move_path_json(const core::String& body)
+{
+	const core::String source_path = net::extract_json_string_field(body, "source_path");
+	const core::String destination_path = net::extract_json_string_field(body, "destination_path");
+	const FileOpResult result = cli::move_path(source_path, destination_path);
+	append_app_log("fs", "out", "move " + source_path + " -> " + destination_path, result.ok);
+	return "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message) + "}";
+}
+
+core::String DroidHost::delete_file_json(const core::String& body)
+{
+	const core::String path = net::extract_json_string_field(body, "path");
+	const FileOpResult result = cli::delete_file(path);
+	append_app_log("fs", "out", "delete " + path, result.ok);
+	return "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message) + "}";
+}
+
+core::String DroidHost::read_clipboard_json() const
+{
+	const ClipboardReadResult result = read_text_from_clipboard();
+	return "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("text", result.text) + ","
+		+ net::json_string_field("error", result.error_message) + "}";
+}
+
+core::String DroidHost::write_clipboard_json(const core::String& body)
+{
+	const core::String text = net::extract_json_string_field(body, "text");
+	const ClipboardWriteResult result = write_text_to_clipboard(text);
+	append_app_log("clipboard", "out", "wrote " + std::to_string(text.size()) + " chars to clipboard", result.ok);
+	return "{" + net::json_bool_field("ok", result.ok) + ","
+		+ net::json_string_field("error", result.error_message) + "}";
 }
 
 core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
@@ -2183,6 +2248,41 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"},\"required\":[\"name\"]}"});
 
 	tools.push_back(ai::ToolDefinition{
+		"copy_file",
+		"Copy a single file from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file. Only files, not directories.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"source_path\":{\"type\":\"string\",\"description\":\"file to copy\"},"
+		"\"destination_path\":{\"type\":\"string\",\"description\":\"where to copy it to\"}"
+		"},\"required\":[\"source_path\",\"destination_path\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"move_path",
+		"Move/rename a file or directory from source_path to destination_path on the local filesystem, creating destination parent directories if needed. Overwrites an existing destination file.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"source_path\":{\"type\":\"string\",\"description\":\"file or directory to move\"},"
+		"\"destination_path\":{\"type\":\"string\",\"description\":\"where to move it to\"}"
+		"},\"required\":[\"source_path\",\"destination_path\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"delete_file",
+		"Permanently delete a single file from the local filesystem. Only files, not directories - this never does a recursive directory delete. This is destructive and cannot be undone - only use it for a file the user actually asked to remove.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"path\":{\"type\":\"string\",\"description\":\"file to delete\"}"
+		"},\"required\":[\"path\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"read_clipboard",
+		"Read the current text content of the OS clipboard (whatever the user last copied, e.g. with Ctrl+C). Returns ok:false if the clipboard doesn't currently hold text (empty, or holds an image/file selection instead). Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
+		"write_clipboard",
+		"Replace the OS clipboard's current content with the given text, so the user can paste it (e.g. with Ctrl+V) into any other application.",
+		"{\"type\":\"object\",\"properties\":{"
+		"\"text\":{\"type\":\"string\",\"description\":\"text to place on the clipboard\"}"
+		"},\"required\":[\"text\"]}"});
+
+	tools.push_back(ai::ToolDefinition{
 		"run_ffmpeg",
 		"Run the ffmpeg CLI for media transcode/convert/clip/extract/thumbnail work - the binary is resolved automatically (PATH, then $DROIDCLI_FFMPEG_ROOT), you don't need to know where it lives. args is the raw ffmpeg argument string exactly as you'd type it after 'ffmpeg', e.g. '-y -i input.mp4 -vf scale=1280:-1 output.mp4' or '-i in.wav -ar 16000 out.wav'. Always pass -y to overwrite outputs without prompting, since there is no interactive terminal to answer that prompt. To generate a single static image from nothing (a solid color, a test pattern, etc.) rather than transcode an existing file, use the lavfi virtual input with -frames:v 1 and -update 1 - both are required or the image2 muxer rejects a plain (non-%d-pattern) output filename with 'does not contain an image sequence pattern': '-y -f lavfi -i color=red:s=512x512 -frames:v 1 -update 1 output.png'. If your args contain a bare relative \"desktop/...\" path, it's automatically replaced with the real Desktop folder (see get_system_info's desktop_path) before running - the result includes a \"resolved_args\" field when that happened, report the location from there, not from what you originally typed. Runs synchronously and returns captured stdout/stderr/exit_code - encodes can take a while, so raise timeout_ms for large files (default 120000ms).",
 		"{\"type\":\"object\",\"properties\":{"
@@ -2300,6 +2400,26 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "which")
 	{
 		return which_executable_json(arguments_json);
+	}
+	if (tool_name == "copy_file")
+	{
+		return copy_file_json(arguments_json);
+	}
+	if (tool_name == "move_path")
+	{
+		return move_path_json(arguments_json);
+	}
+	if (tool_name == "delete_file")
+	{
+		return delete_file_json(arguments_json);
+	}
+	if (tool_name == "read_clipboard")
+	{
+		return read_clipboard_json();
+	}
+	if (tool_name == "write_clipboard")
+	{
+		return write_clipboard_json(arguments_json);
 	}
 	if (tool_name == "get_system_info")
 	{

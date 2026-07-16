@@ -163,7 +163,10 @@ core::String build_task_json(const Task& task)
 core::String build_tasks_json(const core::Array<Task>& tasks)
 {
 	std::ostringstream stream;
-	stream << "{\"tasks\":[";
+	// "ok" first - see the identical comment in net::build_connectors_json;
+	// this is also the list_tasks agent tool's result and needs the same
+	// field for the same reason.
+	stream << net::json_bool_field("ok", true) << ",\"tasks\":[";
 	for (size_t index = 0; index < tasks.size(); ++index)
 	{
 		if (index > 0)

@@ -263,4 +263,114 @@ WhichResult which_executable(const core::String& name)
 	return result;
 }
 
+FileOpResult copy_file(const core::String& source_path, const core::String& destination_path)
+{
+	FileOpResult result;
+	if (source_path.empty() || destination_path.empty())
+	{
+		result.error_message = "source_path and destination_path are both required";
+		return result;
+	}
+
+	std::error_code error;
+	const fs::path source(source_path);
+	if (fs::is_directory(source, error))
+	{
+		result.error_message = "source is a directory - copy_file only copies a single file";
+		return result;
+	}
+
+	const fs::path destination(destination_path);
+	const fs::path parent = destination.parent_path();
+	if (!parent.empty() && !fs::exists(parent, error))
+	{
+		fs::create_directories(parent, error);
+		if (error)
+		{
+			result.error_message = "could not create destination parent directories: " + error.message();
+			return result;
+		}
+	}
+
+	fs::copy_file(source, destination, fs::copy_options::overwrite_existing, error);
+	if (error)
+	{
+		result.error_message = "copy failed: " + error.message();
+		return result;
+	}
+	result.ok = true;
+	return result;
+}
+
+FileOpResult move_path(const core::String& source_path, const core::String& destination_path)
+{
+	FileOpResult result;
+	if (source_path.empty() || destination_path.empty())
+	{
+		result.error_message = "source_path and destination_path are both required";
+		return result;
+	}
+
+	std::error_code error;
+	const fs::path source(source_path);
+	if (!fs::exists(source, error))
+	{
+		result.error_message = "source does not exist: " + source_path;
+		return result;
+	}
+
+	const fs::path destination(destination_path);
+	const fs::path parent = destination.parent_path();
+	if (!parent.empty() && !fs::exists(parent, error))
+	{
+		fs::create_directories(parent, error);
+		if (error)
+		{
+			result.error_message = "could not create destination parent directories: " + error.message();
+			return result;
+		}
+	}
+
+	fs::rename(source, destination, error);
+	if (error)
+	{
+		result.error_message = "move failed: " + error.message();
+		return result;
+	}
+	result.ok = true;
+	return result;
+}
+
+FileOpResult delete_file(const core::String& path)
+{
+	FileOpResult result;
+	if (path.empty())
+	{
+		result.error_message = "path is empty";
+		return result;
+	}
+
+	std::error_code error;
+	const fs::path target(path);
+	if (!fs::exists(target, error))
+	{
+		result.error_message = "path does not exist: " + path;
+		return result;
+	}
+	if (fs::is_directory(target, error))
+	{
+		result.error_message = "path is a directory - delete_file only deletes a single file, not a directory tree";
+		return result;
+	}
+
+	const bool removed = fs::remove(target, error);
+	if (error || !removed)
+	{
+		result.error_message = "delete failed: " + (error ? error.message() : core::String("unknown error"));
+		return result;
+	}
+	result.ok = true;
+	return result;
+}
+
 } // namespace droidcli::cli
