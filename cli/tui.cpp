@@ -1238,8 +1238,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	//  - a process-launch channel (run/ffmpeg/open/process -
 	//    is_process_launch_channel) gets its own magenta so an actual OS-level
 	//    process launch/command execution is unmistakable even scrolling fast.
-	//  - watchdog/task/thread channels get their own dimmer colors so the
-	//    high-volume chat channel doesn't drown them out visually.
+	//  - watchdog/task/thread channels each get their own distinct color so
+	//    the high-volume chat channel doesn't drown them out visually.
 	Component log_view = Renderer([&]() -> Element
 	{
 		// paragraph() (not text()) so a long log line wraps within the panel's
@@ -1276,7 +1276,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			}
 			else if (row.channel == "thread")
 			{
-				element |= dim;
+				// A real color (not just dim), matching every other channel's
+				// treatment here, so thread spawn/join lines are as visually
+				// distinguishable from the rest of the log as watchdog/task/
+				// process-launch lines already are.
+				element |= color(Color::Blue);
 			}
 			lines.push_back(element);
 		}
