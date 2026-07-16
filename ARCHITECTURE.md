@@ -2570,3 +2570,196 @@ narrow.
 | `ProcessManager` job/group tracking | `cli/process_manager.cpp` (Windows: `CreateJobObjectA` at `:60`; POSIX: `setpgid` at `:200`/`:212`) | A launched process is assigned to a Windows Job Object (or a POSIX process group) at launch time, so `stop()` can kill the whole process tree it spawned, not just the top-level PID - the same reason a plain `TerminateProcess`/`kill` on just the tracked PID would leave orphaned children behind. |
 
 Product usage, HTTP tables, and env vars: repository root `[README.md](./README.md)`.
+
+---
+
+## OpenClaude — a comparable open-source agent, for alignment purposes
+
+droidcli's original design objective was to follow ZeroClaw's Core-tier shape
+(provider abstraction, persistent memory, structured logging, task
+scheduling, self-health, hardware inventory - see "System context" and the
+crate-comparison table earlier in this document). This section is the second
+half of that same objective: understanding
+[OpenClaude](https://github.com/Gitlawb/openclaude) (marketing overview:
+[openclaude.gitlawb.com](https://openclaude.gitlawb.com/)), a real, actively-
+developed open-source agent CLI, well enough to judge which of its design
+choices are worth aligning droidcli toward and which are deliberately not a
+fit. Everything below was read directly from OpenClaude's own README and
+`docs/` (not guessed) as of this writing. Per current scope, provider
+plumbing beyond Ollama is summarized only enough for context - the detailed
+comparison stays Ollama-only, matching where droidcli actually is today.
+
+### What OpenClaude is
+
+An open-source, terminal-first coding-agent CLI ("OpenClaude is an open-
+source coding-agent CLI for cloud and local model providers") - TypeScript/
+Bun+Node, using `ink` (React for CLIs) for its terminal UI. Positioned as a
+drop-in, provider-neutral alternative to Claude Code itself: it explicitly
+mirrors Claude Code's own environment-variable contract for zero-friction
+provider switching (`CLAUDE_CODE_USE_OPENAI`, `OPENAI_BASE_URL`,
+`OPENAI_MODEL`, ...) while deliberately keeping its **own**, non-inherited
+config store (`~/.openclaude`, `~/.openclaude.json` - explicitly does *not*
+read `~/.claude`, project `.claude/` directories, or `CLAUDE_CONFIG_DIR`; a
+user migrating is told to copy only their own files deliberately, "do not
+blanket-copy `.claude`").
+
+### Important design parts (verified from the source, not assumed)
+
+- **Descriptor-first provider system.** Every provider/gateway is a typed
+  "descriptor" (`src/integrations/descriptors.ts`) declaring label, default
+  base URL/model, auth requirements, discovery policy, and transport
+  capability (`transportConfig.kind`: local, OpenAI-compatible, Anthropic-
+  proxy, Bedrock, Vertex, ...). A codegen step
+  (`bun run integrations:generate`) turns registered descriptors into a
+  generated inventory; runtime code (`routeMetadata.ts`, `runtimeMetadata.ts`,
+  `openaiShim.ts`) executes what the descriptor says, rather than each
+  provider hand-rolling its own switch statement. Explicit rule of thumb in
+  their own docs: *"descriptors own what a route is and what it says it
+  supports; routing helpers own how current config/env state maps onto that
+  route; transport code owns how requests are executed."* Not adopted here
+  in detail (out of scope per current focus on Ollama only), but the
+  metadata/routing/transport separation is a genuinely reusable idea if
+  droidcli ever adds a second `ai::ModelProvider`.
+- **Ollama gets first-class, not shimmed, treatment.** OpenClaude uses
+  Ollama's *native* chat API (not just its OpenAI-compatible shim) and
+  explicitly requests a 32768-token context window on every chat request,
+  specifically because Ollama's OpenAI-shim would otherwise silently
+  truncate same-session history without telling the caller. Configurable via
+  `OPENCLAUDE_OLLAMA_NUM_CTX`/`OLLAMA_CONTEXT_LENGTH`. This is a concrete,
+  actionable idea droidcli doesn't currently do anything equivalent to -
+  `ai::ollama_client` should be checked for whether it ever hits the same
+  silent-truncation failure mode on a long agent-turn transcript.
+- **Session model: resume/continue/fork, conversation-only.** `--resume
+  <id>`/`--continue` reopen a session; `--fork-session` branches the
+  *conversation history* into a new session id. Explicitly documented as
+  *not* filesystem isolation and *not* a git worktree - branching is
+  transcript-only. droidcli's own session model (`MemoryStore`,
+  `GET /api/agent/sessions`) is comparable in shape (resumable, persisted,
+  queryable) but has no fork/branch operation yet.
+- **Background sessions are plain child processes, not a daemon.** `--bg
+  "task"` detaches a non-interactive run; `ps`/`logs [-f]`/`kill`/`attach`
+  manage it. Explicitly documented: *"Background sessions are local child
+  processes. OpenClaude does not start a daemon or network service."*
+  Metadata/logs live under `~/.openclaude/bg-sessions/`. This is the single
+  sharpest architectural contrast with droidcli: droidcli's entire host
+  **is** a persistent local HTTP daemon by design (`tools::MiniHttpServer`,
+  always listening on `--port`) with a `TaskQueue` for queued/scheduled work
+  running inside that same long-lived process - OpenClaude instead spins up
+  one-off child processes per background task with no persistent service
+  underneath them at all.
+- **MCP client, not just MCP-agnostic.** OpenClaude's "What Works" list
+  includes MCP as a first-class, consumed capability alongside bash/file/
+  grep/glob. This is a direct, deliberate divergence point from droidcli's
+  own guardrail (see AGENTS.md: *"droidcli does not consume MCP servers"*) -
+  noted here explicitly so the difference stays a documented choice, not an
+  oversight, when comparing the two.
+- **Sub-agents with per-agent model routing and step limits.** Custom agents
+  (Markdown frontmatter, no code changes) can declare `maxSteps` to cap tool-
+  use steps before being asked for a final summary, and `agentModels`/
+  `agentRouting` in `~/.openclaude.json` can route specific named agents
+  (e.g. an `Explore` or `Plan` sub-agent) to different models/providers than
+  the parent session. droidcli has no sub-agent concept at all - one flat
+  `run_agent_tool_loop` per turn - and its hop budget
+  (`kMaxHops = 9`, `cli/host.cpp`) is a single hardcoded constant, not a
+  per-agent configurable value the way OpenClaude's `maxSteps` is.
+- **Repo Map: codebase intelligence, not applicable to droidcli's domain.**
+  A PageRank-ranked structural map of the repository, auto-injected into
+  context when enabled, inspectable via `/repomap`. This is squarely a
+  coding-agent feature (OpenClaude operates *on a codebase*); droidcli
+  operates on a desktop OS (files, apps, clipboard, Windows shell locations),
+  so there's no direct equivalent to build here - noted for completeness,
+  not as a gap.
+- **Extensibility via plugins and skills**, a VS Code extension, and a
+  headless gRPC server mode (`docs/grpc-server.md`) for programmatic/remote
+  driving - conceptually adjacent to droidcli's own `--headless` HTTP-API
+  mode, though droidcli's is REST/JSON over `tools::MiniHttpServer`, not
+  gRPC.
+
+### Where droidcli diverges by design (the ZeroClaw objective preserved)
+
+None of the above is "droidcli is behind" - several are deliberate, already-
+recorded choices worth restating alongside OpenClaude's contrasting ones so
+the divergence reads as intentional:
+
+| Concern | droidcli | OpenClaude |
+|---|---|---|
+| Capability model | Self-contained - new capabilities are native `DroidHost` methods, never an MCP client (AGENTS.md guardrail) | Consumes MCP servers directly as a client |
+| Persistent process | Always-on HTTP daemon (`tools::MiniHttpServer`) with an in-process `TaskQueue` | No daemon by default - `--bg` sessions are detached child processes only |
+| Domain | A single Windows desktop/OS - files, apps, clipboard, Windows Settings/shell locations | A codebase - bash, file edit, grep/glob, repo-map, MCP, against a git working tree |
+| Agent shape | One flat tool-calling loop per turn (`run_agent_tool_loop`), fixed hop budget | Sub-agents with per-agent model routing and configurable `maxSteps` |
+| Reliability strategy | Incident-driven, narrow deterministic guards + ground-truth post-action verification (Phases 6-27, this document's hardening log) | Not documented in the sources reviewed here - not a claim that it's absent, just not covered by this pass |
+| Language/runtime | C++17, portable core + host split | TypeScript/Bun+Node, `ink` (React for CLIs) |
+
+The self-contained/no-MCP-client stance and the always-on daemon are the two
+positions worth defending explicitly if this comparison ever prompts a "why
+doesn't droidcli just do it OpenClaude's way" question - both trace back to
+droidcli's own stated identity (a personal desktop assistant with direct
+machine control, not a coding agent working against MCP-extended tooling).
+
+### Draft alignment diagram (Ollama-only scope)
+
+A first-pass sketch, not a final design - meant as the starting point for
+iterating on how droidcli's agent-turn loop and OpenClaude's query/tool loop
+actually relate, scoped to the Ollama path only per current focus (no other
+providers, no MCP, no sub-agent routing shown).
+
+```mermaid
+flowchart TB
+    subgraph droidcli["droidcli (this repo) - Ollama path"]
+        direction TB
+        DUser["User (TUI or HTTP client)"]
+        DHost["DroidHost::agent_turn"]
+        DLoop["run_agent_tool_loop\n(fixed kMaxHops=9,\nfabrication/placeholder/\ndesktop-path guards)"]
+        DOllama["ai::OllamaProvider\n(chat + tool-calling)"]
+        DTools["execute_agent_tool\n(native DroidHost methods -\nfiles, apps, clipboard, connectors)"]
+        DVerify["Post-action ground-truth\nverification (stat_path/\nclipboard read-back)"]
+        DMem["MemoryStore (SQLite):\nsessions, command lessons,\nknown_locations"]
+
+        DUser --> DHost --> DLoop
+        DLoop --> DOllama
+        DOllama --> DLoop
+        DLoop --> DTools --> DVerify --> DLoop
+        DLoop --> DMem
+        DLoop --> DUser
+    end
+
+    subgraph openclaude["OpenClaude - Ollama path (for comparison only)"]
+        direction TB
+        OUser["User (ink TUI or --print/--bg)"]
+        OQuery["QueryEngine / Task / Tool"]
+        ORoute["integrations: routeMetadata +\nruntimeMetadata (Ollama descriptor,\nnative chat API, num_ctx=32768)"]
+        OOllama["Ollama (:11434, native chat API)"]
+        OTools["Tools: bash, file read/write/edit,\ngrep, glob, MCP servers"]
+        OSession["Session store:\nresume / continue / fork-session\n(~/.openclaude)"]
+
+        OUser --> OQuery
+        OQuery --> ORoute --> OOllama --> ORoute --> OQuery
+        OQuery --> OTools --> OQuery
+        OQuery --> OSession
+        OQuery --> OUser
+    end
+
+    OllamaShared[("Ollama\n(same local :11434 server,\nnative chat API in both)")]
+    DOllama -.shares runtime, not code.-> OllamaShared
+    OOllama -.shares runtime, not code.-> OllamaShared
+
+    style droidcli fill:#1e293b,color:#e2e8f0,stroke:#334155
+    style openclaude fill:#1e293b,color:#e2e8f0,stroke:#334155
+    style OllamaShared fill:#0f766e,color:#f0fdfa,stroke:#134e4a
+```
+
+Candidates worth a deliberate yes/no decision once this diagram is iterated
+on further (none decided yet - listed, not adopted):
+
+1. Request an explicit `num_ctx` on every Ollama chat call, matching
+   OpenClaude's 32768-token default, so a long agent-turn transcript can't be
+   silently truncated by Ollama's own context window the way OpenClaude's
+   docs say its OpenAI-shim otherwise would.
+2. Make `kMaxHops` a configurable value (per session or per connector),
+   rather than a single hardcoded constant, mirroring the *idea* of
+   OpenClaude's per-agent `maxSteps` without adopting sub-agent routing
+   itself.
+3. A conversation-branch operation on top of the existing `MemoryStore`
+   session model (mirroring `--fork-session`'s conversation-only branching,
+   not filesystem isolation) - low-risk, additive, no schema change beyond a
+   new "forked from" pointer.
