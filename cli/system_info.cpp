@@ -1,6 +1,7 @@
 #include "system_info.hpp"
 
 #include "filesystem_tools.hpp"
+#include "os_registry.hpp"
 
 #include <cstdlib>
 
@@ -37,40 +38,26 @@ core::String detect_architecture()
 // GetVersionEx is deprecated/lies about the version since Win8.1 unless the
 // exe is manifested for the target OS, so this reads the same build number
 // the registry-backed "winver" dialog shows - accurate without a manifest.
+// Reads go through os_registry's shared open/read/close primitive
+// (droidcli-infra), not a private RegOpenKeyExA/RegQueryValueExA pair.
 core::String detect_os_version()
 {
-	HKEY key;
-	if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", 0, KEY_READ, &key) != ERROR_SUCCESS)
+	static const core::String kSubkey = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+
+	uint32_t major_dword = 0;
+	const core::String major_str = read_registry_dword(RegistryRoot::LocalMachine, kSubkey, "CurrentMajorVersionNumber", major_dword)
+		? std::to_string(major_dword) : "0";
+
+	uint32_t minor_dword = 0;
+	const core::String minor_str = read_registry_dword(RegistryRoot::LocalMachine, kSubkey, "CurrentMinorVersionNumber", minor_dword)
+		? std::to_string(minor_dword) : "0";
+
+	core::String build_str = read_registry_string(RegistryRoot::LocalMachine, kSubkey, "CurrentBuildNumber");
+	if (build_str.empty())
 	{
-		return "unknown";
+		build_str = "0";
 	}
 
-	core::String major_str = "0";
-	core::String minor_str = "0";
-	core::String build_str = "0";
-
-	DWORD major_dword = 0;
-	DWORD dword_size = sizeof(DWORD);
-	if (RegQueryValueExA(key, "CurrentMajorVersionNumber", nullptr, nullptr, reinterpret_cast<LPBYTE>(&major_dword), &dword_size) == ERROR_SUCCESS)
-	{
-		major_str = std::to_string(major_dword);
-	}
-
-	DWORD minor_dword = 0;
-	dword_size = sizeof(DWORD);
-	if (RegQueryValueExA(key, "CurrentMinorVersionNumber", nullptr, nullptr, reinterpret_cast<LPBYTE>(&minor_dword), &dword_size) == ERROR_SUCCESS)
-	{
-		minor_str = std::to_string(minor_dword);
-	}
-
-	char build[32] = {0};
-	DWORD build_size = sizeof(build);
-	if (RegQueryValueExA(key, "CurrentBuildNumber", nullptr, nullptr, reinterpret_cast<LPBYTE>(build), &build_size) == ERROR_SUCCESS)
-	{
-		build_str = build;
-	}
-
-	RegCloseKey(key);
 	return major_str + "." + minor_str + "." + build_str;
 }
 

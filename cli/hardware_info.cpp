@@ -1,5 +1,7 @@
 #include "hardware_info.hpp"
 
+#include "os_registry.hpp"
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -18,26 +20,15 @@ namespace {
 
 // Same registry location Task Manager/System Information read the CPU name
 // from - no WMI/COM dependency needed for a value that's already sitting in
-// the registry.
+// the registry. Goes through os_registry's shared open/read/close primitive
+// (droidcli-infra), not a private RegOpenKeyExA/RegQueryValueExA pair.
 core::String detect_cpu_name()
 {
-	HKEY key;
-	if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-		"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &key) != ERROR_SUCCESS)
-	{
-		return "unknown";
-	}
-
-	char buffer[256] = {0};
-	DWORD size = sizeof(buffer);
-	core::String name = "unknown";
-	if (RegQueryValueExA(key, "ProcessorNameString", nullptr, nullptr,
-		reinterpret_cast<LPBYTE>(buffer), &size) == ERROR_SUCCESS)
-	{
-		name = buffer;
-	}
-	RegCloseKey(key);
-	return name;
+	const core::String name = read_registry_string(
+		RegistryRoot::LocalMachine,
+		"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+		"ProcessorNameString");
+	return name.empty() ? "unknown" : name;
 }
 
 int32_t detect_cpu_core_count()
