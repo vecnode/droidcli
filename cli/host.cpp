@@ -1778,14 +1778,31 @@ core::String DroidHost::run_command(const core::String& body)
 			+ net::json_string_field("error", "missing command") + "}";
 	}
 
+	// Defense-in-depth alongside precheck_and_resolve_gated_call's own check
+	// (which most calls already went through) - the pending_command bare-"yes"
+	// bypass skips that precheck entirely, so an invented placeholder path in
+	// a proposed command's own text still needs catching here.
+	if (looks_like_placeholder_path(requested_command))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_bool_field("launched", false) + ","
+			+ "\"exit_code\":0,"
+			+ net::json_string_field("stdout", "") + ","
+			+ net::json_string_field("stderr", "") + ","
+			+ net::json_string_field("error",
+				"this references a placeholder path (e.g. \"path/to/...\") instead of a real one - "
+				"the real Desktop path is " + system_info_.desktop_path + ", use that exact path instead") + "}";
+	}
+
 	const core::String command = substitute_bare_desktop_token(requested_command, system_info_.desktop_path);
 	// Defaults to the real Desktop, not droidcli's own launch directory, when
-	// the caller doesn't specify one - see default_bare_filename_to_desktop's
-	// comment above for why: a command that writes a bare relative filename
-	// (redirection, a tool's own default output) should land somewhere a
-	// human would go looking for it, not wherever droidcli happened to start
-	// from. Pass work_dir explicitly to run in some other directory instead.
-	const core::String effective_work_dir = work_dir.empty() ? system_info_.desktop_path : work_dir;
+	// the caller doesn't specify one, and never a model-invented placeholder
+	// path either ("/path/to/Desktop" resolves to the real Desktop, same as
+	// an empty work_dir - see resolve_work_dir_or_desktop). A command that
+	// writes a bare relative filename (redirection, a tool's own default
+	// output) should land somewhere a human would go looking for it, not
+	// wherever droidcli happened to start from or a path the model made up.
+	const core::String effective_work_dir = resolve_work_dir_or_desktop(work_dir);
 	const CommandRunResult result = run_command_once(command, effective_work_dir, timeout_ms);
 	const bool ok = command_succeeded(result);
 	// Previously logged on error_message.empty() alone, which missed a
@@ -1819,11 +1836,12 @@ core::String DroidHost::run_command(const core::String& body)
 		// from what you originally asked for.
 		stream << ',' << net::json_string_field("resolved_command", command);
 	}
-	if (work_dir.empty())
+	if (work_dir != effective_work_dir)
 	{
-		// No work_dir was given - report where this actually ran (the real
+		// No work_dir was given, or the one given was empty/a placeholder/an
+		// invented desktop path - report where this actually ran (the real
 		// Desktop, see effective_work_dir above), not silently leave the
-		// model assuming its own working directory.
+		// model assuming its own working directory or a made-up one.
 		stream << ',' << net::json_string_field("resolved_work_dir", effective_work_dir);
 	}
 	if (!ok)
@@ -1856,12 +1874,28 @@ core::String DroidHost::run_ffmpeg_json(const core::String& body)
 			+ net::json_string_field("error", "missing args") + "}";
 	}
 
+	// Defense-in-depth alongside precheck_and_resolve_gated_call's own check
+	// (which most calls already went through) - the pending_command bare-"yes"
+	// bypass skips that precheck entirely, so an invented placeholder path in
+	// a proposed command's own text still needs catching here.
+	if (looks_like_placeholder_path(requested_args))
+	{
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_bool_field("launched", false) + ","
+			+ "\"exit_code\":0,"
+			+ net::json_string_field("stdout", "") + ","
+			+ net::json_string_field("stderr", "") + ","
+			+ net::json_string_field("error",
+				"this references a placeholder path (e.g. \"path/to/...\") instead of a real one - "
+				"the real Desktop path is " + system_info_.desktop_path + ", use that exact path instead") + "}";
+	}
+
 	const core::String args = substitute_bare_desktop_token(requested_args, system_info_.desktop_path);
 	// Same default as run_command above: a bare relative output filename in
-	// ffmpeg's own args (its most common shape - see "Phase 20" in
-	// ARCHITECTURE.md) lands on the real Desktop by default, not wherever
-	// droidcli was launched from, unless work_dir says otherwise.
-	const core::String effective_work_dir = work_dir.empty() ? system_info_.desktop_path : work_dir;
+	// ffmpeg's own args (its most common shape) lands on the real Desktop by
+	// default, not wherever droidcli was launched from and never a
+	// model-invented placeholder path either - see resolve_work_dir_or_desktop.
+	const core::String effective_work_dir = resolve_work_dir_or_desktop(work_dir);
 	const CommandRunResult result = run_ffmpeg(args, effective_work_dir, timeout_ms);
 	const bool ok = command_succeeded(result);
 	append_app_log("ffmpeg", "out", args, ok);
@@ -1883,7 +1917,7 @@ core::String DroidHost::run_ffmpeg_json(const core::String& body)
 		// from what you originally asked for.
 		stream << ',' << net::json_string_field("resolved_args", args);
 	}
-	if (work_dir.empty())
+	if (work_dir != effective_work_dir)
 	{
 		stream << ',' << net::json_string_field("resolved_work_dir", effective_work_dir);
 	}
@@ -2025,8 +2059,64 @@ DroidHost::ResolvedLaunchTarget DroidHost::resolve_open_application_target(const
 	return result;
 }
 
+core::String DroidHost::resolve_work_dir_or_desktop(const core::String& requested_work_dir) const
+{
+	if (requested_work_dir.empty())
+	{
+		return system_info_.desktop_path;
+	}
+	const core::String substituted = substitute_bare_desktop_token(requested_work_dir, system_info_.desktop_path);
+	if (looks_like_placeholder_path(substituted) || looks_like_invented_desktop_path(substituted, system_info_.desktop_path))
+	{
+		return system_info_.desktop_path;
+	}
+	return substituted;
+}
+
 bool DroidHost::precheck_and_resolve_gated_call(ai::ToolCall& call, core::String& out_result_json) const
 {
+	if (call.name == "run_command" || call.name == "run_ffmpeg")
+	{
+		// A model-invented placeholder can also be embedded directly inside
+		// the command/args text itself (e.g. "... /path/to/Desktop/image.png"),
+		// not just in a separate work_dir field - a real transcript showed
+		// exactly this after the work_dir-only fix below still let it through.
+		// There's no safe way to surgically replace just the offending token
+		// inside an arbitrary command line, so this fails outright (never
+		// guess) with the real Desktop path in the error - the one bounded
+		// auto-retry (run_command/run_ffmpeg are both in kRetriableTools)
+		// then gives the model a chance to use it directly.
+		const core::String command_field_name = call.name == "run_ffmpeg" ? "args" : "command";
+		const core::String command_text = net::extract_json_string_field(call.arguments_json, command_field_name);
+		if (looks_like_placeholder_path(command_text))
+		{
+			out_result_json = "{" + net::json_bool_field("ok", false) + ","
+				+ net::json_bool_field("launched", false) + ","
+				+ "\"exit_code\":0,"
+				+ net::json_string_field("stdout", "") + ","
+				+ net::json_string_field("stderr", "") + ","
+				+ net::json_string_field("error",
+					"this references a placeholder path (e.g. \"path/to/...\") instead of a real one - "
+					"the real Desktop path is " + system_info_.desktop_path + ", use that exact path (or a "
+					"bare relative filename, which already defaults to the Desktop) instead of a placeholder")
+				+ "}";
+			return false;
+		}
+
+		// Never let a model-invented work_dir (e.g. "/path/to/Desktop")
+		// reach the approval prompt - rewrite it to the real Desktop (or
+		// leave a genuinely real path alone) before the human ever sees it.
+		const core::String requested_work_dir = net::extract_json_string_field(call.arguments_json, "work_dir");
+		const core::String resolved_work_dir = resolve_work_dir_or_desktop(requested_work_dir);
+		if (resolved_work_dir != requested_work_dir)
+		{
+			call.arguments_json = requested_work_dir.empty()
+				? call.arguments_json // no field to rewrite - run_command()/run_ffmpeg_json() default it themselves at execution time
+				: replace_json_string_field_value(call.arguments_json, "work_dir", resolved_work_dir);
+		}
+		return true;
+	}
+
 	if (call.name != "open_application")
 	{
 		return true;
@@ -3794,14 +3884,17 @@ core::String DroidHost::finish_turn_after_execution(
 			final_arguments_json = retry_decision.arguments_json;
 			final_result_json = retry_tool_result;
 		}
-		else if (retry_decision.kind == classify::TurnDecisionKind::PlainReply)
-		{
-			record_agent_message(session_id, ai::ChatRole::Assistant, retry_decision.plain_reply_text);
-			append_app_log("chat", "out", "assistant: " + retry_decision.plain_reply_text, true, session_id);
-			return build_final_agent_response(session_id, retry_decision.plain_reply_text, actions);
-		}
-		// TransportFailed on the retry falls through to phrasing the
-		// original failure honestly below - stop after one try regardless.
+		// PlainReply and TransportFailed on the retry both fall through to
+		// phrasing the *original* failure honestly below, rather than
+		// showing the retry's own raw text - a retry that didn't produce a
+		// real tool call made no actual correction attempt, so there is
+		// nothing trustworthy in its prose to show. This is the one place
+		// where showing raw model text was a real, observed problem: given a
+		// second chance, a small model can dump a wall of reasoning with a
+		// *fake* tool call written as prose (e.g. "run_ffmpeg(args=[...])"
+		// inside a markdown block) instead of actually invoking one - that
+		// text must never reach the user as if it were a real outcome.
+		// Stops after one try regardless of what the retry returned.
 	}
 
 	const core::String assistant_text = phrase_result(final_tool_name, final_arguments_json, final_result_json, provider);

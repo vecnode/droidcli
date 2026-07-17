@@ -722,11 +722,26 @@ private:
 	// out_result_json already holding the same-shaped failure JSON
 	// open_application() itself would return - the caller records that as a
 	// completed (failed) action and continues the loop instead of ever
-	// proposing a yes/no for something that cannot succeed. A no-op
-	// (returns true, arguments_json untouched) for any tool other than
-	// open_application. See "Never propose an unresolvable action" in
-	// ARCHITECTURE.md.
+	// proposing a yes/no for something that cannot succeed. For
+	// `run_command`/`run_ffmpeg`, also rewrites an invented/placeholder/empty
+	// `work_dir` to the real Desktop in place (see resolve_work_dir_or_desktop)
+	// before the human ever sees the approval prompt - a model-invented
+	// `work_dir` must never even be shown as something to approve. A no-op
+	// (returns true, arguments_json untouched) for any other tool. See "Never
+	// propose an unresolvable action" in ARCHITECTURE.md.
 	bool precheck_and_resolve_gated_call(ai::ToolCall& call, core::String& out_result_json) const;
+
+	// The single source of truth for "what work_dir should a shell command
+	// actually run in": an empty, placeholder-looking (`looks_like_placeholder_path`),
+	// or invented-desktop (`looks_like_invented_desktop_path`) value all
+	// resolve to the real, OS-resolved Desktop path - never a made-up one the
+	// model typed. A real, non-placeholder value still gets
+	// `substitute_bare_desktop_token` applied first (a bare "desktop/..."
+	// token still needs the real prefix). Used by both
+	// precheck_and_resolve_gated_call (pre-approval) and
+	// run_command()/run_ffmpeg_json() (execution) - the same defense-in-depth
+	// shape the Windows execution ruleset already uses for `open_application`.
+	core::String resolve_work_dir_or_desktop(const core::String& requested_work_dir) const;
 
 	// Returns `arguments_json` with any well-known path field ("path", or
 	// "source_path"/"destination_path" for copy/move) rewritten to a full
