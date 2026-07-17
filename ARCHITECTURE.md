@@ -168,15 +168,17 @@ flowchart TB
         TUI["droidcli-tui\ncli/tui.cpp (FTXUI)"]
     end
 
-    subgraph L4["Orchestration"]
+    subgraph L4["Core"]
         RUNTIME["droidcli-runtime\nagent_turn / run_agent_tool_loop ·\nConnectorRegistry · TaskQueue"]
+        MEMORY["droidcli-memory\nMemoryStore (SQLite)"]
+        CONFIG["droidcli-config\nHostConfig · settings_store"]
+        RUNTIME --> MEMORY
+        RUNTIME --> CONFIG
     end
 
     subgraph L3["Services"]
         TOOLS["droidcli-tools"]
         PROVIDERS["droidcli-providers"]
-        MEMORY["droidcli-memory"]
-        CONFIG["droidcli-config"]
     end
 
     subgraph L2["Cross-cutting infra"]
@@ -192,8 +194,6 @@ flowchart TB
     TUI --> RUNTIME
     RUNTIME --> TOOLS
     RUNTIME --> PROVIDERS
-    RUNTIME --> MEMORY
-    RUNTIME --> CONFIG
     TOOLS --> FOUND
     PROVIDERS --> FOUND
     MEMORY --> FOUND
@@ -205,10 +205,15 @@ flowchart TB
 
 `droidcli-tui` and `droidcli-gateway` are drawn side by side, not stacked -
 both call into `droidcli-runtime` directly as independent front doors,
-neither goes through the other. The dotted edges into `droidcli-log`/
-`droidcli-infra` are deliberate: logging and infra are called from multiple
-layers, not just Orchestration, so a single solid arrow would misstate it
-as layer-3-only.
+neither goes through the other. `droidcli-memory` and `droidcli-config` sit
+in `Core` alongside `droidcli-runtime`, not in `Services` below it - both
+are state `agent_turn` owns and reads/writes directly (session transcripts,
+command lessons, known locations; host settings and secrets), not a
+callable capability the runtime dispatches out to the way it does with
+`droidcli-tools`/`droidcli-providers`. The dotted edges into
+`droidcli-log`/`droidcli-infra` are deliberate: logging and infra are
+called from multiple layers, not just `Core`, so a single solid arrow would
+misstate it as layer-3-only.
 
 ### Foundations (shared low-level utilities, no `droidcli-xyz` equivalent)
 
