@@ -2060,11 +2060,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			rebuild_connector_entries();
 
 			// Not push_chat_entry: pending_entries are parsed straight out of
-			// an agent_turn()/agent_tool_decision() response body, and every
-			// hop of that call already logged itself server-side (DroidHost's
-			// own append_app_log calls in run_agent_tool_loop) - logging here
-			// too would duplicate each assistant/tool line under a second
-			// timestamp.
+			// an agent_turn()/agent_tool_decision() response body, and that
+			// call already logged itself server-side (DroidHost's own
+			// append_app_log calls in classify_turn/execute_decision_or_pause/
+			// finish_turn_after_execution) - logging here too would duplicate
+			// each assistant/tool line under a second timestamp.
 			std::lock_guard<std::mutex> chat_lock(chat_work.mutex);
 			for (ChatEntry& entry : chat_work.pending_entries)
 			{

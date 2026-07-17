@@ -1,12 +1,13 @@
-#include "host.hpp"
+﻿#include "host.hpp"
 
 #include "app_index.hpp"
 #include "command_runner.hpp"
 #include "intent/open_intent.hpp"
 #include "intent/pending_command.hpp"
-#include "reliability/claim_guards.hpp"
 #include "reliability/command_guards.hpp"
 #include "reliability/path_guards.hpp"
+#include "classify/turn_decision.hpp"
+#include "classify/response_templates.hpp"
 #include "settings_store.hpp"
 #include "tools/sync_http_client.hpp"
 
@@ -24,9 +25,9 @@
 namespace droidcli::cli {
 namespace {
 
-// The path/content and claim/response guards used throughout this file now
-// live in src/reliability/ (portable core, unit-tested in tests/ - see
-// path_guards_test.cpp/claim_guards_test.cpp) rather than as local copies
+// The path/content and destructive-command guards used throughout this file
+// now live in src/reliability/ (portable core, unit-tested in tests/ - see
+// path_guards_test.cpp/command_guards_test.cpp) rather than as local copies
 // here, so a future edit can't silently regress one of them without a test
 // failing.
 using namespace droidcli::reliability;
@@ -47,6 +48,27 @@ core::String normalize_for_match(const core::String& value)
 		}
 	}
 	return result;
+}
+
+// A failed call to one of these has enough information in its own error
+// (a bad path, a bad argument) that a fresh classification, told the real
+// failure_reason, has a real shot at correcting it - see
+// DroidHost::finish_turn_after_execution's one bounded auto-retry.
+bool is_retriable_tool(const core::String& tool_name)
+{
+	static const char* const kRetriableTools[] = {
+		"run_command", "run_ffmpeg",
+		"read_file", "write_file", "copy_file", "move_path", "delete_file", "create_directory",
+		"open_application"
+	};
+	for (const char* retriable_tool : kRetriableTools)
+	{
+		if (tool_name == retriable_tool)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 // Best-effort match of `query` against the installed-apps index, insensitive
@@ -595,21 +617,6 @@ core::String summarize_command_failure(const CommandRunResult& result)
 	}
 	return last_nonempty_lines(result.stdout_text, 3);
 }
-
-const char* const kUnverifiedActionClaimNudge =
-	"Your last response claimed an action was done or about to be done, but no tool call backs "
-	"that up anywhere in this conversation turn - nothing has actually happened. If you intend to "
-	"do something, call the matching tool right now instead of describing it or claiming it's "
-	"already finished. Only report an action as successful when you can point to a tool result "
-	"whose \"ok\" field is true - if \"ok\" is false or you never called the tool, say so honestly "
-	"and explain the actual problem instead of asserting success. If you're missing information "
-	"needed to act, ask a clarifying question instead of claiming you're already doing it.";
-
-const char* const kCapabilityDenialNudge =
-	"That's false - you DO have the ability to execute commands directly on this machine: "
-	"run_command, run_ffmpeg, write_file, open_application, and the filesystem tools all actually "
-	"run when you call them, they are not just descriptions for the user to copy and run themselves. "
-	"Call the right tool now instead of telling the user to run something themselves.";
 
 } // namespace
 
@@ -3468,41 +3475,45 @@ core::String DroidHost::agent_turn(const core::String& body)
 	const std::unique_ptr<ai::ModelProvider> provider_ptr = make_model_provider();
 	const ai::ModelProvider& provider = *provider_ptr;
 
-	// Deterministic command-confirmation shortcut (Phase 14, ARCHITECTURE.md):
-	// if the assistant's own last message proposed a concrete command and
-	// explicitly asked permission to run it, and this message is nothing but
-	// a bare "yes", the user's affirmative IS that permission - execute the
-	// exact proposed command directly rather than ask the (unreliable) model
-	// to decide all over again. Motivated by a real transcript where this
-	// exact "yes" got an empty model response, then a false "I can only
-	// execute one command at a time" claim, and the tool was never called.
-	// This mirrors try_quick_open_json's existing precedent of bypassing the
-	// LLM for a narrow, high-confidence, deterministically-recognized case.
-	const intent::PendingCommand proposed_command = intent::extract_proposed_command(previous_assistant_text);
-	if (proposed_command.matched && intent::is_bare_affirmative(user_message))
+	// "Classify -> Execute -> Phrase" (see ARCHITECTURE.md's "The agent
+	// turn"): the model decides at most one action - a deterministic
+	// recognizer match, or one LLM classification call - and never both
+	// decides and narrates the outcome in the same breath.
+	const classify::TurnDecision decision =
+		classify_turn(session_id, user_message, previous_assistant_text, tools, provider);
+
+	if (decision.kind == classify::TurnDecisionKind::TransportFailed)
 	{
-		const core::String arguments_json = proposed_command.tool == "run_ffmpeg"
-			? ("{" + net::json_string_field("args", proposed_command.args) + "}")
-			: ("{" + net::json_string_field("command", proposed_command.args) + "}");
-		const core::String tool_result = execute_agent_tool(proposed_command.tool, arguments_json);
-		append_app_log("chat", "out",
-			"confirmed proposed command - executing " + proposed_command.tool + "(" + arguments_json + ") -> " + tool_result,
-			true, session_id);
-		record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
-
-		core::Array<PendingToolActionRecord> seeded_actions;
-		seeded_actions.push_back(PendingToolActionRecord{proposed_command.tool, arguments_json, tool_result});
-
-		// hop=1, not 0: this deterministic execution already covers what
-		// would have been hop 0's "decide which tool to call" step. The
-		// model's next hop only needs to react to the result already in the
-		// transcript - report success, or (via Phase 12's retry-on-failure
-		// nudge, which reads the same seeded_actions to find the last
-		// action) retry with a corrected command if it failed.
-		return run_agent_tool_loop(session_id, tools, provider, 1, {}, 0, seeded_actions);
+		// The user's message was already persisted via record_agent_message()
+		// above, even though this turn is about to fail - session_id lets a
+		// caller still find it via GET /api/agent/history.
+		return "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_string_field("error", decision.error_message) + ","
+			+ net::json_string_field("session_id", session_id) + "}";
 	}
 
-	return run_agent_tool_loop(session_id, tools, provider, 0, {}, 0, {});
+	if (decision.kind == classify::TurnDecisionKind::PlainReply)
+	{
+		record_agent_message(session_id, ai::ChatRole::Assistant, decision.plain_reply_text);
+		append_app_log("chat", "out", "assistant: " + decision.plain_reply_text, true, session_id);
+		return build_final_agent_response(session_id, decision.plain_reply_text, {});
+	}
+
+	// DeterministicTool or LlmTool from here - run it through the exact same
+	// gate any decision goes through (already_approved skips it only for the
+	// pending_command bare-"yes" case).
+	core::Array<PendingToolActionRecord> actions;
+	core::String tool_result;
+	core::String pending_response;
+	if (!execute_decision_or_pause(
+		session_id, decision.tool_name, decision.arguments_json, actions, decision.already_approved,
+		tool_result, pending_response))
+	{
+		return pending_response;
+	}
+
+	return finish_turn_after_execution(
+		session_id, decision.tool_name, decision.arguments_json, tool_result, actions, tools, provider);
 }
 
 core::String DroidHost::agent_tool_decision(const core::String& body)
@@ -3514,9 +3525,6 @@ core::String DroidHost::agent_tool_decision(const core::String& body)
 
 	core::String session_id;
 	ai::ToolCall decided_call;
-	core::Array<ai::ToolCall> tool_calls;
-	size_t call_index = 0;
-	int hop = 0;
 	core::Array<PendingToolActionRecord> actions;
 
 	{
@@ -3528,11 +3536,8 @@ core::String DroidHost::agent_tool_decision(const core::String& body)
 				+ net::json_string_field("error", "no tool call is awaiting a decision") + "}";
 		}
 		session_id = pending_tool_call_.session_id;
-		tool_calls = pending_tool_call_.tool_calls;
-		call_index = pending_tool_call_.call_index;
-		hop = pending_tool_call_.hop;
+		decided_call = pending_tool_call_.decided_call;
 		actions = pending_tool_call_.actions;
-		decided_call = tool_calls[call_index];
 		pending_tool_call_ = PendingAgentToolCall{};
 	}
 
@@ -3551,502 +3556,329 @@ core::String DroidHost::agent_tool_decision(const core::String& body)
 	const std::unique_ptr<ai::ModelProvider> provider_ptr = make_model_provider();
 	const ai::ModelProvider& provider = *provider_ptr;
 
-	// resume_call_index is call_index + 1: the decision for tool_calls[call_index]
-	// is already resolved above (executed or declined, recorded, appended to
-	// actions) - run_agent_tool_loop's resume path continues with whatever
-	// comes after it in this hop, or moves on to the next hop if that was the
-	// last call.
-	return run_agent_tool_loop(session_id, tools, provider, hop, tool_calls, call_index + 1, actions);
+	// The decision this call was paused on is already resolved above
+	// (executed or declined, recorded, appended to actions) - go straight to
+	// the shared tail. allow_retry=approved: a decline is an explicit human
+	// veto, not a technical failure to auto-retry - only an actual execution
+	// failure (approved=true, tool still returned ok:false) gets the one
+	// bounded retry.
+	return finish_turn_after_execution(
+		session_id, decided_call.name, decided_call.arguments_json, tool_result, actions, tools, provider, /*allow_retry=*/approved);
 }
 
-core::String DroidHost::run_agent_tool_loop(
+classify::TurnDecision DroidHost::classify_turn(
 	const core::String& session_id,
+	const core::String& user_message,
+	const core::String& previous_assistant_text,
 	const core::Array<ai::ToolDefinition>& tools,
-	const ai::ModelProvider& provider,
-	int hop,
-	core::Array<ai::ToolCall> resume_calls,
-	size_t resume_call_index,
-	core::Array<PendingToolActionRecord> actions)
+	const ai::ModelProvider& provider)
 {
-	// Raised from 5 (Phase 12): the command-failure auto-retry mechanism
-	// below can consume up to kMaxCommandRetryNudges hops on its own, on top
-	// of the pre-existing fabrication/capability-denial nudges and the
-	// hop(s) actually spent calling tools - 5 left no room for a real
-	// multi-attempt retry-until-it-works loop, which is the whole point of
-	// this phase. See "Phase 12" in ARCHITECTURE.md.
-	constexpr int kMaxHops = 9;
-	core::String final_assistant_text;
-	bool budget_exhausted = false;
-	// Capped at 1, not "every hop until the budget runs out": a model that
-	// fabricates once and self-corrects after a single nudge is common: a
-	// model that fabricates the *same* claim again right after being told
-	// it didn't happen is not going to be talked out of it by repeating the
-	// same nudge three more times - it just burns the hop budget on
-	// nudges instead of ever attempting the real tool call, and in
-	// practice degrades a small local model's output further (observed:
-	// four nudges in one turn led to the model echoing literal
-	// "assistant\n\n" role-token fragments into its own completion).
-	int unverified_claim_nudge_count = 0;
-	constexpr int kMaxUnverifiedClaimNudges = 1;
-
-	// A failed run_command/run_ffmpeg call must not just be reported back to
-	// the user with "want me to try again?" - the model has (most of) a full
-	// hop budget and the exact failure_reason already; it should read the
-	// error and retry with a corrected command itself, same as a human
-	// operator debugging a broken command line would. Capped (not unbounded)
-	// for the same reason kMaxUnverifiedClaimNudges is: a command that's
-	// wrong in a way the model can't diagnose from the error alone will just
-	// keep failing, and burning the whole hop budget on that guarantees an
-	// unhelpful non-answer instead of an honest "I tried N times, here's the
-	// last real error." See "Phase 12" in ARCHITECTURE.md - motivated by a
-	// real transcript where the model asked permission to retry four
-	// separate times across four separate user messages instead of once,
-	// automatically, within the turn it already had the error in front of it.
-	int command_retry_nudge_count = 0;
-	constexpr int kMaxCommandRetryNudges = 3;
-
-	// A non-empty resume_calls means we're continuing a hop that was already
-	// fetched from the model before an earlier call in it paused for
-	// approval - finish whatever's left in it before asking the model for
-	// anything new. A fresh agent_turn() always passes an empty array here,
-	// so this block is skipped entirely on a normal first call.
-	if (!resume_calls.empty())
+	const classify::TurnDecision deterministic_decision =
+		classify::try_deterministic_classify(user_message, previous_assistant_text);
+	if (deterministic_decision.kind != classify::TurnDecisionKind::NoDeterministicMatch)
 	{
-		for (size_t call_index = resume_call_index; call_index < resume_calls.size(); ++call_index)
-		{
-			ai::ToolCall& call = resume_calls[call_index];
-			if (tool_call_requires_approval(call.name))
-			{
-				// Never propose a yes/no for an open_application call that's
-				// guaranteed to fail - resolve first (rewriting call in
-				// place on success), and if nothing resolves, skip the
-				// approval prompt entirely and record it as an immediately
-				// failed action instead. See "Never propose an unresolvable
-				// action" in ARCHITECTURE.md.
-				core::String precheck_failure_json;
-				if (!precheck_and_resolve_gated_call(call, precheck_failure_json))
-				{
-					append_app_log("chat", "out",
-						"tool " + call.name + "(" + call.arguments_json + ") -> " + precheck_failure_json, false, session_id);
-					record_agent_message(session_id, ai::ChatRole::Tool, precheck_failure_json);
-					actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, precheck_failure_json});
-					continue;
-				}
-
-				std::lock_guard<std::mutex> lock(mutex_);
-				pending_tool_call_ = PendingAgentToolCall{true, session_id, hop, resume_calls, call_index, actions};
-				return build_pending_tool_call_response(session_id, call, actions);
-			}
-
-			const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
-			append_app_log("chat", "out",
-				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true, session_id);
-			record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
-			actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, tool_result});
-		}
-
-		if (hop == kMaxHops - 1)
-		{
-			budget_exhausted = true;
-			append_app_log("chat", "out", "tool-call budget exhausted after " + std::to_string(kMaxHops) + " hops", false, session_id);
-		}
-		++hop;
+		return deterministic_decision;
 	}
 
-	for (; hop < kMaxHops; ++hop)
+	return classify_via_llm(session_id, tools, provider);
+}
+
+classify::TurnDecision DroidHost::classify_via_llm(
+	const core::String& session_id,
+	const core::Array<ai::ToolDefinition>& tools,
+	const ai::ModelProvider& provider)
+{
+	core::Array<ai::ChatMessage> transcript_copy;
 	{
-		core::Array<ai::ChatMessage> transcript_copy;
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			transcript_copy = agent_transcript_;
-		}
+		std::lock_guard<std::mutex> lock(mutex_);
+		transcript_copy = agent_transcript_;
+	}
 
-		const ai::ProviderRequest request = provider.build_request(transcript_copy, tools);
-		if (!request.valid)
-		{
-			append_app_log("chat", "out", "request build failed: " + request.error_message, false, session_id);
-			return "{" + net::json_bool_field("ok", false) + ","
-				+ net::json_string_field("error", request.error_message) + ","
-				+ net::json_string_field("session_id", session_id) + "}";
-		}
+	const ai::ProviderRequest request = provider.build_request(transcript_copy, tools);
+	if (!request.valid)
+	{
+		append_app_log("chat", "out", "classify request build failed: " + request.error_message, false, session_id);
+		classify::TurnDecision decision;
+		decision.kind = classify::TurnDecisionKind::TransportFailed;
+		decision.error_message = request.error_message;
+		return decision;
+	}
 
-		// A tool-use-tuned local model can come back with neither assistant
-		// text nor a tool call for a given hop - not a transport/HTTP
-		// failure (parse_ollama_chat_response still reports http_success),
-		// just nothing to act on or show. Seen in practice with
-		// llama3-groq-tool-use, and near-always transient: retrying the
-		// identical request resolves it far more often than not (this is
-		// exactly what a user manually re-typing the same message was doing
-		// before this loop existed). Bounded separately from kMaxHops - an
-		// empty reply never produced a tool call, so it shouldn't eat into
-		// that budget the way a real hop does.
-		constexpr int kMaxEmptyRetries = 2;
-		ai::ProviderResponse response;
-		core::String last_response_body;
-		const auto hop_wall_clock_start = std::chrono::steady_clock::now();
-		int attempts_used = 0;
-		for (int attempt = 0; ; ++attempt)
-		{
-			attempts_used = attempt + 1;
-			int32_t status_code = 0;
-			core::String response_body;
-			const bool transport_ok = language_ai_transport_.post_json
-				? language_ai_transport_.post_json(request.url, request.body, request.headers, status_code, response_body)
-				: false;
+	// A tool-use-tuned local model can come back with neither assistant text
+	// nor a tool call - not a transport/HTTP failure, just nothing to act on.
+	// Retrying the identical request resolves it far more often than not.
+	// Bounded separately from anything else - this is a transport-flakiness
+	// guard, not a narration guard, and scoped to this one classification
+	// call only (no hop budget left to share it with).
+	constexpr int kMaxEmptyRetries = 2;
+	ai::ProviderResponse response;
+	core::String last_response_body;
+	const auto wall_clock_start = std::chrono::steady_clock::now();
+	int attempts_used = 0;
+	for (int attempt = 0; ; ++attempt)
+	{
+		attempts_used = attempt + 1;
+		int32_t status_code = 0;
+		core::String response_body;
+		const bool transport_ok = language_ai_transport_.post_json
+			? language_ai_transport_.post_json(request.url, request.body, request.headers, status_code, response_body)
+			: false;
 
-			response = provider.parse_response(status_code, response_body, transport_ok);
-			last_response_body = response_body;
-
-			if (!response.transport_ok || !response.http_success)
-			{
-				break;
-			}
-			if (!response.assistant_message.empty() || !response.tool_calls.empty())
-			{
-				break;
-			}
-			if (attempt >= kMaxEmptyRetries)
-			{
-				// Capped in the log line - the raw body is diagnostic, not
-				// something that needs to round-trip in full.
-				append_app_log("chat", "out",
-					"hop " + std::to_string(hop) + ": model returned neither text nor a tool call after "
-						+ std::to_string(kMaxEmptyRetries + 1) + " attempts, raw response: "
-						+ last_response_body.substr(0, 500),
-					false, session_id);
-				break;
-			}
-			append_app_log("chat", "out",
-				"hop " + std::to_string(hop) + ": model returned neither text nor a tool call, retrying ("
-					+ std::to_string(attempt + 1) + "/" + std::to_string(kMaxEmptyRetries) + ")",
-				false, session_id);
-		}
-		const int64_t hop_wall_clock_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now() - hop_wall_clock_start).count();
-
-		// Structured telemetry for this hop, on a channel named after the
-		// active provider (config_.ai_provider - "ollama" or "anthropic")
-		// so it doesn't crowd the "chat" channel's human-summary lines above,
-		// and so switching providers (Phase 32) doesn't leave every log line
-		// mislabeled "ollama". Wall-clock latency (spans every retry this hop
-		// needed) plus, whenever the response actually carried it, the
-		// provider's own generation timing and token counts. See "Ollama
-		// telemetry"/"Second ModelProvider" in ARCHITECTURE.md.
-		const core::String active_model = active_model_name();
-		const core::String model_metrics_fields =
-			net::json_string_field("model", active_model) + ","
-			+ "\"hop\":" + std::to_string(hop) + ","
-			+ "\"attempts\":" + std::to_string(attempts_used) + ","
-			+ "\"wall_clock_ms\":" + std::to_string(hop_wall_clock_ms) + ","
-			+ "\"model_total_ms\":" + std::to_string(response.total_duration_ms) + ","
-			+ "\"model_eval_ms\":" + std::to_string(response.eval_duration_ms) + ","
-			+ "\"prompt_tokens\":" + std::to_string(response.prompt_tokens) + ","
-			+ "\"completion_tokens\":" + std::to_string(response.completion_tokens) + ","
-			+ net::json_string_field("done_reason", response.done_reason) + ","
-			+ "\"tool_calls\":" + std::to_string(response.tool_calls.size());
-		append_app_log(config_.ai_provider, "out",
-			"hop " + std::to_string(hop) + " (" + std::to_string(attempts_used) + " attempt(s), "
-				+ std::to_string(hop_wall_clock_ms) + "ms)",
-			response.transport_ok && response.http_success, session_id, model_metrics_fields);
+		response = provider.parse_response(status_code, response_body, transport_ok);
+		last_response_body = response_body;
 
 		if (!response.transport_ok || !response.http_success)
 		{
-			const core::String error = response.error_message.empty() ? "Ollama request failed" : response.error_message;
-			append_app_log("chat", "out", "hop " + std::to_string(hop) + " failed: " + error, false, session_id);
-			// The user's message (and the system prompt, on a fresh session)
-			// was already persisted via record_agent_message() above, even
-			// though this turn is about to fail - include session_id so a
-			// caller can still find it via GET /api/agent/history.
-			return "{" + net::json_bool_field("ok", false) + ","
-				+ net::json_string_field("error", error) + ","
-				+ net::json_string_field("session_id", session_id) + "}";
-		}
-
-		record_agent_message(session_id, ai::ChatRole::Assistant, response.assistant_message);
-
-		if (response.tool_calls.empty())
-		{
-			// Caught an unverified action claim (a promise never followed
-			// through, or a past-tense "I've done X" with nothing to back
-			// it up). Only flagged when no *matching* action this turn
-			// actually succeeded yet - a truthful summary of a tool call
-			// that already ran earlier in the same turn ("I've successfully
-			// created it" right after run_ffmpeg returned ok:true) must
-			// never be second-guessed.
-			//
-			// Only a mutating/gated tool's success counts as "matching" here
-			// (tool_call_requires_approval - copy_file, write_file, run_command,
-			// open_application, etc.), not any read-only success. A real
-			// transcript showed this scan take *any* ok:true action this turn
-			// as license to trust the claim - list_connectors returning an
-			// empty list (trivially ok:true) was enough to wave through "I've
-			// successfully copied the file," and separately, list_open_windows
-			// succeeding was enough to wave through "The Recycle Bin is
-			// already running" (unsupported by the window list it just
-			// returned) and "I called list_dir, then run_command to create
-			// it" (no run_command call exists anywhere in that session). A
-			// claim of a completed action can only be backed by an action that
-			// actually changes something - a read-only lookup succeeding is
-			// never evidence for it, no matter what the claim is about.
-			bool a_tool_call_already_succeeded_this_turn = false;
-			for (const PendingToolActionRecord& action : actions)
-			{
-				if (!tool_call_requires_approval(action.tool))
-				{
-					continue;
-				}
-				bool action_ok = false;
-				if (net::extract_json_bool_field(action.result_json, "ok", action_ok) && action_ok)
-				{
-					a_tool_call_already_succeeded_this_turn = true;
-					break;
-				}
-			}
-			// The role-leak check runs regardless of a_tool_call_already_succeeded_this_turn -
-			// unlike an unverified claim, leaked-role garbled text isn't a
-			// legitimate truthful summary under any circumstance, tool call or
-			// not, so a prior success in this turn never excuses it.
-			const bool looks_fabricated =
-				(!a_tool_call_already_succeeded_this_turn && looks_like_unverified_action_claim(response.assistant_message))
-				|| looks_like_degenerate_role_leak(response.assistant_message);
-
-			if (looks_fabricated && hop < kMaxHops - 1
-				&& unverified_claim_nudge_count < kMaxUnverifiedClaimNudges)
-			{
-				// There's hop budget and nudge budget left - give the model
-				// one shot at either actually calling the tool or being
-				// honest about not having done so, instead of treating the
-				// claim as the final answer.
-				++unverified_claim_nudge_count;
-				append_app_log("chat", "out",
-					"hop " + std::to_string(hop) + ": assistant claimed an action with no successful tool call to back it up, nudging it to correct itself",
-					false, session_id);
-				record_agent_message(session_id, ai::ChatRole::System, kUnverifiedActionClaimNudge);
-				continue;
-			}
-
-			if (looks_fabricated)
-			{
-				// The nudge already fired once this turn (or there's no hop
-				// budget left for one) and the model is STILL claiming an
-				// unbacked action - do not let that fabrication reach the
-				// user under any circumstance, even as a "final" answer.
-				// Override with an honest refusal rather than trusting the
-				// model's own text this one time; the model gets to try
-				// again on the user's next message instead of digging the
-				// same hole deeper across more nudges (which, in practice,
-				// degrades a small local model's output further rather
-				// than fixing anything - see kMaxUnverifiedClaimNudges).
-				append_app_log("chat", "out",
-					"hop " + std::to_string(hop) + ": assistant still claiming an unbacked action after nudging - overriding with an honest refusal instead of passing the fabrication through",
-					false, session_id);
-				final_assistant_text =
-					"I wasn't actually able to complete this - I kept describing the action "
-					"instead of calling the tool for it, and didn't correct that after being "
-					"asked to. Please try again, or rephrase the request.";
-				break;
-			}
-
-			// Was the most recent action this turn a retriable tool call that
-			// failed? If so, the model landing here with plain text and no
-			// new tool_calls means it's either asking the user's permission
-			// to retry, or has otherwise stalled - in both cases it already
-			// has the real error in front of it and hop budget to spare, so
-			// it should retry itself rather than hand the decision back to
-			// the user. Originally just run_command/run_ffmpeg (Phase 12);
-			// extended to the filesystem tools too (Phase 23) - a real
-			// transcript showed a failed read_file/write_file only ever get
-			// the "don't lie about it" fabrication nudge, never a push to
-			// actually retry with a corrected path, so it took several user
-			// turns to even get the real Desktop path via get_system_info.
-			core::String failed_command_tool;
-			core::String failed_command_reason;
-			bool last_action_was_failed_command = false;
-			if (!actions.empty())
-			{
-				const PendingToolActionRecord& last_action = actions.back();
-				static const char* const kRetriableTools[] = {
-					"run_command", "run_ffmpeg",
-					"read_file", "write_file", "copy_file", "move_path", "delete_file", "create_directory",
-					// Added alongside the pre-approval resolution precheck
-					// (Phase 42) - an unresolved open_application name is
-					// exactly the "model has enough information to fix
-					// itself" shape (the error names the exact tiers that
-					// were tried and points at list_windows_locations/
-					// find_application), the same reasoning that already
-					// applies to the filesystem tools.
-					"open_application"
-				};
-				bool is_retriable_tool = false;
-				for (const char* retriable_tool : kRetriableTools)
-				{
-					if (last_action.tool == retriable_tool)
-					{
-						is_retriable_tool = true;
-						break;
-					}
-				}
-				if (is_retriable_tool)
-				{
-					bool action_ok = true;
-					net::extract_json_bool_field(last_action.result_json, "ok", action_ok);
-					if (!action_ok)
-					{
-						last_action_was_failed_command = true;
-						failed_command_tool = last_action.tool;
-						failed_command_reason = net::extract_json_string_field(last_action.result_json, "failure_reason");
-						if (failed_command_reason.empty())
-						{
-							failed_command_reason = net::extract_json_string_field(last_action.result_json, "error");
-						}
-					}
-				}
-			}
-
-			const bool denies_capability = looks_like_capability_denial(response.assistant_message);
-
-			if ((last_action_was_failed_command || denies_capability)
-				&& hop < kMaxHops - 1
-				&& command_retry_nudge_count < kMaxCommandRetryNudges)
-			{
-				++command_retry_nudge_count;
-				const int retries_left = kMaxCommandRetryNudges - command_retry_nudge_count;
-				const core::String nudge = last_action_was_failed_command
-					? ("Your last " + failed_command_tool + " call failed: " + failed_command_reason
-						+ ". Do not ask the user whether to retry - analyze this exact error yourself "
-						"and call " + failed_command_tool + " again right now with corrected input (a "
-						"corrected command, path, or argument, whichever the error points to) - use "
-						"list_dir/stat_path/get_system_info first if you need the real path/username "
-						"rather than guessing again. You have " + std::to_string(retries_left)
-						+ " automatic retr" + (retries_left == 1 ? "y" : "ies")
-						+ " left after this one before you must report the real error honestly instead of "
-						"trying again.")
-					: core::String(kCapabilityDenialNudge);
-				append_app_log("chat", "out",
-					"hop " + std::to_string(hop) + ": " + (last_action_was_failed_command
-						? "last command failed - nudging the model to retry with a corrected command instead of asking permission"
-						: "assistant falsely denied having command-execution capability - nudging it to correct itself"),
-					false, session_id);
-				record_agent_message(session_id, ai::ChatRole::System, nudge);
-				continue;
-			}
-
-			if (denies_capability)
-			{
-				// Retry/nudge budget exhausted and it's STILL falsely denying
-				// capability - tell the user the truth rather than let a lie
-				// about the agent's own abilities reach them unchallenged.
-				append_app_log("chat", "out",
-					"hop " + std::to_string(hop) + ": assistant still falsely denying command-execution capability after nudging",
-					false, session_id);
-				final_assistant_text =
-					"Something went wrong here - I incorrectly told you I can't execute commands, "
-					"which isn't true (I do have run_command/run_ffmpeg/file tools). Please try "
-					"rephrasing your request; if this keeps happening, it's worth reporting as a bug.";
-				break;
-			}
-
-			if (last_action_was_failed_command)
-			{
-				// Retry budget exhausted and the command is still failing -
-				// report the real last error honestly instead of silently
-				// giving up or asking the user to retry it themselves.
-				append_app_log("chat", "out",
-					"hop " + std::to_string(hop) + ": command retry budget exhausted, reporting the last real error",
-					false, session_id);
-				final_assistant_text =
-					"I tried " + failed_command_tool + " " + std::to_string(kMaxCommandRetryNudges + 1)
-					+ " time(s) and it kept failing. Last error: " + failed_command_reason
-					+ ". I'm stopping here rather than keep guessing - let me know if you have more "
-					"details (the exact format/filter you want) and I'll try again.";
-				break;
-			}
-
-			final_assistant_text = response.assistant_message;
 			break;
 		}
-
-		bool paused = false;
-		size_t call_index = 0;
-		for (; call_index < response.tool_calls.size(); ++call_index)
+		if (!response.assistant_message.empty() || !response.tool_calls.empty())
 		{
-			ai::ToolCall& call = response.tool_calls[call_index];
-			if (tool_call_requires_approval(call.name))
-			{
-				// Never propose a yes/no for an open_application call that's
-				// guaranteed to fail - resolve first (rewriting call in
-				// place on success), and if nothing resolves, skip the
-				// approval prompt entirely and record it as an immediately
-				// failed action instead. See "Never propose an unresolvable
-				// action" in ARCHITECTURE.md.
-				core::String precheck_failure_json;
-				if (!precheck_and_resolve_gated_call(call, precheck_failure_json))
-				{
-					append_app_log("chat", "out",
-						"tool " + call.name + "(" + call.arguments_json + ") -> " + precheck_failure_json, false, session_id);
-					record_agent_message(session_id, ai::ChatRole::Tool, precheck_failure_json);
-					actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, precheck_failure_json});
-					continue;
-				}
-
-				std::lock_guard<std::mutex> lock(mutex_);
-				pending_tool_call_ = PendingAgentToolCall{true, session_id, hop, response.tool_calls, call_index, actions};
-				paused = true;
-				break;
-			}
-
-			const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
+			break;
+		}
+		if (attempt >= kMaxEmptyRetries)
+		{
 			append_app_log("chat", "out",
-				"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true, session_id);
-			record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
-			actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, tool_result});
+				"classify: model returned neither text nor a tool call after " + std::to_string(kMaxEmptyRetries + 1)
+					+ " attempts, raw response: " + last_response_body.substr(0, 500),
+				false, session_id);
+			break;
 		}
-
-		if (paused)
-		{
-			return build_pending_tool_call_response(session_id, response.tool_calls[call_index], actions);
-		}
-
-		if (hop == kMaxHops - 1)
-		{
-			budget_exhausted = true;
-			final_assistant_text = response.assistant_message;
-			append_app_log("chat", "out", "tool-call budget exhausted after " + std::to_string(kMaxHops) + " hops", false, session_id);
-		}
-	}
-
-	// A model can legitimately return an empty assistant_message with no
-	// tool_calls (seen in practice with a local Ollama model on some
-	// requests) - without this, the caller gets ok:true with a blank
-	// "assistant" field and nothing to show the user, which reads as the
-	// turn silently doing nothing rather than as an error. Substitute a
-	// visible placeholder instead of ever returning a blank reply.
-	if (final_assistant_text.empty())
-	{
-		final_assistant_text = budget_exhausted
-			? "(reached the tool-call limit without a final reply - try rephrasing or breaking the request into smaller steps)"
-			: "(no reply text - the model returned an empty response, try rephrasing)";
-		// A single, definitive false-flagged log line at the one place this
-		// placeholder is ever substituted - a catch-all so every way a turn
-		// can end without a usable reply lands in logs/log.jsonl as a
-		// failure, even if the more specific path that caused it (retry
-		// exhaustion, budget exhaustion) didn't already log its own entry.
 		append_app_log("chat", "out",
-			"turn ended without a usable reply (" + core::String(budget_exhausted ? "tool-call budget exhausted" : "empty model response") + ")",
+			"classify: model returned neither text nor a tool call, retrying (" + std::to_string(attempt + 1)
+				+ "/" + std::to_string(kMaxEmptyRetries) + ")",
 			false, session_id);
 	}
+	const int64_t wall_clock_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now() - wall_clock_start).count();
 
-	append_app_log("chat", "out", "assistant: " + final_assistant_text, true, session_id);
+	// Structured telemetry, same shape run_agent_tool_loop's per-hop logging
+	// used to carry - one classification call now, not one per hop.
+	const core::String active_model = active_model_name();
+	const core::String model_metrics_fields =
+		net::json_string_field("model", active_model) + ","
+		+ "\"attempts\":" + std::to_string(attempts_used) + ","
+		+ "\"wall_clock_ms\":" + std::to_string(wall_clock_ms) + ","
+		+ "\"model_total_ms\":" + std::to_string(response.total_duration_ms) + ","
+		+ "\"model_eval_ms\":" + std::to_string(response.eval_duration_ms) + ","
+		+ "\"prompt_tokens\":" + std::to_string(response.prompt_tokens) + ","
+		+ "\"completion_tokens\":" + std::to_string(response.completion_tokens) + ","
+		+ net::json_string_field("done_reason", response.done_reason) + ","
+		+ "\"tool_calls\":" + std::to_string(response.tool_calls.size());
+	append_app_log(config_.ai_provider, "out",
+		"classify (" + std::to_string(attempts_used) + " attempt(s), " + std::to_string(wall_clock_ms) + "ms)",
+		response.transport_ok && response.http_success, session_id, model_metrics_fields);
 
+	classify::TurnDecision decision;
+	if (!response.transport_ok || !response.http_success)
+	{
+		decision.kind = classify::TurnDecisionKind::TransportFailed;
+		decision.error_message = response.error_message.empty() ? "provider request failed" : response.error_message;
+		return decision;
+	}
+
+	// The model's own assistant_message is deliberately never persisted here,
+	// whichever branch below fires - a stray narrative claim accompanying a
+	// tool call is discarded entirely rather than kept around in
+	// agent_transcript_ for a later turn to stumble on. Exactly one Assistant
+	// message is recorded per turn, by the caller, once the actually-shown
+	// text (a phrased result, or this PlainReply text) is known.
+	if (!response.tool_calls.empty())
+	{
+		if (response.tool_calls.size() > 1)
+		{
+			append_app_log("chat", "out",
+				"classify: model returned " + std::to_string(response.tool_calls.size())
+					+ " tool calls - taking the first (" + response.tool_calls[0].name
+					+ ") and discarding the rest, no multi-call chaining",
+				true, session_id);
+		}
+		decision.kind = classify::TurnDecisionKind::LlmTool;
+		decision.tool_name = response.tool_calls[0].name;
+		decision.arguments_json = response.tool_calls[0].arguments_json;
+		return decision;
+	}
+
+	decision.kind = classify::TurnDecisionKind::PlainReply;
+	decision.plain_reply_text = response.assistant_message.empty()
+		? core::String("(no reply text - the model returned an empty response, try rephrasing)")
+		: response.assistant_message;
+	return decision;
+}
+
+bool DroidHost::execute_decision_or_pause(
+	const core::String& session_id,
+	const core::String& tool_name,
+	const core::String& arguments_json,
+	core::Array<PendingToolActionRecord>& actions,
+	const bool already_approved,
+	core::String& out_tool_result,
+	core::String& out_pending_response)
+{
+	ai::ToolCall call;
+	call.id = "classified-0";
+	call.name = tool_name;
+	call.arguments_json = arguments_json;
+
+	if (!already_approved && tool_call_requires_approval(call.name))
+	{
+		// Never propose a yes/no for an open_application call that's
+		// guaranteed to fail - resolve first (rewriting call in place on
+		// success), and if nothing resolves, skip the approval prompt
+		// entirely and record it as an immediately failed action instead.
+		core::String precheck_failure_json;
+		if (!precheck_and_resolve_gated_call(call, precheck_failure_json))
+		{
+			append_app_log("chat", "out",
+				"tool " + call.name + "(" + call.arguments_json + ") -> " + precheck_failure_json, false, session_id);
+			record_agent_message(session_id, ai::ChatRole::Tool, precheck_failure_json);
+			actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, precheck_failure_json});
+			out_tool_result = precheck_failure_json;
+			return true;
+		}
+
+		std::lock_guard<std::mutex> lock(mutex_);
+		pending_tool_call_ = PendingAgentToolCall{true, session_id, call, actions};
+		out_pending_response = build_pending_tool_call_response(session_id, call, actions);
+		return false;
+	}
+
+	const core::String tool_result = execute_agent_tool(call.name, call.arguments_json);
+	append_app_log("chat", "out",
+		"tool " + call.name + "(" + call.arguments_json + ") -> " + tool_result, true, session_id);
+	record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
+	actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, tool_result});
+	out_tool_result = tool_result;
+	return true;
+}
+
+core::String DroidHost::finish_turn_after_execution(
+	const core::String& session_id,
+	const core::String& executed_tool_name,
+	const core::String& executed_arguments_json,
+	const core::String& executed_result_json,
+	core::Array<PendingToolActionRecord> actions,
+	const core::Array<ai::ToolDefinition>& tools,
+	const ai::ModelProvider& provider,
+	const bool allow_retry)
+{
+	bool result_ok = false;
+	net::extract_json_bool_field(executed_result_json, "ok", result_ok);
+
+	core::String final_tool_name = executed_tool_name;
+	core::String final_arguments_json = executed_arguments_json;
+	core::String final_result_json = executed_result_json;
+
+	if (allow_retry && !result_ok && is_retriable_tool(executed_tool_name))
+	{
+		// One bounded auto-retry, not a loop: tell the model the real error
+		// and let it make exactly one fresh classification with that context
+		// in view - never by re-running the deterministic recognizers again
+		// (they'd just recognize the identical shape and fail identically).
+		const core::String failure_reason = net::extract_json_string_field(executed_result_json, "error");
+		record_agent_message(session_id, ai::ChatRole::System,
+			"(" + executed_tool_name + " failed: " + (failure_reason.empty() ? core::String("unknown error") : failure_reason)
+			+ ". This is your one automatic retry - if you can fix the input, call the right tool now with a "
+			"corrected argument; otherwise just explain what went wrong.)");
+
+		const classify::TurnDecision retry_decision = classify_via_llm(session_id, tools, provider);
+		if (retry_decision.kind == classify::TurnDecisionKind::LlmTool)
+		{
+			core::String retry_tool_result;
+			core::String retry_pending_response;
+			if (!execute_decision_or_pause(session_id, retry_decision.tool_name, retry_decision.arguments_json,
+				actions, /*already_approved=*/false, retry_tool_result, retry_pending_response))
+			{
+				return retry_pending_response;
+			}
+			final_tool_name = retry_decision.tool_name;
+			final_arguments_json = retry_decision.arguments_json;
+			final_result_json = retry_tool_result;
+		}
+		else if (retry_decision.kind == classify::TurnDecisionKind::PlainReply)
+		{
+			record_agent_message(session_id, ai::ChatRole::Assistant, retry_decision.plain_reply_text);
+			append_app_log("chat", "out", "assistant: " + retry_decision.plain_reply_text, true, session_id);
+			return build_final_agent_response(session_id, retry_decision.plain_reply_text, actions);
+		}
+		// TransportFailed on the retry falls through to phrasing the
+		// original failure honestly below - stop after one try regardless.
+	}
+
+	const core::String assistant_text = phrase_result(final_tool_name, final_arguments_json, final_result_json, provider);
+	record_agent_message(session_id, ai::ChatRole::Assistant, assistant_text);
+	append_app_log("chat", "out", "assistant: " + assistant_text, true, session_id);
+	return build_final_agent_response(session_id, assistant_text, actions);
+}
+
+core::String DroidHost::phrase_result(
+	const core::String& tool_name,
+	const core::String& arguments_json,
+	const core::String& result_json,
+	const ai::ModelProvider& provider)
+{
+	const core::String templated = classify::try_template_reply(tool_name, arguments_json, result_json);
+	if (!templated.empty())
+	{
+		return templated;
+	}
+	return phrase_via_llm(provider, tool_name, result_json);
+}
+
+core::String DroidHost::phrase_via_llm(
+	const ai::ModelProvider& provider,
+	const core::String& tool_name,
+	const core::String& result_json) const
+{
+	core::Array<ai::ChatMessage> phrasing_transcript;
+	phrasing_transcript.push_back(ai::ChatMessage{ai::ChatRole::User,
+		"The \"" + tool_name + "\" action just ran with this exact result (ground truth, already happened): "
+		+ result_json + ". In one or two short sentences, tell the user what happened. State only what this "
+		"JSON says - do not claim anything else, do not describe additional actions, do not apologize at length."});
+
+	// No tools attached - parse_response's tool_calls is guaranteed empty, so
+	// this call can only ever produce phrasing, never a new decision.
+	const ai::ProviderRequest request = provider.build_request(phrasing_transcript, {});
+	if (!request.valid)
+	{
+		return generic_result_sentence(result_json);
+	}
+
+	int32_t status_code = 0;
+	core::String response_body;
+	const bool transport_ok = language_ai_transport_.post_json
+		? language_ai_transport_.post_json(request.url, request.body, request.headers, status_code, response_body)
+		: false;
+
+	const ai::ProviderResponse response = provider.parse_response(status_code, response_body, transport_ok);
+	if (!response.transport_ok || !response.http_success || response.assistant_message.empty())
+	{
+		return generic_result_sentence(result_json);
+	}
+	return response.assistant_message;
+}
+
+core::String DroidHost::generic_result_sentence(const core::String& result_json) const
+{
+	bool ok = false;
+	net::extract_json_bool_field(result_json, "ok", ok);
+	if (ok)
+	{
+		return "Done.";
+	}
+	const core::String error = net::extract_json_string_field(result_json, "error");
+	return error.empty() ? "That didn't work." : "That didn't work: " + error;
+}
+
+core::String DroidHost::build_final_agent_response(
+	const core::String& session_id,
+	const core::String& assistant_text,
+	const core::Array<PendingToolActionRecord>& actions) const
+{
 	std::ostringstream stream;
 	stream << '{';
 	stream << net::json_bool_field("ok", true) << ',';
-	stream << net::json_string_field("assistant", final_assistant_text) << ',';
+	stream << net::json_string_field("assistant", assistant_text) << ',';
 	stream << net::json_string_field("session_id", session_id) << ',';
-	if (budget_exhausted)
-	{
-		stream << net::json_bool_field("budget_exhausted", true) << ',';
-	}
 	stream << "\"actions\":[";
 	for (size_t index = 0; index < actions.size(); ++index)
 	{
