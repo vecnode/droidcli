@@ -13,11 +13,11 @@ int main()
 	assert(runtime.submit_user_message("What is 2+2?"));
 	assert(runtime.snapshot().awaiting_response);
 
-	const OllamaOutboundRequest request = runtime.build_pending_chat_request();
+	const OpenAICompatOutboundRequest request = runtime.build_pending_chat_request();
 	assert(request.valid);
 	assert(request.body.find("What is 2+2?") != String::npos);
 
-	OllamaChatResponse response;
+	OpenAICompatChatResponse response;
 	response.transport_ok = true;
 	response.http_success = true;
 	response.status_code = 200;
@@ -33,7 +33,7 @@ int main()
 	LanguageTransportCallbacks transport;
 	transport.post_json = [](const String&, const String&, const droidcli::core::Array<String>&, int32_t& status_code_out, String& response_body_out) {
 		status_code_out = 200;
-		response_body_out = R"({"message":{"role":"assistant","content":"Done."},"done":true})";
+		response_body_out = R"({"choices":[{"index":0,"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}]})";
 		return true;
 	};
 

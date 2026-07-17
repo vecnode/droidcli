@@ -205,19 +205,8 @@ bool load_settings(const core::String& path, HostSettings& out)
 	{
 		out.ollama_num_ctx = static_cast<int32_t>(numeric_field);
 	}
-	const core::String ai_provider = net::extract_json_string_field(json, "ai_provider");
-	if (!ai_provider.empty())
-	{
-		out.ai_provider = ai_provider;
-	}
-	const core::String anthropic_model = net::extract_json_string_field(json, "anthropic_model");
-	if (!anthropic_model.empty())
-	{
-		out.anthropic_model = anthropic_model;
-	}
 
 	out.api_token = decrypt_secret_field(json, "api_token");
-	out.anthropic_api_key = decrypt_secret_field(json, "anthropic_api_key");
 
 	return true;
 }
@@ -231,10 +220,7 @@ bool save_settings(const core::String& path, const HostSettings& settings)
 		+ net::json_string_field("ollama_url", settings.ollama_url) + ","
 		+ net::json_string_field("ollama_model", settings.ollama_model) + ","
 		+ core::String("\"ollama_num_ctx\":") + std::to_string(settings.ollama_num_ctx) + ","
-		+ net::json_string_field("ai_provider", settings.ai_provider) + ","
-		+ net::json_string_field("anthropic_model", settings.anthropic_model) + ","
-		+ serialize_secret_field("api_token", settings.api_token) + ","
-		+ serialize_secret_field("anthropic_api_key", settings.anthropic_api_key)
+		+ serialize_secret_field("api_token", settings.api_token)
 		+ "}";
 
 	std::ofstream file(path, std::ios::binary | std::ios::trunc);

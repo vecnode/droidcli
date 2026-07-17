@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ai/ollama_client.hpp"
+#include "ai/openai_compat_client.hpp"
 #include "export.hpp"
 
 #include <functional>
@@ -9,10 +9,10 @@ namespace droidcli::ai {
 
 struct LanguageTransportCallbacks {
 	// headers is a list of raw "Name: value" lines (see
-	// tools::sync_http_post_json's extra_headers) - every existing caller
-	// (Ollama) passes an empty array; a second ModelProvider whose wire
-	// format needs an auth header (e.g. Anthropic's "x-api-key") is the
-	// reason this exists. See "Second ModelProvider" in ARCHITECTURE.md.
+	// tools::sync_http_post_json's extra_headers) - the local-Ollama default
+	// passes an empty array; a future OpenAI-compatible backend whose wire
+	// format needs an auth header (e.g. "Authorization: Bearer ...") is the
+	// reason this exists. See "The LLM provider" in ARCHITECTURE.md.
 	std::function<bool(const core::String& url, const core::String& body,
 		const core::Array<core::String>& headers,
 		int32_t& status_code_out, core::String& response_body_out)> post_json;
@@ -20,8 +20,8 @@ struct LanguageTransportCallbacks {
 
 class LanguageRuntime {
 public:
-	void set_ollama_config(const OllamaConfig& config);
-	const OllamaConfig& ollama_config() const { return ollama_config_; }
+	void set_ollama_config(const OpenAICompatConfig& config);
+	const OpenAICompatConfig& ollama_config() const { return ollama_config_; }
 
 	void set_runtime_enabled(bool enabled) { runtime_enabled_ = enabled; }
 	bool runtime_enabled() const { return runtime_enabled_; }
@@ -30,8 +30,8 @@ public:
 	void set_system_prompt(const core::String& prompt);
 	bool submit_user_message(const core::String& message);
 
-	OllamaOutboundRequest build_pending_chat_request() const;
-	bool apply_chat_response(const OllamaChatResponse& response);
+	OpenAICompatOutboundRequest build_pending_chat_request() const;
+	bool apply_chat_response(const OpenAICompatChatResponse& response);
 	bool complete_turn(const LanguageTransportCallbacks& transport);
 
 	const core::Array<ChatMessage>& transcript() const { return transcript_; }
@@ -40,7 +40,7 @@ public:
 	LanguageSnapshot snapshot() const;
 
 private:
-	OllamaConfig ollama_config_;
+	OpenAICompatConfig ollama_config_;
 	core::Array<ChatMessage> transcript_;
 	core::String last_user_message_;
 	core::String last_assistant_message_;

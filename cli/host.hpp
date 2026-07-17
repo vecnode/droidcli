@@ -32,22 +32,13 @@ struct HostConfig {
 	bool enable_hardware_scan = false;
 	core::String ollama_url = "http://127.0.0.1:11434";
 	core::String ollama_model = "llama3.2";
-	// Requested on every Ollama chat call (ai::OllamaConfig::num_ctx) so a
+	// Requested on every Ollama chat call (ai::OpenAICompatConfig::num_ctx) so a
 	// long agent-turn transcript can't be silently truncated by Ollama's own
 	// (often smaller) per-model default context window - matches
 	// OpenClaude's own 32768-token default. A knob, not a fixed constant -
 	// see --ollama-num-ctx in cli/droidcli.cpp and "Context window
 	// (num_ctx)" in ARCHITECTURE.md's OpenClaude comparison.
 	int32_t ollama_num_ctx = 32768;
-	// Second ai::ModelProvider (see "Second ModelProvider" in
-	// ARCHITECTURE.md) - "ollama" (default) or "anthropic". Selects which
-	// provider DroidHost::make_model_provider() constructs; the
-	// ollama_url/ollama_model fields above are simply ignored when this is
-	// "anthropic", same as anthropic_api_key/anthropic_model are ignored
-	// when this is "ollama".
-	core::String ai_provider = "ollama";
-	core::String anthropic_api_key;
-	core::String anthropic_model = "claude-3-5-haiku-latest";
 	// Config hardening (see "Config hardening" in ARCHITECTURE.md). Empty by
 	// default (no persistence - e.g. for a test harness that never calls
 	// configure() with a real path); cli/droidcli.cpp's main() sets this to
@@ -166,15 +157,13 @@ public:
 	core::String build_config_json() const;
 	core::String update_config(const core::String& body);
 
-	// The model name actually in use right now - config_.ollama_model or
-	// config_.anthropic_model, whichever config_.ai_provider selects (same
-	// logic already used for classify_via_llm's per-classification-call
-	// telemetry logging). Reflects whatever the settings file resolved to
-	// at startup (Phase 33) or has been changed to at runtime since (Phase
-	// 36) - "last session's model" and "the current model" are the same
-	// value by construction, not two things to reconcile. Empty only if
-	// config_ was somehow never configured at all (HostConfig's own default
-	// is a real model name, not empty) - the TUI shows "none" for that case.
+	// The model name actually in use right now - config_.ollama_model.
+	// Reflects whatever the settings file resolved to at startup (Phase 33)
+	// or has been changed to at runtime since (Phase 36) - "last session's
+	// model" and "the current model" are the same value by construction,
+	// not two things to reconcile. Empty only if config_ was somehow never
+	// configured at all (HostConfig's own default is a real model name, not
+	// empty) - the TUI shows "none" for that case.
 	core::String active_model_name() const;
 
 	void on_notify(const core::String& message);
@@ -536,22 +525,22 @@ private:
 		core::Array<PendingToolActionRecord> actions;
 	};
 
-	// Constructs the active ai::ModelProvider from config_.ai_provider -
-	// "ollama" (default) or "anthropic" - so agent_turn()/
+	// Constructs the active ai::ModelProvider (ai::OpenAICompatProvider,
+	// config_.ollama_url/ollama_model/ollama_num_ctx) so agent_turn()/
 	// agent_tool_decision() each need one call instead of duplicating the
-	// OllamaConfig-building block that used to live at both call sites. A
-	// unique_ptr (not a stack value bound to a reference, the pre-Phase-32
-	// pattern) because the concrete type is now a runtime choice, not fixed
-	// at compile time. See "Second ModelProvider" in ARCHITECTURE.md.
+	// OpenAICompatConfig-building block that used to live at both call
+	// sites. A unique_ptr (not a stack value bound to a reference, the
+	// pre-Phase-32 pattern) so a caller never needs to know the concrete
+	// type. See "The LLM provider" in ARCHITECTURE.md.
 	std::unique_ptr<ai::ModelProvider> make_model_provider() const;
 
-	// Re-saves the model/provider fields config_ owns (ollama_url,
-	// ollama_model, ai_provider, anthropic_model, anthropic_api_key,
-	// enable_ai, enable_hardware_scan) to config_.settings_path, so a
-	// runtime change (POST /api/config, POST /api/ollama/config, or the
-	// TUI's model picker - all of which call update_config()/
-	// update_ollama_config()) survives a restart the same way a --ollama-model
-	// CLI flag already does (Phase 33). A no-op if settings_path is empty.
+	// Re-saves the model fields config_ owns (ollama_url, ollama_model,
+	// ollama_num_ctx, enable_ai, enable_hardware_scan) to
+	// config_.settings_path, so a runtime change (POST /api/config, POST
+	// /api/ollama/config, or the TUI's model picker - all of which call
+	// update_config()/update_ollama_config()) survives a restart the same
+	// way a --ollama-model CLI flag already does (Phase 33). A no-op if
+	// settings_path is empty.
 	//
 	// Loads the existing file first and only overlays the fields above -
 	// `port` and `api_token` are left exactly as already on disk, since

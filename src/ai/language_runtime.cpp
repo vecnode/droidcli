@@ -16,7 +16,7 @@ void upsert_system_message(core::Array<ChatMessage>& transcript, const core::Str
 
 } // namespace
 
-void LanguageRuntime::set_ollama_config(const OllamaConfig& config)
+void LanguageRuntime::set_ollama_config(const OpenAICompatConfig& config)
 {
 	ollama_config_ = config;
 }
@@ -77,26 +77,26 @@ bool LanguageRuntime::submit_user_message(const core::String& message)
 	return true;
 }
 
-OllamaOutboundRequest LanguageRuntime::build_pending_chat_request() const
+OpenAICompatOutboundRequest LanguageRuntime::build_pending_chat_request() const
 {
 	if (!runtime_enabled_)
 	{
-		OllamaOutboundRequest request;
+		OpenAICompatOutboundRequest request;
 		request.error_message = "Language AI runtime is disabled.";
 		return request;
 	}
 
 	if (!awaiting_response_)
 	{
-		OllamaOutboundRequest request;
+		OpenAICompatOutboundRequest request;
 		request.error_message = "No pending user message.";
 		return request;
 	}
 
-	return build_ollama_chat_request(ollama_config_, transcript_);
+	return build_openai_chat_request(ollama_config_, transcript_);
 }
 
-bool LanguageRuntime::apply_chat_response(const OllamaChatResponse& response)
+bool LanguageRuntime::apply_chat_response(const OpenAICompatChatResponse& response)
 {
 	if (!awaiting_response_)
 	{
@@ -129,7 +129,7 @@ bool LanguageRuntime::apply_chat_response(const OllamaChatResponse& response)
 
 bool LanguageRuntime::complete_turn(const LanguageTransportCallbacks& transport)
 {
-	const OllamaOutboundRequest request = build_pending_chat_request();
+	const OpenAICompatOutboundRequest request = build_pending_chat_request();
 	if (!request.valid)
 	{
 		status_text_ = request.error_message;
@@ -145,7 +145,7 @@ bool LanguageRuntime::complete_turn(const LanguageTransportCallbacks& transport)
 	int32_t status_code = 0;
 	core::String response_body;
 	const bool transport_ok = transport.post_json(request.url, request.body, {}, status_code, response_body);
-	return apply_chat_response(parse_ollama_chat_response(status_code, response_body, transport_ok));
+	return apply_chat_response(parse_openai_chat_response(status_code, response_body, transport_ok));
 }
 
 core::String LanguageRuntime::representation_text() const

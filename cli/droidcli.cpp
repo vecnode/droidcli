@@ -168,28 +168,6 @@ std::string resolve_api_token(int argc, char** argv, const std::string& settings
 	return generated;
 }
 
-// Second ai::ModelProvider (see "Second ModelProvider" in ARCHITECTURE.md) -
-// mirrors resolve_api_token's flag > env var precedence, but with no
-// generated fallback: an Anthropic API key can't be conjured locally the
-// way a bearer token can, so an empty return here just means the operator
-// hasn't configured it yet (fine as long as --provider stays "ollama").
-std::string resolve_anthropic_api_key(int argc, char** argv, const std::string& settings_key)
-{
-	const std::string flag_value = parse_string_arg(argc, argv, "--anthropic-api-key", "");
-	if (!flag_value.empty())
-	{
-		return flag_value;
-	}
-
-	const char* env_value = std::getenv("ANTHROPIC_API_KEY");
-	if (env_value != nullptr && env_value[0] != '\0')
-	{
-		return env_value;
-	}
-
-	return settings_key;
-}
-
 // The absolute path to this running executable, for building the command
 // line --install-service registers with the Service Control Manager (which
 // needs an absolute path, not whatever relative/PATH-resolved form argv[0]
@@ -350,22 +328,21 @@ void print_usage()
 		"Options:\n"
 		"  --port <N>             HTTP listen port (default 30080)\n"
 		"  --config <path>        JSON file with a top-level \"connectors\" array, loaded at startup\n"
-		"  --settings <path>      JSON settings file (default db/droidcli_settings.json) - port/ollama/\n"
-		"                          provider config and secrets (token, Anthropic key, DPAPI-encrypted at\n"
-		"                          rest on Windows). CLI flags override it; written at every startup so a\n"
-		"                          later --install-service run has a token to read with none on its command line.\n"
+		"  --settings <path>      JSON settings file (default db/droidcli_settings.json) - port/ollama\n"
+		"                          config and secrets (token, DPAPI-encrypted at rest on Windows). CLI\n"
+		"                          flags override it; written at every startup so a later\n"
+		"                          --install-service run has a token to read with none on its command line.\n"
 		"  --token <value>        Bearer token for the HTTP API (else DROIDCLI_API_TOKEN env var, else generated)\n"
 		"  --no-ai                 Disable Ollama / /ai/chat and the agent tool-calling loop\n"
 		"  --enable-hardware-scan  Opt in to a one-time local CPU/GPU/RAM/disk inventory scan at startup\n"
-		"  --ollama-url <url>      Ollama base URL (default http://127.0.0.1:11434)\n"
-		"  --ollama-model <name>   Ollama model name (default llama3.2)\n"
+		"  --ollama-url <url>      Base URL of the LLM provider - any backend speaking the OpenAI Chat\n"
+		"                          Completions wire format (default http://127.0.0.1:11434, a local\n"
+		"                          Ollama daemon's built-in /v1 endpoint)\n"
+		"  --ollama-model <name>   Model name (default llama3.2)\n"
 		"  --ollama-num-ctx <N>    Ollama context window, in tokens, requested on every chat call\n"
 		"                          (default 32768, matching OpenClaude - prevents Ollama's own,\n"
 		"                          often smaller, per-model default from silently truncating a\n"
 		"                          long agent-turn transcript)\n"
-		"  --provider <name>       Chat model provider: \"ollama\" (default) or \"anthropic\"\n"
-		"  --anthropic-api-key <k> Anthropic API key (else ANTHROPIC_API_KEY env var) - required if --provider anthropic\n"
-		"  --anthropic-model <n>   Anthropic model name (default claude-3-5-haiku-latest)\n"
 		"  --headless              Skip the interactive TUI; run the plain foreground daemon loop only\n"
 		"  --daemon                Documented no-op - use a process supervisor for background operation\n"
 		"  --install-service       (Windows, Administrator) Register droidcli as a Windows Service\n"
@@ -412,9 +389,6 @@ int main(int argc, char** argv)
 	const std::string ollama_url = resolve_setting_string(argc, argv, "--ollama-url", settings.ollama_url, "http://127.0.0.1:11434");
 	const std::string ollama_model = resolve_setting_string(argc, argv, "--ollama-model", settings.ollama_model, "llama3.2");
 	const int ollama_num_ctx = resolve_setting_int(argc, argv, "--ollama-num-ctx", settings.ollama_num_ctx, 32768);
-	const std::string ai_provider = resolve_setting_string(argc, argv, "--provider", settings.ai_provider, "ollama");
-	const std::string anthropic_api_key = resolve_anthropic_api_key(argc, argv, settings.anthropic_api_key);
-	const std::string anthropic_model = resolve_setting_string(argc, argv, "--anthropic-model", settings.anthropic_model, "claude-3-5-haiku-latest");
 	const std::string config_path = parse_string_arg(argc, argv, "--config", "");
 	const std::string api_token = resolve_api_token(argc, argv, settings.api_token);
 
@@ -429,25 +403,12 @@ int main(int argc, char** argv)
 	resolved_settings.ollama_url = ollama_url;
 	resolved_settings.ollama_model = ollama_model;
 	resolved_settings.ollama_num_ctx = ollama_num_ctx;
-	resolved_settings.ai_provider = ai_provider;
-	resolved_settings.anthropic_model = anthropic_model;
 	resolved_settings.api_token = api_token;
-	resolved_settings.anthropic_api_key = anthropic_api_key;
 	droidcli::cli::save_settings(settings_path, resolved_settings);
 
 	if (ollama_num_ctx <= 0)
 	{
 		std::cerr << "droidcli: --ollama-num-ctx must be a positive integer (got " << ollama_num_ctx << ")" << std::endl;
-		return 1;
-	}
-	if (ai_provider != "ollama" && ai_provider != "anthropic")
-	{
-		std::cerr << "droidcli: --provider must be \"ollama\" or \"anthropic\" (got \"" << ai_provider << "\")" << std::endl;
-		return 1;
-	}
-	if (ai_provider == "anthropic" && anthropic_api_key.empty())
-	{
-		std::cerr << "droidcli: --provider anthropic requires --anthropic-api-key or ANTHROPIC_API_KEY" << std::endl;
 		return 1;
 	}
 
@@ -457,9 +418,8 @@ int main(int argc, char** argv)
 	// host/HTTP-server setup, and always exit immediately after. The
 	// settings file was already (re)written above with everything this
 	// invocation's flags resolved to, so the installed service's own command
-	// line only needs --service/--headless/--settings - no --token or
-	// --anthropic-api-key on a command line any process on the machine can
-	// read.
+	// line only needs --service/--headless/--settings - no --token on a
+	// command line any process on the machine can read.
 	if (has_flag(argc, argv, "--uninstall-service"))
 	{
 		const bool ok = droidcli::cli::uninstall_windows_service();
@@ -497,13 +457,10 @@ int main(int argc, char** argv)
 	host_config.ollama_url = ollama_url;
 	host_config.ollama_model = ollama_model;
 	host_config.ollama_num_ctx = ollama_num_ctx;
-	host_config.ai_provider = ai_provider;
-	host_config.anthropic_api_key = anthropic_api_key;
-	host_config.anthropic_model = anthropic_model;
-	// So a runtime model/provider change (POST /api/config, POST
-	// /api/ollama/config, the TUI's model picker) persists across restarts
-	// the same way a --ollama-model flag already does - see "Model/provider
-	// changes persist at runtime too" in ARCHITECTURE.md.
+	// So a runtime model change (POST /api/config, POST /api/ollama/config,
+	// the TUI's model picker) persists across restarts the same way a
+	// --ollama-model flag already does - see "Model changes persist at
+	// runtime too" in ARCHITECTURE.md.
 	host_config.settings_path = settings_path;
 
 	host.configure(host_config);

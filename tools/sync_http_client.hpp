@@ -7,9 +7,9 @@ namespace droidcli::tools {
 /** Synchronous HTTP POST with JSON body. Returns false on socket/transport failure.
  * extra_headers is a list of raw "Name: value" lines (no trailing CRLF) sent
  * in addition to the Content-Type/Content-Length headers this function
- * already adds - e.g. an external API's auth header (Anthropic's
- * "x-api-key"/"anthropic-version"). Empty by default so every existing
- * caller (Ollama, connector calls) is unaffected. */
+ * already adds - e.g. an external OpenAI-compatible backend's
+ * "Authorization: Bearer ..." header. Empty by default so every existing
+ * caller (the local-Ollama default, connector calls) is unaffected. */
 bool sync_http_post_json(
 	const core::String& url,
 	const core::String& body,

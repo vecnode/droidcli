@@ -37,93 +37,64 @@ struct ToolCall {
 	core::String arguments_json;
 };
 
-struct OllamaConfig {
+// droidcli's single LLM backend config: any provider speaking the OpenAI
+// Chat Completions wire format (POST {base_url}/chat/completions). Defaults
+// to a local Ollama daemon, which exposes that exact format at its built-in
+// `/v1` endpoint - no Ollama-specific request shaping lives here, so
+// pointing base_url at a different OpenAI-compatible host (LM Studio, vLLM,
+// a real OpenAI-style gateway) works without any code change. See
+// "The LLM provider" in ARCHITECTURE.md.
+struct OpenAICompatConfig {
 	core::String base_url = "http://127.0.0.1:11434";
 	core::String model = "llama3.2";
 	bool enabled = true;
 	bool stream = false;
 	float temperature = -1.0f;
-	// Context window size, in tokens, requested on every chat call - not
-	// left at Ollama's own (often small) per-model default, which can
-	// silently truncate a long agent-turn transcript. 32768 matches
-	// OpenClaude's own default (see "Context window (num_ctx)" in
-	// ARCHITECTURE.md's OpenClaude comparison) - overridable via
-	// HostConfig::ollama_num_ctx / --ollama-num-ctx, not a fixed constant.
+	// Context window size, in tokens, requested via Ollama's own "options"
+	// extension on every chat call - not left at Ollama's own (often small)
+	// per-model default, which can silently truncate a long agent-turn
+	// transcript. 32768 matches OpenClaude's own default (see "Context
+	// window (num_ctx)" in ARCHITECTURE.md's OpenClaude comparison) -
+	// overridable via HostConfig::ollama_num_ctx / --ollama-num-ctx, not a
+	// fixed constant. Harmless to send to a strict (non-Ollama)
+	// OpenAI-compatible backend - it's a sibling top-level field, not
+	// nested inside anything the standard schema validates.
 	int32_t num_ctx = 32768;
 };
 
-struct OllamaOutboundRequest {
+struct OpenAICompatOutboundRequest {
 	bool valid = false;
 	core::String url;
 	core::String body;
 	core::String error_message;
 };
 
-struct OllamaChatResponse {
+struct OpenAICompatChatResponse {
 	bool transport_ok = false;
 	bool http_success = false;
 	int32_t status_code = 0;
 	bool done = false;
 	core::String model;
 	core::String assistant_message;
+	// The model's chain-of-thought, when the backend streams one back
+	// alongside the answer - scraped from whichever of "reasoning_content"
+	// (DeepSeek/GLM-style) or "reasoning" (Ollama's own naming, confirmed
+	// against a real `glm-4.7-flash` response) the message object actually
+	// contains. Never treated as the assistant's real reply - see
+	// "Thinking is observability, not narration" in ARCHITECTURE.md; the
+	// caller logs it, it never enters agent_transcript_.
+	core::String thinking_text;
 	core::Array<ToolCall> tool_calls;
 	core::String error_message;
 
-	// Ollama's own generation telemetry, verbatim wire units (nanoseconds,
-	// token counts) - see parse_ollama_chat_response for the field names on
-	// the wire. Zero when the field was absent (older Ollama versions, or a
-	// non-2xx response that never reached this far). Consumed by
+	// Generation telemetry, OpenAI's own wire field names/units (token
+	// counts only - this wire format reports no per-call duration, unlike
+	// Ollama's native /api/chat). Zero when absent. Consumed by
 	// ModelProvider::parse_response to feed structured per-hop logging in
 	// DroidHost::agent_turn - see "Ollama telemetry" in ARCHITECTURE.md.
-	int64_t total_duration_ns = 0;
-	int64_t eval_duration_ns = 0;
-	int64_t prompt_eval_count = 0;
-	int64_t eval_count = 0;
+	int64_t prompt_tokens = 0;
+	int64_t completion_tokens = 0;
 	core::String done_reason;
-};
-
-// Second ai::ModelProvider (see "Second ModelProvider" in ARCHITECTURE.md) -
-// the Anthropic Messages API (https://api.anthropic.com/v1/messages).
-// Mirrors OllamaConfig's shape; api_key is required (unlike Ollama, which
-// needs no auth for a local peer).
-struct AnthropicConfig {
-	core::String base_url = "https://api.anthropic.com";
-	core::String api_key;
-	core::String model = "claude-3-5-haiku-latest";
-	core::String api_version = "2023-06-01";
-	bool enabled = true;
-	int32_t max_tokens = 4096;
-};
-
-// Mirrors OllamaOutboundRequest but adds `headers` - the Messages API
-// authenticates via an "x-api-key" header (plus a required
-// "anthropic-version" header), unlike Ollama's unauthenticated local peer.
-struct AnthropicOutboundRequest {
-	bool valid = false;
-	core::String url;
-	core::String body;
-	core::Array<core::String> headers;
-	core::String error_message;
-};
-
-struct AnthropicChatResponse {
-	bool transport_ok = false;
-	bool http_success = false;
-	int32_t status_code = 0;
-	core::String model;
-	core::String assistant_message;
-	core::Array<ToolCall> tool_calls;
-	core::String error_message;
-
-	// Generation telemetry, verbatim wire units - see
-	// parse_anthropic_messages_response for the field names on the wire.
-	// Mirrors OllamaChatResponse's telemetry fields' role (Phase 30) but
-	// under Anthropic's own field names (stop_reason, usage.input_tokens/
-	// output_tokens) - no per-call duration is reported on this wire format,
-	// unlike Ollama's total_duration/eval_duration.
-	core::String stop_reason;
-	int64_t input_tokens = 0;
-	int64_t output_tokens = 0;
 };
 
 struct LanguageSnapshot {
