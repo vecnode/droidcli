@@ -583,6 +583,17 @@ tool call always has - `tool_call_requires_approval()`'s gate,
 the approval); every other decision, deterministic or model-classified,
 pauses for human approval exactly like today if it names a gated tool.
 
+**A model-classified `work_dir` is never trusted as-is.** A real transcript
+showed the classifier invent a `run_ffmpeg` `work_dir` of `/path/to/Desktop`
+- a placeholder, not a real path - which reached the approval prompt
+unvalidated. `precheck_and_resolve_gated_call` now rewrites an empty,
+placeholder-looking, or invented-desktop `work_dir` to the real Desktop
+*before* the human ever sees it (`resolve_work_dir_or_desktop`, see
+"Algorithms reference" below); `run_command`/`run_ffmpeg_json` apply the
+same resolution again at execution time, and a placeholder embedded
+*inside* the command/args text itself (not a separate field - a second
+observed shape) fails outright at both layers rather than being guessed at.
+
 If a retriable tool's execution genuinely fails (`ok:false` on one of
 `kRetriableTools` - `run_command`, `run_ffmpeg`, the filesystem tools,
 `open_application`), `DroidHost::finish_turn_after_execution` makes **one**
@@ -947,6 +958,7 @@ under the new design.
 | `try_template_reply` | `classify/response_templates.cpp` | Zero-LLM-call phrasing for the common tool results, built only from the actual `result_json` fields - never invents anything beyond them. |
 | `phrase_via_llm` | `host.cpp` | The phrasing fallback when no template matches - no tools attached (so it can't decide a new action), given only the ground-truth result and told to state only what it says. |
 | `tool_call_requires_approval` | `host.cpp` | The fixed list of side-effecting tools gated behind human approval; read-only tools are excluded. |
+| `resolve_work_dir_or_desktop` | `host.cpp` | `run_command`/`run_ffmpeg`'s `work_dir` never comes from the model as-is: empty, placeholder (`looks_like_placeholder_path`), or invented-desktop values all resolve to the real Desktop - checked both pre-approval (`precheck_and_resolve_gated_call`) and at execution. A placeholder embedded *inside* the command/args text itself (not a separate field) fails outright instead of being guessed at, at both the same two layers. |
 | `substitute_bare_desktop_token` | `path_guards.cpp` | Rewrites a bare `desktop/...` token to the real, OS-resolved Desktop path - position-aware, doesn't touch `"Desktop"` mid-path. |
 | `looks_like_placeholder_path` | `path_guards.cpp` | Rejects a documentation-style invented path (`path/to/`, `username`, `example.txt`) before a filesystem tool touches disk. |
 | `looks_like_mismatched_binary_content` | `path_guards.cpp` | A `write_file` target ending in a binary/image extension must have real matching magic bytes, or the write is rejected. |
