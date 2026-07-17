@@ -22,7 +22,7 @@ Full design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Philosophy
 
-- Human user ownership it is the foundational constraint.
+- Human user ownership is the foundational constraint.
 - Security-first, with escape hatches follows from local-first.
 - Minimal keeps binary size, dependencies, and surface area small.
 - Provider-agnostic keeps the agent pluggable.

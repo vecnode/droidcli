@@ -30,7 +30,7 @@ int main()
 	assert(runtime.format_transcript().find("assistant: 4") != String::npos);
 	assert(runtime.transcript().size() == 3);
 
-	LanguageAiTransportCallbacks transport;
+	LanguageTransportCallbacks transport;
 	transport.post_json = [](const String&, const String&, const droidcli::core::Array<String>&, int32_t& status_code_out, String& response_body_out) {
 		status_code_out = 200;
 		response_body_out = R"({"message":{"role":"assistant","content":"Done."},"done":true})";

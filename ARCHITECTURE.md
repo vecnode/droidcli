@@ -238,7 +238,7 @@ one static library (`src/`) plus one executable (`cli/`).
 | `ai/model_provider` | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`), adapted by `OllamaProvider` and `AnthropicProvider`. `DroidHost::agent_turn` is coded against the interface, selecting a concrete provider at runtime via `HostConfig::ai_provider` |
 | `ai/ollama_client` | Ollama request/response shaping, incl. **tool-calling** (`ToolDefinition`/`ToolCall`, `"tools"` request field, `message.tool_calls` response parsing) and per-call telemetry (`num_ctx`, token counts, timing) |
 | `ai/anthropic_client` | Anthropic Messages API request/response shaping - the same free-function, no-I/O shape as `ai/ollama_client`, including its own tool-calling (`tool_use` content blocks) and telemetry (`usage.input_tokens`/`output_tokens`) |
-| `ai/language_runtime` | Transcript + turn state for the legacy single-shot **Ollama text-gen** endpoint (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. No tool-calling - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
+| `ai/language_runtime` | Transcript + turn state for the legacy single-shot **Ollama text-gen** endpoint (`/ai/chat`); POST via `LanguageTransportCallbacks`. No tool-calling - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
 
 ### `droidcli-memory`
 
@@ -942,2475 +942,133 @@ crate, not a reversal of the guardrail against device control.
 
 ## Chronological hardening log
 
-The full phase-by-phase record behind "Current status and next hardening
-priorities" above - read that section first for where droidcli actually
-stands today; treat this as the changelog/appendix that explains *why* each
-piece exists, not the entry point. Phases 1-5 were planned, ranked extension
-work (closing the original ZeroClaw Core-tier gaps); Phases 6 onward are
-overwhelmingly incident-driven - each one exists because a real transcript
-showed the local model fail in a specific, reproducible way, not because it
-was on a roadmap in advance. Each phase is scoped to land independently — no
-phase requires a later one to compile, pass `ctest`, or be useful on its
-own. Do not start a phase before the previous one has landed; the ordering
-exists because each phase's interface choices constrain the next (the
-memory store in Phase 2 is keyed by whatever Phase 1's provider abstraction
-settles on, the log schema in Phase 3 is the foundation Phase 5's
-attribution rides on).
-
-### Phase 1 — Provider abstraction ✅ implemented
-
-**Goal:** make `ollama_client.cpp` an implementation of an interface rather
-than the only possible shape `agent_turn` can talk to, so a second LLM
-backend is additive.
-
-**What shipped:**
-- `src/ai/model_provider.hpp`/`.cpp`: an abstract `ModelProvider` interface —
-  `build_request(transcript, tools) -> ProviderRequest`,
-  `parse_response(status_code, body, transport_ok) -> ProviderResponse`.
-  Deliberately narrower than `OllamaChatResponse`/`OllamaOutboundRequest` -
-  only the fields `agent_turn`'s loop actually reads.
-- `ai::OllamaProvider : ModelProvider` adapts the existing, tested
-  `build_ollama_chat_request`/`parse_ollama_chat_response` free functions
-  (`ai/ollama_client.cpp`) - it holds no request/response-shaping logic of
-  its own, purely a thin wrapper.
-- `DroidHost::agent_turn` (`cli/host.cpp`) constructs `const
-  ai::OllamaProvider ollama_provider(ollama_config)` and binds it to `const
-  ai::ModelProvider& provider` - everything below that line is coded against
-  the interface. A second provider means constructing a different concrete
-  type at that one call site; nothing else in `agent_turn` changes. (No
-  `std::unique_ptr`/heap allocation needed yet — one call site, one
-  provider, a stack-local reference to the base class is enough to prove the
-  abstraction. Revisit if/when provider *selection* at runtime is added.)
-- `tests/model_provider_test.cpp`: exercises `OllamaProvider` through the
-  `ModelProvider&` base reference (not its own concrete type), covering the
-  same request/response/tool-calling assertions `ollama_client_test.cpp`
-  already had - proving the abstraction actually works, not just that the
-  adapter compiles.
-
-**Deliberately not done:** no second provider (Anthropic/OpenAI) yet, no
-router, no runtime provider-selection config field - there's nothing to
-route between until a second implementation exists, and adding one
-speculatively risks shaping the interface around a provider nobody's using.
-The pre-existing `ollama_client_test` bug (tool-role message content missing
-from the built request body) was left untouched here, per the plan below —
-it's tracked as a separate fix so this refactor doesn't inherit or mask it.
-
-**Verified:** full test suite green (`ctest`, 7/7 excluding the tracked
-`ollama_client_test` bug); `/api/agent/turn` end-to-end smoke-tested through
-the new path (`{"ok":false,"error":"AI is disabled (--no-ai)"}` and a real
-Ollama-unreachable transport error both behave identically to before).
-
-### Phase 2 — Persistent memory (SQLite) ✅ implemented
-
-**Goal:** `agent_transcript_` survives a restart, and is queryable, without
-adding a runtime dependency droidcli doesn't already accept.
-
-**Why SQLite, matching `zeroclaw-infra`'s choice:** a single header + source
-amalgamation (no separate service, no network port), fitting the "no Python
-runtime, no node_modules, no sidecar interpreter" distribution constraint in
-the Roadmap section above better than any client/server store would.
-
-**What shipped:**
-- `third_party/sqlite/` — the SQLite amalgamation (v3.45.0), vendored and
-  **committed** (unlike FFmpeg: small, public domain, no license reason to
-  auto-download). Compiled as its own tiny static library
-  (`droidcli_sqlite3` in `CMakeLists.txt`, warnings suppressed since it's
-  unmodified third-party C) linked only into the `droidcli` executable
-  target, never `droidcli_core` — real file I/O is a host concern per
-  `AGENTS.md`'s Golden rule.
-- `cli/memory_store.hpp`/`.cpp`: `MemoryStore`, a thin RAII wrapper around a
-  `sqlite3*` connection with `open()`/`append()`/`load_session()`/
-  `list_session_ids()`. Schema: `memory_entries(session_id, hop_index, role,
-  content, created_at)`, indexed on `(session_id, hop_index)`. **Deviation
-  from the original plan below:** the plan called for a
-  `MemoryTransportCallbacks` indirection (mirroring
-  `LanguageAiTransportCallbacks`) to keep the SQLite calls out of `src/`.
-  That indirection turned out to be unnecessary complexity - `MemoryStore`
-  already lives entirely in `cli/` (host) and never gets linked into
-  `droidcli_core`, so the Golden rule is satisfied by *where the class is*,
-  not by adding a callback layer on top of it. `app_index.cpp`,
-  `command_runner.cpp`, and `process_manager.cpp` already establish this
-  precedent - host-only classes with real I/O, no callback indirection.
-- `DroidHost` gained `current_session_id_` (freshly generated every process
-  start - no auto-resume by default) and `record_agent_message()`, the
-  single call site every `agent_transcript_` mutation in `agent_turn` now
-  goes through, so the in-memory transcript and the persisted log can never
-  drift apart. `agent_turn`'s request body gained an optional `"session_id"`
-  (resume/switch sessions, replaying persisted history into
-  `agent_transcript_`) and `"clear":true` now generates a fresh session id
-  instead of just wiping in-memory state (old history isn't deleted, just no
-  longer active). The response gained a `"session_id"` field.
-- Two new routes: `GET /api/agent/history?session_id=...` and `GET
-  /api/agent/sessions` — the "queryable" half of the goal.
-- **Deviation from the original plan below:** no `tests/memory_store_test.cpp`
-  under `ctest`. `MemoryStore` is real file I/O against a host-owned SQLite
-  connection, in `cli/` — consistent with every other `cli/` class
-  (`ProcessManager`, `app_index`, `command_runner`), none of which have
-  `ctest` coverage either, since `tests/` only links the network/file/GPU-
-  free `droidcli_core` library by design (see "Build" above). Verified by
-  hand instead (see below); worth reconsidering if `cli/` ever grows an
-  integration-test convention of its own.
-
-**Explicit non-goal, unchanged:** no embeddings, no vector retrieval. That's
-meaningfully separate work (an embedding model dependency) and nothing in
-droidcli today needs semantic recall over old conversations — only
-durability across restarts and the ability to inspect history. **This is the
-part flagged as considerably important and expected to grow a lot over
-time** — the schema and `MemoryStore` interface here are the foundation, not
-the final word.
-
-**Verified by hand:** started droidcli pointed at an unreachable Ollama URL,
-sent one `agent_turn` (the system prompt + user message persist even though
-the Ollama call itself fails, since recording happens before the HTTP call),
-confirmed via `GET /api/agent/history` that both messages were
-there, killed the process, restarted it, and confirmed `GET
-/api/agent/history?session_id=<the old id>` still returned both messages
-byte-for-byte - the acceptance criterion below, met.
-
-### Phase 3 — Structured JSONL logging ✅ implemented
-
-**Goal:** replace `append_app_log()`'s plain-text `logs/log.txt` lines with
-a structured record any tool can parse, matching `zeroclaw-log`'s shape
-without adopting Rust macros droidcli has no equivalent for.
-
-**What shipped:**
-- `append_app_log()` (`cli/host.cpp`) now writes one JSON object per line to
-  `logs/log.jsonl`: `{"ts":"...","channel":"...","direction":"...",
-  "summary":"...","success":bool}`, plus `"session_id"` when the caller
-  passes one (currently only the `"chat"` channel does, from `agent_turn`'s
-  local `session_id` — see "Persistent memory" above). Console/stderr output
-  is unchanged: still the human-readable bracketed-text line, since that's
-  for a person watching the terminal, not for durable structured storage.
-- Each session's start is also a JSON line —
-  `{"event":"session_started","ts":"..."}` — instead of a `=== ... ===`
-  marker, so the whole file is uniformly parseable JSONL, not JSONL with one
-  non-JSON marker line mixed in.
-- `logs/log.txt` renamed to `logs/log.jsonl`; `logs/README.md` updated to
-  describe the schema.
-- The in-memory `app_log_`/`GET /api/app/log` shape, and the TUI's `log_view`
-  (which renders from that in-memory list, not by re-parsing the file), are
-  both unchanged — confirmed by inspection, this phase only touches the file
-  write.
-
-**Deviation from the original plan below:** `hop_index` (the exact position
-within a session's transcript) was scoped in the original plan but dropped —
-`MemoryStore`'s `GET /api/agent/history` already gives an ordered,
-`hop_index`-indexed view of a session, so threading a second copy of that
-number through every `append_app_log()` call site added a parameter with no
-caller currently needing it. `session_id` alone is enough to correlate a log
-line with `GET /api/agent/history?session_id=...` for the full ordered
-detail. Revisit if a concrete need for `hop_index` in the log itself shows
-up.
-
-**Explicit non-goal, unchanged:** no `Observer` trait/bridge yet — that's a
-consumer-side abstraction (something subscribing to log events) with no
-concrete subscriber to build it against yet. The schema landed first;
-add a subscription mechanism when something (a future dashboard, a future
-channel) actually needs to observe log events instead of polling `/api/app/log`.
-
-**Verified:** `ctest` green (7/7, excluding the tracked `ollama_client_test`
-issue); ran droidcli, inspected `logs/log.jsonl` by hand to confirm every
-line parses as standalone JSON, including the `session_started` marker and a
-`"chat"`-channel entry carrying `session_id`; confirmed `GET /api/app/log`'s
-response shape is byte-identical to before this phase.
-
-### Phase 4 — Channel-as-connector (only once a channel is actually wanted)
-
-**Goal:** prove that a messaging channel (Discord/Slack/Telegram/…) fits as
-a `Connector` kind rather than a parallel subsystem, without building one
-speculatively.
-
-**Do not start this phase until a specific channel is actually requested.**
-Unlike Phases 1–3 and 5, this phase has no value in the abstract — building
-"channel support" with no channel to validate it against risks designing
-around imagined requirements instead of a real integration's actual
-constraints (auth flow, message framing, rate limits all differ per
-platform).
-
-**When it is requested, the shape is:**
-- A new `Connector::kind` value (e.g. `"messaging_peer"`) in
-  `net::connector.hpp`/`.cpp` — config carries whatever that platform's
-  client library needs (bot token, workspace ID), stored the same
-  never-echo-back way as any other secret (`CLAUDE.md`).
-- Inbound: a webhook route in `cli/http_mount.cpp` (e.g.
-  `POST /api/channels/{id}/webhook`) that maps an incoming platform message
-  to an `agent_turn` call and posts the reply back via that platform's send
-  API — reusing `agent_turn`'s existing tool-calling loop rather than a
-  second one.
-- Outbound-only platforms (no webhook, poll-based) become a `TaskQueue`
-  producer instead — a recurring task that polls the platform's API and
-  enqueues an `agent_turn`-shaped unit of work, reusing Phase-2's
-  session/history model to keep each external conversation as its own
-  `session_id`.
-
-**Acceptance (once a channel is chosen):** the new connector kind requires
-no changes to `DroidHost::agent_turn`, `execute_agent_tool`, or the core
-`Connector` struct's existing fields — only a new `kind` branch in whatever
-dispatch already switches on `kind` (`launch_connector`/`call_connector` in
-`cli/host.cpp`). If it requires more than that, the abstraction from this
-plan was wrong and needs revisiting before writing a second channel.
-
-### Phase 5 — Spawn attribution ✅ implemented
-
-**Goal:** every background `std::thread` in the codebase (the TUI's
-poller/chat-worker threads today; more will exist once Phase 4 adds
-poll-based channel producers) is tagged with what spawned it and why, and
-that tag shows up in the Phase-3 structured log.
-
-**What shipped:**
-- `src/core/spawn.hpp`/`.cpp`: `core::spawn(thread_name, fn, sink = {})` — a
-  thin, portable (no I/O, no host dependency) named-`std::thread`
-  constructor. `sink` (a `ThreadEventSink` — `void(name, event)`) is called
-  with `"spawned"` immediately, then `"joined"` or `"threw: <what>"` when
-  `fn` returns or throws. Exceptions still propagate exactly as they would
-  from a bare `std::thread` (`sink` reports why, it does not swallow the
-  exception or add its own `std::terminate()`-avoidance).
-- `DroidHost::log_thread_event(thread_name, event)` (`cli/host.cpp`), a new
-  public method: the bridge from `core::spawn`'s host-agnostic sink to the
-  Phase-3 JSONL log, under a new `"thread"` channel — `event.rfind("threw",
-  0) == 0` maps to `success:false`, everything else (`"spawned"`/`"joined"`)
-  to `success:true`.
-- `cli/tui.cpp`'s `poller` and `chat_worker` both go through
-  `core::spawn("tui.poller", ...)` / `core::spawn("tui.chat_worker", ...)`
-  now, sharing one `thread_event_sink` lambda declared once near the top of
-  `run_tui()` (it has to be declared before `chat_input`'s `CatchEvent`
-  handler, which is where `chat_worker` actually gets spawned, further down
-  the function, than where `poller` is constructed). The existing hand-off
-  patterns (`PolledState`, `ChatWork`) are untouched — this phase only wraps
-  the two `std::thread` constructions.
-- `tests/spawn_test.cpp`: exercises the basic run/join path and the sink's
-  `"spawned"`/`"joined"` reporting. The `"threw: ..."` path is intentionally
-  **not** unit tested — letting an exception actually escape `core::spawn`'s
-  wrapper would call `std::terminate()` on the test process by design
-  (matching bare `std::thread` semantics exactly), so it can't be exercised
-  safely in-process. Both real callers in `cli/tui.cpp` already catch inside
-  `fn`, which is the documented pattern; `"threw"` is a last-resort signal
-  for a caller that didn't.
-
-**Explicit non-goal, unchanged:** no thread pool, no work-stealing, no async
-runtime. droidcli's threading is deliberately minimal (one poller, one chat
-worker at a time) — this phase adds visibility, not a new concurrency model.
-
-**Verified:** `ctest` green (8/8, excluding the tracked `ollama_client_test`
-issue); launched the interactive TUI briefly and confirmed
-`{"channel":"thread","direction":"tui.poller","summary":"spawned",...}`
-appears in `logs/log.jsonl`.
-
----
-
-### Phase 6 — Agent tool-result reliability & human-in-the-loop approval ✅ implemented
-
-**Goal:** droidcli 0.1.0's agent loop drives a *local* Ollama model, which is
-materially less reliable than a hosted frontier model at both tool-calling
-and self-reporting. Two concrete incidents drove this phase, both caught by
-hand while dogfooding the agent through the TUI: (1) a `run_ffmpeg` call
-failed with a filter-graph syntax error (`exit_code=22`) and the model told
-the user the image had been "successfully created" anyway; (2) the model
-later claimed it had "successfully moved" a file to the Desktop with **zero
-tool calls anywhere in that turn** - a complete fabrication. This phase is
-the trust layer that makes those two failure modes structurally harder to
-hit, not a one-off patch for either transcript - it's the foundation
-everything else in the agent loop (Phase 4's future channel-as-connector
-work included) builds on, so it's tracked here as its own phase rather than
-folded into a `## Extension points` bullet.
-
-**What shipped:**
-
-- **A uniform `"ok"` contract for every tool result.** `run_command` and
-  `run_ffmpeg` were, until this phase, the *only* two agent tools that didn't
-  return an `"ok"` boolean - every other tool (`list_dir`, `write_file`,
-  `stat_path`, ...) already did, and the model is conditioned to key off it.
-  They had `"launched":true` (only means the process *started*, not that it
-  finished successfully) and a numeric `exit_code` buried after ffmpeg's
-  ~2KB version/config banner - exactly the shape a smaller model reliably
-  fails to parse correctly. Root-caused, not patched: `cli/command_runner.hpp`
-  now exports `command_succeeded(const CommandRunResult&)`, the single
-  derived (never a stored, driftable field) definition of success -
-  `launched && exit_code == 0 && error_message.empty()` - replacing two
-  *pre-existing* independent copies of that same inline check found in
-  `DroidHost::install_ollama()`/`pull_ollama_model()` while fixing this. Both
-  `run_command`/`run_ffmpeg_json` (`cli/host.cpp`) now put `"ok"` first in
-  their JSON, matching every other tool, and add a `"failure_reason"` field
-  on failure - built by a new `last_nonempty_lines()` helper that extracts
-  the real diagnostic from the *end* of a verbose command's output instead
-  of leaving the model to find it inside a large blob (ffmpeg's actual error
-  is always its last line or two, after its own preamble).
-- **Human-in-the-loop approval for side-effecting tools.** `run_command`,
-  `run_ffmpeg`, `write_file`, `open_application`, `launch_connector`,
-  `stop_connector`, and `enqueue_task` are gated by
-  `tool_call_requires_approval()` (`cli/host.cpp`); read-only tools
-  (`list_dir`, `get_cwd`, `get_system_info`, `which`, ...) are not - gating
-  those would only slow the agent down for no safety benefit. The moment the
-  model requests a gated call, `DroidHost::run_agent_tool_loop` pauses
-  instead of executing it, storing the call in a single-slot
-  `PendingAgentToolCall` member (`pending_tool_call_` - single-slot because
-  only one `agent_turn`/`agent_tool_decision` call is ever in flight per
-  process, the same assumption `current_session_id_` already makes) and
-  returning `{"ok":true,"pending_tool_call":{"tool":...,"arguments_json":...}}`
-  instead of a normal reply - no side effect has happened yet. `POST
-  /api/agent/tool_decision` (body `{"approved":bool,"session_id":"...",
-  "reason":"..."}`) resolves it: executes the tool if approved, or records a
-  `"user declined: <reason>"` tool result if not, then resumes the same
-  bounded loop - which can pause again on a second gated call, or run to a
-  normal completion. The TUI surfaces a pending call as
-  `[AGENT WANTS TO] tool(args) - approve? (yes/no, or say why not)` in the
-  chat log (`PendingToolApproval` in `cli/tui.cpp`), mirroring the existing
-  `PendingOpen` "open this app?" confirmation flow rather than inventing a
-  second pattern for the same kind of interaction.
-- **Reliability safety nets in `run_agent_tool_loop`**, each bounded
-  separately from the tool-calling hop budget (5 at the time this phase
-  landed, raised to 9 in Phase 12 once more of these nets needed their own
-  slice of it) so they cost at most one extra round-trip, never an infinite
-  loop:
-  - *Empty-response retry* - a local tool-use model occasionally returns
-    neither assistant text nor a tool call for a hop
-    (`ai::ProviderResponse::http_success` stays `true`; there's just nothing
-    to act on). Retried in-process up to twice before giving up; if still
-    empty, the raw response body (capped to 500 chars) is logged for future
-    debugging instead of vanishing silently.
-  - *Unverified-action-claim nudge* - `looks_like_unverified_action_claim()`
-    catches both future-tense narration ("I'll execute...", "hold on while I
-    process this") and past-tense fabrication ("I've successfully moved it")
-    in a tool-call-free response, and nudges the model
-    (`kUnverifiedActionClaimNudge`, a system-role message) to either actually
-    call the tool or admit it hasn't, instead of accepting the claim as
-    final. Only fires when **no tool call this turn already succeeded** - a
-    truthful summary right after a real success (`"I've successfully created
-    it"` immediately following `run_ffmpeg`'s `"ok":true`) is never
-    second-guessed.
-  - *Pending-call abandonment* - if a plain chat message arrives for a
-    session with an active `pending_tool_call_` (the user typed something
-    other than yes/no), `agent_turn` clears it and records an explicit
-    system note in the transcript, instead of leaving it orphaned forever
-    (nothing else would ever clear it) with a transcript that implies a tool
-    call with no matching tool result.
-  - Every one of the above, plus the pre-existing "no reply text"/"budget
-    exhausted" placeholder paths, now writes a `success:false` entry to
-    `logs/log.jsonl` (Phase 3's durable log) - not just the in-memory session
-    transcript reachable via `GET /api/agent/history`.
-- **System prompt hardening** (`HostConfig::system_prompt`,
-  `cli/host.hpp`): explicit instructions that `"ok"` is the only valid
-  success signal, that a tool result's `"failure_reason"`/`"error"` must be
-  relayed honestly rather than papered over, and an explicit ban on
-  inventing a file path or result never actually returned by a tool.
-
-**Explicit non-goal:** none of this makes the underlying local model smarter
-at constructing correct tool arguments (e.g. valid ffmpeg filter-graph
-syntax) - that's a model-capability ceiling this phase doesn't attempt to
-raise. What it guarantees is that when the model gets something wrong, the
-user is told the truth about it instead of a confident fabrication.
-
-**Verified:** `ctest` green (9/9). Live-replayed the exact `run_ffmpeg`
-filter-graph failure from the incident that motivated this phase against a
-real Ollama tool-use model (`llama3-groq-tool-use`) - confirmed `"ok":false`
-with a `"failure_reason"` cleanly extracting the real error
-(`"Invalid size 'h' | Error initializing filters | Invalid argument"`), and
-that the model's next response now correctly reports the failure instead of
-claiming success. Also live-verified the approval-pause/resume round trip,
-the pending-call-abandonment path (confirmed the system note lands in `GET
-/api/agent/history`), and the empty-response retry/give-up log lines.
-
----
-
-### Phase 7 — Nudge hardening, environment grounding, shell-execution correctness ✅ implemented
-
-**Goal:** Phase 6 caught fabrication but didn't bound how the agent responds
-to being corrected, and left two more incidents to shake out from continued
-dogfooding: (1) a model that fabricates the *same* claim again right after a
-nudge got nudged on every remaining hop, burning the whole tool-calling
-budget on repeated near-identical system messages and, worse, still reaching
-the user on the final hop once there was no nudge check left there - observed
-degrading the model's own output into literal `assistant\n\n` role-token
-fragments; (2) the model reliably (not once, but reproducibly across
-sessions) writing a bare relative `desktop/foo.png` path instead of the real
-Desktop folder, and an `ffmpeg` filter expression containing embedded double
-quotes (`s="sin(2*PI*440)"`) reliably producing a bogus Windows shell error
-("filename ... syntax is incorrect") before `ffmpeg` ever launched.
-
-**What shipped:**
-
-- **Capped the Phase 6 nudge at one attempt per turn**, not "every hop until
-  the budget runs out." If the model fabricates the same claim again right
-  after correction, it isn't nudged a second time - `run_agent_tool_loop`
-  overrides the response with an honest refusal instead
-  ("I wasn't actually able to complete this...") regardless of whether that
-  happens mid-turn or on the literal last hop, guaranteeing a fabrication
-  never reaches the user no matter how the hop budget plays out.
-- **`SystemInfo::desktop_path`** (`cli/system_info.{hpp,cpp}`) - the real
-  Desktop folder resolved via the Windows Known Folder API
-  (`SHGetKnownFolderPath(FOLDERID_Desktop)`), not a guessed
-  `C:\Users\<name>\Desktop` string, which silently breaks for a
-  OneDrive-redirected or localized Desktop. Exposed via `GET /api/system`,
-  `get_system_info`, and folded into the boot-time system prompt.
-- **`substitute_bare_desktop_token()`** (`cli/host.cpp`) - `run_command`/
-  `run_ffmpeg` automatically replace a bare `desktop/...`/`desktop\...` token
-  (only at a word boundary, never touching an already-correct absolute path)
-  with the real `desktop_path` before executing, since giving the model the
-  right fact in its system prompt wasn't sufficient on its own - it kept
-  writing the unresolvable relative path anyway. Both tools report a
-  `"resolved_args"`/`"resolved_command"` field when this happened, so the
-  model reports the actual location back to the user instead of what it
-  originally typed.
-- **`run_command_once` gained a `via_shell` parameter** (`cli/command_runner.
-  {hpp,cpp}`) - `run_ffmpeg` now bypasses `cmd.exe /c` entirely
-  (`via_shell=false`), since it never needs shell features (pipes,
-  redirects, env var expansion) and `cmd.exe`'s own command-line grammar was
-  silently corrupting args containing embedded double quotes before
-  `CreateProcess` even launched the target program. `CreateProcess`'s own
-  command-line parsing (the same convention every C program's `argv` uses,
-  ffmpeg included) handles nested quotes correctly where `cmd.exe`'s `/c`
-  grammar does not. POSIX is unaffected either way - the corruption is a
-  `cmd.exe`-specific quirk, not inherent to shell quoting in general.
-- **`run_ffmpeg`'s tool description gained a concrete "generate a single
-  static image" recipe** (`-frames:v 1 -update 1`), fixing a recurring
-  `image2`-muxer error the model kept hitting without a worked example to
-  copy.
-
-**Explicit non-goal, same as Phase 6:** none of this raises the underlying
-local model's own ffmpeg-syntax competence (e.g. it still needs to know
-`aevalsrc`'s `s=` means sample rate, not the source expression) - that
-ceiling is what Phase 8's persistent lesson memory starts to address instead.
-
-**Verified:** `ctest` green (9/9). Live-replayed the exact args from both
-incidents: `desktop/red.png` (bare token) correctly resolved to the real
-Desktop path and the PNG was confirmed to exist on disk afterward, not just
-in a green API response; the `aevalsrc=0:s="sin(2*PI*44)"` args now
-correctly launch `ffmpeg` and surface its own real semantic error
-(`"Invalid sample rate 'sin(2*PI*44)'"`) instead of the bogus `cmd.exe`
-shell error. Traced both nudge-exhaustion paths (mid-turn, and landing on
-the literal last hop) by hand to confirm the honest-refusal override fires
-in each.
-
----
-
-### Phase 8 — Persistent command-fix memory ✅ implemented
-
-**Goal:** a local model repeatedly hits the same class of mistake (wrong
-`ffmpeg` filter syntax, a misremembered flag) with no way to remember a fix
-it already worked out earlier - Phase 6/7 make sure a *failure* is reported
-honestly, but nothing carried a *solution* forward once found, even within
-the same session, let alone into a later one. This is the "capture solutions
-of command bugs automatically" capability - `zeroclaw-memory`'s conversation
-memory (Phase 2) already answers "what did we say," this answers "what did
-we already learn how to do."
-
-**What shipped:**
-
-- **`command_lessons` table** in the same SQLite database `MemoryStore`
-  already owns (`db/droidcli_memory.sqlite3`) - `CommandLesson` (`cli/
-  memory_store.hpp`): `tool`, `broken`, `failure_reason`, `working`,
-  `lesson`, `created_at`. Lives alongside `memory_entries` (conversation
-  history) in the same file/connection, not a second persistence mechanism.
-- **Two new agent tools, model-driven, not auto-inferred.**
-  `record_command_fix` is for the model to call right after it fixes
-  something that failed at least once - a verified `"ok":true` result, not a
-  guess - with the exact broken/working command strings and one short,
-  reusable lesson. `search_command_fixes` is for the model to call *before*
-  attempting a command similar to a kind of task that's failed before,
-  matched case-insensitively (a `LIKE` scan, not embeddings/vector search -
-  deliberately minimal, the same "no semantic recall" stance `zeroclaw-
-  memory`'s row in the crate table already takes) against `tool`/`broken`/
-  `failure_reason`/`lesson`. Deliberately not automatic: inferring "the next
-  attempt worked" as "this specific change was the fix" from a bare
-  failed-then-succeeded pair in the transcript is unreliable enough (the fix
-  might be unrelated, or the user might have changed the request) that an
-  explicit model decision is the more trustworthy signal, matching this
-  project's existing preference for the model calling a tool over droidcli
-  guessing intent from side channels.
-- **Two new routes**: `POST /api/agent/lessons` (record),
-  `POST /api/agent/lessons/search` (search) - both also reachable as agent
-  tools, mirroring every other capability in this codebase having both an
-  HTTP route and a tool-calling path onto the same `DroidHost` method.
-- **System prompt guidance** (`HostConfig::system_prompt`, `cli/host.hpp`):
-  explicit instructions on when to search (before a risky attempt) and when
-  to record (after a verified fix, never for something that worked on the
-  first try).
-
-**Explicit non-goal:** no embeddings, no vector retrieval, no automatic
-lesson extraction - same deliberate scope boundary `zeroclaw-memory`'s
-conversation-history side already has (see its row in the crate-by-crate
-mapping table above). A lesson is exactly as good as the model's own
-judgment about what it just learned; this phase gives it somewhere durable
-to write that down, not a smarter way to write it.
-
-**Verified:** `ctest` green (9/9). Recorded and searched a real lesson (the
-`aevalsrc` sample-rate mistake from Phase 7's verification) end-to-end via
-`POST /api/agent/lessons` and `POST /api/agent/lessons/search`, confirmed an
-unrelated query returns no results (the `LIKE` matching isn't just returning
-everything), and confirmed the row persists in `db/droidcli_memory.sqlite3`
-across a process restart the same way `memory_entries` already does.
-
-### Phase 9 — Self-health awareness and a scheduler, folded into the existing poll loop ✅ implemented
-
-**Goal:** two gaps identified against the ZeroClaw comparison that sit
-between what Phases 1-8 already closed and the not-yet-started Edge tier
-(Channels): the daemon had no live view of its *own* health (Ollama could go
-unreachable mid-session and nothing would notice until a call happened to
-fail), and `TaskQueue` was a dispatch queue with no notion of "run this
-later" - both are runtime-reliability gaps, not new capability surface, so
-neither needed a new subsystem to close.
-
-**What shipped:**
-
-- **A scheduler with no new thread or subsystem.** `app::Task` gained
-  `scheduled_for_ms` (`src/app/tasks.hpp`) - an absolute epoch-ms deadline, 0
-  meaning "runnable immediately" (unchanged default behavior).
-  `TaskQueue::claim_next()` (`src/app/tasks.cpp`) skips a pending task whose
-  deadline hasn't arrived yet without blocking tasks behind it in the list.
-  `parse_task_request_from_json` accepts an optional `"delay_ms"` (relative,
-  resolved to an absolute deadline at parse time using the same wall-clock
-  read `created_at_ms` already takes) - `POST /api/tasks`/the `enqueue_task`
-  agent tool with `{"delay_ms":120000}` is "do this in 2 minutes." Because
-  `DroidHost::tick()` already calls `tick_tasks()` every ~200ms poll
-  iteration (see `cli/droidcli.cpp`'s headless/TUI loops), a scheduled task
-  becomes claimable within one iteration of its deadline with zero new
-  threads - the scheduler *is* the existing loop, not a parallel one.
-  `net::extract_json_int_field` (`src/net/json.hpp`/`.cpp`) was added as the
-  int64_t-scoped counterpart to the existing string/bool field extractors
-  there, since `scheduled_for_ms`/`delay_ms` can exceed `int32_t`'s range
-  (host.cpp's pre-existing `extract_json_int_field` local helper stays
-  `int32_t`-scoped for `timeout_ms`/`max_bytes`, which never need more).
-- **A watchdog folded into `tick()`, not a background thread.**
-  `DroidHost::tick_watchdog()` (`cli/host.cpp`) pings Ollama's `/api/tags`
-  at most every `kWatchdogIntervalSeconds` (15s), caching the result into
-  `ollama_reachable_`/`ollama_last_check_ms_`/`ollama_last_check_error_`
-  rather than blocking the ~200ms poll loop on a network call every tick.
-  It logs (via `append_app_log`, channel `"watchdog"`) only on a
-  reachable-to-unreachable transition or back, not every check, so a
-  long-running daemon with Ollama simply off doesn't spam the log. Skipped
-  entirely under `--no-ai`, so a deliberately-disabled AI backend never
-  manufactures false "unreachable" noise. This lives in `cli/` (a real
-  network call), same as `build_ollama_status_json`'s existing on-demand
-  ping - it's a second, throttled, cached call site for the same check, not
-  a new I/O concern.
-- **`GET /api/agent/self_status` + a `self_status` agent tool**
-  (`DroidHost::build_self_status_json()`, `cli/host.cpp`) - the answer to
-  "am I actually capable of acting right now": `ai_enabled`, cached
-  `ollama_reachable`/`ollama_last_check_ms`/`ollama_last_check_error`,
-  connector/task counts, `memory_store_open`, and a count of failures among
-  the last 20 app-log entries. Read-only (not gated by
-  `tool_call_requires_approval`), and the system prompt
-  (`HostConfig::system_prompt`, `cli/host.hpp`) tells the model to call it
-  before claiming it can't do something, or right after an unexplained tool
-  failure - and that a degraded Ollama connection doesn't mean the rest of
-  the host stopped working; every non-AI tool keeps functioning and the
-  model should say so honestly rather than going silent.
-- **A pre-existing tool-contract bug fixed in passing:** `enqueue_task`
-  (both the route and the agent tool) returned `{"success":bool,...}`
-  instead of `{"ok":bool,...}` - a live violation of the hard "every
-  agent-tool result carries `\"ok\"`, first field" rule from `AGENTS.md`
-  (Phase 6). Found while extending this exact tool for scheduling, fixed in
-  the same change since a caller can't safely check `enqueue_task`'s success
-  without knowing which field name to trust.
-- **TUI**: the Tasks panel (`cli/tui.cpp`) gained a `WHEN` column showing a
-  live countdown (`"in Ns"`) for a still-pending scheduled task, blank/`"now"`
-  otherwise. The App Log panel (built earlier but never mounted - the right
-  column was literally labeled "Reserved") is now mounted there, so watchdog
-  transitions and scheduled/queued task dispatch (`tick_tasks()` now calls
-  `append_app_log` under channel `"task"` on every completion/failure, which
-  it didn't before this phase) are visible without a `curl`.
-
-**Deliberately not done:** no absolute `"run_at_ms"` field (only relative
-`"delay_ms"`) - covers the stated use case ("do this in N minutes") without
-the int64_t epoch-timestamp ergonomics of an absolute field; no SOP/cron
-*recurring* schedule (this is one-shot "run once, later," not "run every N
-minutes") - see the still-open `zeroclaw-runtime` gap (SOP engine, cron,
-SubAgents/RPC) in the crate-by-crate mapping above, deliberately left for
-a later phase if a real recurring-task need shows up; no OS-level watchdog
-that restarts a wedged process (a real `--daemon`/Windows Service, per the
-Roadmap section above, is a separate, larger piece of work - this phase's
-watchdog only notices and reports Ollama degradation, it doesn't supervise
-the process itself).
-
-**Verified:** `ctest` green (9/9, including a new `task_queue_test` case
-proving a far-future-scheduled task is skipped by `claim_next()` without
-blocking an immediately-runnable task queued behind it). End-to-end smoke
-test against a running `droidcli --headless --no-ai`: `GET
-/api/agent/self_status` returned a well-formed snapshot; a task enqueued
-with `"delay_ms":3000` stayed `"status":"pending"` at +1s and was `"status":
-"done"` at +4s, with `"task"`-channel entries appearing in `GET
-/api/app/log` for its dispatch.
-
-**Phase 9 follow-up: log coloring, tool-execution visibility, and a
-fabrication-check gap found by dogfooding.** Immediately after this phase
-landed, watching real `logs/log.jsonl` output surfaced two further problems:
-
-- **The TUI's App Log panel (just mounted in this phase) was unreadable
-  plain text.** `cli/tui.cpp`'s `LogRow` (replacing a flattened
-  `std::vector<std::string>`) keeps `channel`/`success` structured through to
-  render time, so the log panel now colors: any `success:false` entry red
-  regardless of channel; a real tool execution (`"tool <name>(...) -> ..."`,
-  logged only when `execute_agent_tool` actually ran something - see the
-  `append_app_log("chat", ...)` call sites around `run_agent_tool_loop` in
-  `cli/host.cpp`) bold green, visually distinct from the assistant's own
-  narration text in the same `"chat"` channel; an actual OS-level process
-  launch (`"run"`/`"ffmpeg"`/`"open"`/`"process"` channels -
-  `is_process_launch_channel()`) bold magenta; `"watchdog"` yellow, `"task"`
-  cyan, `"thread"` dimmed. The green tool-execution marker is the direct
-  answer to "is it actually launching something": if a chat turn's claims
-  aren't followed by a green `tool ...` line, nothing ran, regardless of what
-  the assistant's text said.
-- **That last point wasn't hypothetical - a real transcript showed it
-  happening**, and exposed a real gap in `looks_like_unverified_action_claim()`
-  (`cli/host.cpp`, see Phase 6/7 above). A model said "I am currently using
-  the 'list_open_windows' function..." with zero `tool_calls` that hop, and
-  two turns later said "the process is still ongoing... I will need a few
-  more seconds" - also zero tool calls. Neither tripped the existing
-  claim-phrase-plus-action-verb heuristic: the first had no matching claim
-  phrase at all ("I am currently using" wasn't in the list), and the second
-  matched a claim phrase ("I will") but no action verb (the sentence was
-  about "completing the search," and neither "complete" nor "search" was in
-  the verb list). Fixed with two changes: a new `kOngoingProcessPhrases` set
-  ("is still ongoing," "a few more seconds," "currently using," etc.) that
-  marks fabrication **unconditionally**, with no action-verb corroboration
-  needed - because in this architecture (`agent_turn` is one bounded,
-  synchronous request/response per `run_agent_tool_loop` call) nothing ever
-  continues running after the HTTP response is sent, so any claim that work
-  is ongoing elsewhere is categorically false, not just probably; and a
-  broadened `kActionVerbs` adding `search`/`list`/`find`/`check`-family verbs
-  that the original file/media-centric list didn't cover. Same
-  nudge-then-honest-refusal handling from Phase 6/7 applies once the claim is
-  flagged - only the detection surface grew.
-
-**Verified:** `ctest` green (9/9) after these changes; the new phrase/verb
-sets were checked by hand against both real sentences from the transcript
-that motivated them, confirming each now flags as fabricated.
-
-### Phase 10 — Hardware awareness (read-only, opt-in) ✅ implemented
-
-**Goal:** the crate-by-crate mapping above carried `zeroclaw-hardware`/
-`aardvark-sys`/`robot-kit` as "not planned," inherited wholesale from the
-0.2.0 decision to remove engine code. That verdict conflated two very
-different things: GPIO/I2C/SPI/USB device *control* (genuinely out of
-scope - droidcli is not becoming a robotics runtime) and read-only local
-hardware *inventory* (what is this machine made of - CPU, GPU, RAM, disk),
-which is a much narrower, much lower-risk ask closer in spirit to
-`system_info.cpp`'s existing "know what machine you're actually on." This
-phase builds only the second thing. Scoped via three explicit decisions
-(asked and confirmed before writing any code, since this reverses a written
-guardrail): no geolocation, no network scanning - CPU/GPU/RAM/disk only, no
-connected-peripheral or live-sensor enumeration; and consent via a one-time
-startup opt-in flag rather than a per-call approval gate.
-
-**What shipped:**
-
-- **`cli/hardware_info.{hpp,cpp}`** - `HardwareInfo` (`cpu_name`,
-  `cpu_core_count`, `total_ram_bytes`, `core::Array<GpuAdapter>`,
-  `core::Array<DiskVolume>`) and `scan_hardware_info()`, following
-  `system_info.hpp`'s exact shape (a plain struct + one query function,
-  gathered once, not polled). No WMI/COM/DXGI dependency added - CPU name
-  comes from the same registry key (`HARDWARE\DESCRIPTION\System\
-  CentralProcessor\0\ProcessorNameString`) Task Manager reads, GPU adapters
-  from `EnumDisplayDevicesA` (user32, already an implicit link via
-  `window_list.cpp`'s `EnumWindows`), RAM from `GlobalMemoryStatusEx`, and
-  per-drive disk capacity from `GetLogicalDrives`/`GetDiskFreeSpaceExA`
-  filtered to `DRIVE_FIXED` only (no network shares/removable media). POSIX
-  gets a best-effort equivalent (`/proc/cpuinfo`, `sysconf`, `statvfs`) with
-  GPU enumeration left empty rather than shelling out to `lspci`, which
-  would violate the "no shelling out for a core query" precedent every other
-  `detect_*` function here follows.
-- **`HostConfig::enable_hardware_scan`** (`cli/host.hpp`), off by default,
-  turned on only by the `--enable-hardware-scan` CLI flag
-  (`cli/droidcli.cpp`) - the human's one-time opt-in, checked once at
-  `DroidHost::initialize()` (same call site `system_info_`/`installed_apps_`
-  are populated from). When off, `hardware_info_` stays default-constructed
-  and `build_hardware_info_json()` reports `{"ok":true,"enabled":false,
-  "error":"..."}` rather than fabricating zeroed-out data as if it were real -
-  a caller (human or model) always gets an honest answer about *why* there's
-  no data, not silence or a plausible-looking empty result.
-- **`GET /api/hardware`, and a `get_hardware_info` agent tool** - read-only
-  (not gated by `tool_call_requires_approval`, same reasoning as
-  `get_system_info`/`self_status`: the human already consented once, at
-  startup, so a per-call pause buys nothing). The tool description and a new
-  system-prompt sentence (`HostConfig::system_prompt`) both tell the model to
-  report an `enabled:false` result honestly (and how to turn scanning on)
-  rather than claiming the data doesn't exist for some other reason.
-- **`droidcli-hardware`** added to the crate-by-crate mapping table above as
-  a real (if narrow) row instead of "None" - the first ZeroClaw-crate gap
-  closed that the original comparison had marked "not planned."
-
-**Explicit non-goals, by design, not by omission:** no geolocation (IP-based
-or the Windows Location API) - "where it is" was scoped to local-machine
-context only, not physical/geographic location; no connected-peripheral
-enumeration (USB devices, monitors, audio devices) or live sensors (battery,
-temperature) - static CPU/GPU/RAM/disk inventory only; no device *control* of
-any kind (no GPIO/I2C/SPI/USB drive capability) - `zeroclaw-hardware`'s
-robotics-adjacent scope remains genuinely out of scope, this phase does not
-walk that line back.
-
-**Verified:** `ctest` green (9/9, no new unit test - this is a `cli/`-only
-real-OS-query module, same testing posture as `system_info.cpp`/`app_index.cpp`,
-which also have no dedicated `ctest` coverage). End-to-end smoke test against
-two running instances: `--headless --no-ai` (no scan flag) returned
-`{"enabled":false}` with the explanatory error; `--headless --no-ai
---enable-hardware-scan` returned real data - actual CPU name/core count,
-total RAM, one real GPU adapter, and three real fixed-drive volumes with
-correct total/free byte counts.
-
-### Phase 11 — Diagnosed a real "open Blender" incident: three fixes, not one ✅ implemented
-
-**Goal:** a real transcript ("Ok great can you now open Blender?") showed
-the agent take two hops (one fabrication nudge) and never call
-`open_application`, instead replying with garbled leaked-role text
-(`"assistant\n\nYes, please."`), followed - 14 seconds later, with no
-logged cause at all - by Blender actually launching. Tracing this by hand
-against the code (not just the log) found three separate, independent bugs
-stacked on top of each other, not one:
-
-1. **The reliable path never got a chance to run.** `intent::parse_open_intent`
-   (Phase 0/pre-dating this session, `src/intent/open_intent.cpp`) is the
-   deterministic, LLM-free recognizer that should have caught this - but
-   `strip_leading_courtesy` didn't know "great " or "now " as filler, so
-   "Ok great can you now open Blender?" only got as far as stripping "ok ",
-   leaving "great can you now open blender?" with no verb at position 0.
-   Fell through to the unreliable local-model path instead of the
-   deterministic one. Fixed by adding those (and other real-world
-   acknowledgement/adverb filler words: "cool", "nice", "awesome", "sure",
-   "alright", "yes", "yeah", "just", "quickly", "really") to the same
-   courtesy-prefix list `strip_leading_courtesy` already loops over -
-   verified end-to-end against a running instance: `POST
-   /api/apps/quick_open` with the exact failing sentence now resolves
-   `matched:true`, `resolved_path` pointing at the real Blender install.
-   New regression case in `tests/intent_test.cpp`.
-2. **A second, previously undetected model-degradation pattern.** Phase 7's
-   notes already documented a nudged small local model degrading into
-   literal `assistant\n\n` role-token fragments as an *observed* failure
-   mode, but nothing detected it as fabrication - `"assistant\n\nYes,
-   please."` contains no claim phrase and no action verb (it isn't
-   *claiming* anything, it's just broken), so it passed
-   `looks_like_unverified_action_claim` and reached the user as if it were a
-   real answer to "can you open Blender." Fixed with a new, structural (not
-   phrase-based) detector, `looks_like_degenerate_role_leak()` (`cli/host.cpp`):
-   flags a reply whose trimmed text opens with a bare chat-role label
-   (`assistant`/`system`/`user`) standing alone before a newline - a real
-   sentence never opens that way. Runs unconditionally (unlike the
-   claim-based check, not suppressed just because a tool call already
-   succeeded earlier in the turn - garbled text is garbled regardless), and
-   feeds the same nudge-then-honest-refusal path Phase 6/7 already built.
-3. **The reliable path, once it does run, was invisible in the log** - this
-   is why the Blender launch 14 seconds later looked like it came from
-   nowhere. `cli/tui.cpp`'s quick-open confirmation flow
-   (`perform_quick_open`, the yes/no reply handling) called
-   `host.open_application` directly, which logs only its own bare `"open"`-
-   channel line - no record of what was recognized, what was asked, or
-   whether the human confirmed or declined. Fixed with a new public
-   `DroidHost::log_quick_open_event()` (`cli/host.cpp`/`.hpp`, mirroring
-   `log_thread_event`'s existing pattern for a TUI-originated event needing
-   to reach `append_app_log`) - `cli/tui.cpp` now logs the moment of
-   recognition, a decline, and a confirmed launch, all under a new
-   `"quick_open"` channel. Given its own coloring in the TUI's App Log panel
-   (`is_process_launch_channel()`, alongside `run`/`ffmpeg`/`open`/`process`)
-   from Phase 9's log-coloring follow-up, so a quick-open launch reads as
-   unmistakably as any other process launch instead of a bare unexplained
-   `"open"` line.
-
-**Why three fixes instead of a single patch:** each bug independently
-explained part of the transcript, and fixing only one would have left a
-misleading picture - e.g. fixing only the intent-recognizer gap (1) without
-fixing the invisible logging (3) would have made an already-flaky
-interaction (needing two attempts) look less broken in logs than it
-actually was, and fixing only the degenerate-output detector (2) without
-(1) would still leave natural phrasings of "open X" falling through to the
-unreliable path more often than necessary.
-
-**Verified:** `ctest` green (9/9, including the new `intent_test` case).
-`POST /api/apps/quick_open` end-to-end smoke-tested against a running
-instance with the exact failing sentence from the transcript.
-
-### Phase 12 — Automatic command-failure retry, and a third lie caught ✅ implemented
-
-**Goal:** a real transcript showed the agent asking permission to retry a
-failed `run_ffmpeg` call *four separate times across four separate user
-messages*, never once retrying on its own within a turn despite having the
-exact `failure_reason` and a mostly-unused hop budget (`kMaxHops` was 5;
-typically 1-2 hops were spent per attempt). It ended by falsely telling the
-user "I can only assist with tasks and provide information... execution of
-any commands or actions is beyond my capabilities" - false, and demonstrably
-so, since the same session had run `run_ffmpeg` successfully minutes
-earlier for an image. Phase 6/7/11 already stop the model from *claiming*
-success it didn't earn; this phase makes it actually *keep trying* on a
-real, earned failure instead of stopping to ask, and stops a third kind of
-lie (denying a capability it demonstrably has).
-
-**What shipped:**
-
-- **`kMaxHops` raised from 5 to 9** (`run_agent_tool_loop`, `cli/host.cpp`) -
-  the retry mechanism below can spend up to `kMaxCommandRetryNudges` hops on
-  its own, stacked on top of the pre-existing fabrication/capability-denial
-  nudges and the hop(s) actually spent calling tools; 5 left no real room for
-  a multi-attempt retry loop.
-- **A new nudge, `kMaxCommandRetryNudges = 3`** ("at least 3 times," per the
-  request that motivated this): when the model lands on a hop with no new
-  `tool_calls` and the *most recent action this turn* was a failed
-  `run_command`/`run_ffmpeg` call (`"ok":false`), instead of accepting
-  whatever text it wrote (typically "want me to try again?") as the final
-  answer, `run_agent_tool_loop` injects a system message quoting the real
-  `failure_reason` and instructing it to call the tool again immediately
-  with a corrected command - then `continue`s the loop, exactly like the
-  Phase 6 unverified-claim nudge does. Capped at 3 for the same reason that
-  nudge is capped at 1: a command wrong in a way the model can't diagnose
-  from the error text alone will just keep failing, and an unbounded retry
-  loop guarantees burning the whole hop budget instead of ever reaching an
-  honest report. Once the budget is spent and it's still failing, the loop
-  overrides the response itself with the real last error (`"I tried
-  run_ffmpeg 4 time(s) and it kept failing. Last error: ..."`) rather than
-  silently giving up or asking the user to run it themselves.
-- **`looks_like_capability_denial()`** (`cli/host.cpp`) - a third fabrication
-  detector alongside `looks_like_unverified_action_claim`/
-  `looks_like_degenerate_role_leak`, catching the specific lie observed:
-  phrases like "I can only assist," "beyond my capabilities," "you'll need
-  to run [it] yourself." Unlike the other two, this isn't a false claim of
-  *success* - it's a false claim of *incapacity* - so it gets its own
-  corrective nudge (`kCapabilityDenialNudge`, reasserting the real tool
-  list) rather than the "I wasn't able to complete this" honest-refusal
-  text, which would be the wrong correction for this specific lie. If the
-  model still denies capability after one nudge, the loop overrides with a
-  message telling the *user* the truth ("I incorrectly told you I can't
-  execute commands, which isn't true") rather than let the lie stand
-  unchallenged.
-- **System prompt** (`HostConfig::system_prompt`, `cli/host.hpp`) gained an
-  explicit instruction matching the new mechanism: don't stop and ask
-  permission to retry a failed command, read `failure_reason` and retry
-  immediately, multiple automatic attempts are available; and a direct
-  reassertion that command execution is a real, always-available capability,
-  never something to tell the user to do themselves.
-
-**Explicit non-goal:** this is not a general "fix the ffmpeg syntax" ability
-upgrade - a local model that doesn't know `sine=frequency=440` is valid
-`lavfi` syntax may still exhaust all 3 retries without succeeding. The goal
-is that when that happens, the user gets an honest "I tried N times, here's
-the real last error" instead of (a) silence, (b) a request to approve each
-individual retry by hand, or (c) a lie about being unable to try at all.
-Phase 8's persistent command-fix memory (`search_command_fixes`/
-`record_command_fix`) is the complementary piece that helps the *next*
-attempt at a similar command start from a known-working fix instead of from
-scratch - this phase and that one compound.
-
-**Verified:** `ctest` green (9/9) after the change; `POST /api/agent/turn`
-smoke-tested against a `--no-ai` instance to confirm the surrounding
-control flow (session handling, the disabled-AI error path) is unaffected.
-The retry mechanism itself is `cli/`-only logic gated on a real Ollama model
-producing the exact flaky behavior it corrects - not something `ctest`
-(engine-free, network-free by design) can exercise, and no live Ollama
-instance was available to replay the full multi-retry conversation
-end-to-end in this pass; the control-flow correctness (nudge counters,
-`continue`/`break` paths, the exhausted-budget report) was verified by
-careful code reading against the exact transcript that motivated it,
-consistent with how the Phase 6/7/11 nudge mechanisms it extends were also
-built incrementally against real observed transcripts rather than a
-from-scratch design.
-
-### Phase 13 — Every chat-pane entry reaches the durable log, none of it committed ✅ implemented
-
-**Goal:** the App Log panel (Phase 9) and Agent Chat panel showed different,
-incomplete pictures of the same session. Everything that round-trips
-through `agent_turn()`/`agent_tool_decision()` already logs itself
-server-side (`DroidHost::append_app_log` calls throughout
-`run_agent_tool_loop`) - but a real audit of every `chat_entries.push_back`
-call site in `cli/tui.cpp` found a second class of chat-pane content that
-never reached `logs/log.jsonl` at all: approval-flow replies ("yes"/"no" to
-a gated tool or a quick-open confirmation), the resulting "Approved."/
-"Declined."/"Cancelled." banners, clipboard-copy feedback, the new-session/
-welcome banners, and caught-exception messages. All of it was visible on
-screen and invisible in the log - a developer debugging from `logs/log.jsonl`
-alone would see a gap exactly where the human made a decision.
-
-**What shipped:**
-
-- **`DroidHost::log_chat_entry(role, text)`** (`cli/host.hpp`/`.cpp`) - a
-  public logging hook mirroring `log_quick_open_event`/`log_thread_event`'s
-  existing pattern, writing under the `"chat"` channel with
-  `direction=role`, `success=(role != "error")`.
-- **`push_chat_entry` in `cli/tui.cpp`** - a local lambda wrapping
-  `chat_entries.push_back` with a `host.log_chat_entry` call, used at every
-  site identified as previously TUI-local-only. Deliberately **not** used at
-  the three sites that are already logged server-side (the message just
-  before it's sent to `agent_turn()`, the parsed response entries flushed
-  from `chat_work.pending_entries`, and history replayed from
-  `MemoryStore` on TUI resume) - each of those is commented explaining why,
-  since logging them again would duplicate the same line under a second
-  timestamp rather than close a real gap.
-- **No new git-ignore work needed** - `logs/*`/`db/*` (only `README.md`
-  placeholders tracked) already covered this before Phase 13; this phase is
-  about *completeness* of what reaches those already-ignored files, not
-  their ignore status. Confirmed unchanged in `.gitignore`.
-
-**Verified:** `ctest` green (9/9) - this is TUI-local, real-terminal logic
-(FTXUI) with no automated coverage the way `cli/hardware_info.cpp` etc. also
-have none; correctness here is a straightforward, mechanical audit (every
-`chat_entries.push_back` call site enumerated and either converted or
-commented with why not) rather than something requiring a live model to
-exercise, unlike Phase 12's retry loop.
-
-### Phase 14 — Deterministic command confirmation: a plain "yes" no longer re-asks the model ✅ implemented
-
-**Goal:** a real transcript showed the model successfully create a green
-image, then - asked for a blue one - propose the (correct) ffmpeg command as
-text and ask "Would you like me to execute this command as well?" instead of
-calling the tool. The user replied "yes." That single word then had to be
-reinterpreted by the same unreliable model from scratch: it returned an
-*empty* response three times in a row (Phase 12's `kMaxEmptyRetries` caught
-this honestly), and once told twice more to just do it, fabricated a new
-constraint - "I can only execute one command at a time" - rather than ever
-calling `run_ffmpeg`. Phase 12 already makes a *failed* command retry
-itself; this phase addresses a different gap: the tool was never attempted
-at all, because a bare "yes" carries no structural signal for the model to
-act on, only more natural-language ambiguity for it to mis-resolve.
-
-**Design:** `try_quick_open_json`/`intent::parse_open_intent` already
-established the fix for this *class* of problem - when a request has a
-narrow, high-confidence, deterministically-recognizable shape, don't ask an
-unreliable local model to decide, recognize it directly. This phase applies
-the same idea to "the assistant proposed a command and asked permission,
-the user said yes."
-
-**What shipped:**
-
-- **`src/intent/pending_command.{hpp,cpp}`** (new portable core module,
-  `droidcli-tools`-shaped, `tests/pending_command_test.cpp` registered in
-  `CMakeLists.txt`, `#include`d into `droidcli_core.cpp`):
-  - `extract_proposed_command(assistant_text)` - requires BOTH a
-    permission-asking phrase ("would you like me to execute/run this?",
-    "should I run this?", etc.) AND an actual command (a fenced code block,
-    handling a bare "ffmpeg" language-hint line correctly, or a bare
-    "ffmpeg ..." line) in the same message - a message that merely *shows*
-    an example command without offering to run it must not match, same
-    false-positive discipline `parse_open_intent` already established for
-    "how do I open a file in Python."
-  - `is_bare_affirmative(message)` - a small fixed whitelist ("yes"/"y"/"do
-    it"/"go ahead"/...), not a heuristic - kept narrow because it's only
-    ever checked after `extract_proposed_command` already matched, so the
-    combined false-positive risk stays low without needing this half to be
-    permissive.
-  - Anonymous-namespace helpers had to be named uniquely
-    (`pending_command_to_lower_ascii`/`_trim_ascii`) rather than reusing
-    `open_intent.cpp`'s names of the same shape - both `.cpp` files are
-    `#include`d into the single `droidcli_core.cpp` translation unit, so
-    identically-named anonymous-namespace functions collide as duplicate
-    definitions at compile time despite living in separate source files.
-- **`DroidHost::agent_turn`** (`cli/host.cpp`) captures the previous
-  Assistant-role transcript entry before appending the new user message,
-  and - if `extract_proposed_command` matches it and `is_bare_affirmative`
-  matches the new message - executes the extracted command directly via
-  `execute_agent_tool`, bypassing `tool_call_requires_approval`'s gate
-  entirely: the user's "yes" to the assistant's own explicit offer already
-  *is* the approval, so a second "\[AGENT WANTS TO\]... approve?" prompt
-  right after would be redundant, the same reasoning `try_quick_open_json`
-  already applies to its own one-confirmation flow.
-- **Hands off to the existing loop at `hop=1`, not a parallel code path**:
-  after recording the tool result, `agent_turn` calls
-  `run_agent_tool_loop(session_id, tools, provider, 1, {}, 0, seeded_actions)`
-  - the deterministic execution replaces only hop 0's "decide which tool to
-    call" step; everything downstream (Phase 6's fabrication guard, Phase
-    12's retry-on-failure nudge reading the same `seeded_actions`, the
-    final response shape) is the same bounded loop every other turn goes
-    through, not a second, parallel tool-execution mechanism.
-- **Capability-denial detector broadened** (`looks_like_capability_denial`,
-  `cli/host.cpp`): added phrases for the fabricated-constraint variant this
-  transcript surfaced - "I can only execute one command at a time" - distinct
-  from outright denying capability, but the same underlying lie (a false
-  reason not to call a tool it can actually call again).
-
-**Explicit non-goal:** this recognizes one specific, common shape (assistant
-proposes → user confirms with a bare word) - it does not attempt to parse
-arbitrary follow-up phrasing like "yes but make it bigger" (correctly
-rejected by `is_bare_affirmative`, which requires an exact whitelist match)
-or a command proposed several turns back (only the *immediately* preceding
-Assistant message is checked). Both fall through to the normal LLM loop, same
-as anything `parse_open_intent` doesn't recognize. **Deliberately not
-widened** - see the false-positive-vs-false-negative discipline in
-`AGENTS.md`'s extension point 7. This bypass skips
-`tool_call_requires_approval`'s gate entirely, so a false positive here means
-autonomously executing a stale or misread command with no approval prompt;
-a false negative just falls through to the normal loop, which is safe by
-construction (see Phase 31, which live-verifies that fallback actually holds
-up rather than just asserting it).
-
-**Verified:** `ctest` green (10/10, including the new `pending_command_test`
-- covers the exact real transcript specimen, a language-hint fence variant,
-a bare unfenced ffmpeg line, a non-ffmpeg fenced command, and both
-false-positive-avoidance cases: an example command with no offer to run it,
-and permission phrasing with no command present). `POST /api/agent/turn`
-smoke-tested against a `--no-ai` instance to confirm the pre-existing
-disabled-AI error path is unaffected. Like Phase 12, the deterministic
-branch itself needs a live Ollama model actually proposing a command in the
-exact shape this recognizes to exercise end-to-end - not available in this
-pass, so correctness there rests on the core module's test coverage plus
-careful reading of the `agent_turn` control flow, not a live replay.
-
-### Phase 15 — Found the actual cause of "the agent lies after a real success," plus clipboard/file-management tools ✅ implemented
-
-**Goal:** a real transcript showed `open_application` genuinely launch
-Notepad (PID logged, `"launched":true`) - and the very next hop still got
-overridden with "I wasn't actually able to complete this," the same
-fabrication-guard override Phase 6/11 built to catch a *false* claim of
-success. This time the claim wasn't false. Tracing `a_tool_call_already_
-succeeded_this_turn` (`cli/host.cpp`, the check that's supposed to protect a
-truthful "I did it" from being second-guessed) found the actual defect: it
-works by scanning each action's `result_json` for `"ok":true` - and
-`open_application`'s JSON never had an `"ok"` field at all, only
-`"launched"`. The scan found nothing to trust, concluded no tool had
-succeeded, and let the override fire on a real success. This is exactly the
-failure `AGENTS.md`'s hard rule ("every agent-tool result carries `"ok"`,
-first field, always") exists to prevent - it had quietly regressed for one
-tool.
-
-**What shipped:**
-
-- **A full audit of every function reachable through `execute_agent_tool`**
-  turned up nine gaps, not one: `open_application` (missing entirely -
-  the confirmed cause above), `launch_connector`/`stop_connector` (had
-  `"success"` instead, the same historical naming gap `enqueue_task` had
-  before Phase 9's fix), and five read-only tools whose result had no
-  top-level `"ok"` at all - `list_connectors` (`net::build_connectors_json`),
-  `list_tasks` (`app::build_tasks_json`), `find_application`,
-  `list_open_windows`, `get_cwd`, `get_system_info`. All nine fixed. The
-  fabrication guard's success-scan runs over *every* action recorded this
-  turn, not just gated ones, so a read-only tool missing `"ok"` carried the
-  same risk of masking a real success recorded earlier in the same turn -
-  this wasn't only an issue for side-effecting tools.
-  `call_connector` is a deliberate exception: on success it returns the
-  proxied `http_peer`'s own response body verbatim, and injecting an `"ok"`
-  into a third party's response would misrepresent what that peer actually
-  said, not fix anything.
-- **Clipboard access**: new `cli/clipboard.{hpp,cpp}` (`read_text_from_
-  clipboard`/`write_text_to_clipboard`, Windows `CF_UNICODETEXT`, same
-  precedent as `command_runner.cpp`/`process_manager.cpp` being
-  Windows-first) - one implementation, shared by the TUI's existing `'y'`
-  transcript-copy keybinding (previously its own private copy of the same
-  Win32 calls) and two new agent tools: `read_clipboard` (read-only, not
-  gated) and `write_clipboard` (gated).
-- **File copy/move/delete**: `copy_file`/`move_path`/`delete_file` added to
-  `filesystem_tools.{hpp,cpp}`, all gated
-  (`tool_call_requires_approval`) - "asking for permission by default" per
-  the request that motivated this. `copy_file`/`delete_file` are
-  deliberately scoped to single files, not directories (`ok:false` with a
-  clear error otherwise) - a narrower, safer first cut than a recursive
-  tree copy or delete; `move_path` covers files or directories since
-  `std::filesystem::rename` does so safely in one atomic-per-volume
-  operation. New `GET/POST /api/clipboard`, `POST /api/fs/copy`,
-  `POST /api/fs/move`, `POST /api/fs/delete` routes.
-- **TUI panel redesign** (`cli/tui.cpp`): the "Agent Tools" panel no longer
-  lists the full static tool catalog (`GET /api/agent/tools` still exists
-  and remains the canonical list) - it's now a live activity terminal
-  derived from the same `LogRow` stream the App Log panel already polls,
-  filtered to real tool executions (`"tool <name>(...) -> ..."` under the
-  `"chat"` channel) and showing just the name, timestamped, colored by
-  success. A new "Apps" panel below it does the same for
-  launched/controlled applications (`"open"`/`"process"` channels, plus a
-  confirmed `"quick_open"` launch). All four left-column panels
-  (Connectors/Tasks/Agent Tools/Apps) now share equal flex weight so Agent
-  Tools is exactly as tall as Tasks, not whatever content-driven sizing
-  FTXUI would otherwise give it.
-
-**Explicit non-goal:** no recursive directory copy/delete (see above); no
-POSIX clipboard implementation (matches every other Windows-first module in
-`cli/`); the Agent Tools/Apps panels are read-only activity views, not a
-separate approval surface - the existing `PendingToolApproval`/quick-open
-confirmation flows are unchanged.
-
-**Verified:** `ctest` green (10/10, no regressions). Smoke-tested against a
-running `--no-ai` instance: clipboard write-then-read round-tripped exact
-text; copy → move → delete chained correctly end-to-end (confirmed via
-`ls`, not just the JSON response) and directory-delete correctly refused
-with a clear error instead of attempting anything destructive.
-
-### Phase 16 — Placeholder-path rejection for the new file tools, and a harder problem named honestly ✅ implemented
-
-**Goal:** the very first real use of Phase 15's `copy_file` showed a gap
-Phase 15 didn't cover: asked to "copy the green image on the Desktop," the
-model called `copy_file` with `source_path`/`destination_path` of
-`"/path/to/Desktop/green_image.png"` / `"/path/to/Desktop/new_green_image.png"`
-- a literal documentation-style template path, not a real one. It failed
-(correctly), and on the next attempt (after the user pointed out the file
-wasn't even on the Desktop) the model guessed a *different*, still-wrong
-path (`Documents\green.jpg`) rather than ever calling `list_dir` to find out
-what's actually there - despite the system prompt already saying to do
-exactly that. Phase 7's `substitute_bare_desktop_token()` doesn't help here:
-it only fixes a bare `desktop/...` token at a word boundary, and
-`"/path/to/Desktop/..."` doesn't have one - `"Desktop"` there is preceded by
-`"to/"`, not whitespace or a quote.
-
-**What shipped:**
-
-- **`looks_like_placeholder_path()`** (`cli/host.cpp`) - a new, narrow guard
-  checked before `copy_file`/`move_path`/`delete_file` ever touch the
-  filesystem: rejects a path containing `"path/to/"`, `"path\to\"`, `"<"`,
-  or common template filenames (`your_file`, `example.txt`,
-  `filename.ext`) with `ok:false` and an error telling the model to call
-  `list_dir`/`stat_path` first, instead of letting an obviously-fake path
-  reach `CreateFile` and fail with a confusing OS error the model then has
-  to reinterpret.
-- **`substitute_bare_desktop_token()` extended to the three new file
-  tools** - it already covered `run_command`/`run_ffmpeg` (Phase 7) but was
-  never wired into `copy_file`/`move_path`/`delete_file` when they shipped
-  in Phase 15. Each now resolves a bare `desktop/...` token in any of its
-  path arguments and reports `resolved_source_path`/
-  `resolved_destination_path`/`resolved_path` when a substitution happened,
-  matching `run_command`'s existing `resolved_command` convention.
-- **Tool descriptions and the system prompt** (`cli/host.cpp`,
-  `HostConfig::system_prompt` in `cli/host.hpp`) now say explicitly: when
-  the user refers to a file by description ("the green image on the
-  Desktop") rather than an exact path, call `list_dir` on the real
-  directory first - a guessed or template path is rejected outright, not
-  attempted.
-
-**A third bug in the same transcript, named but not fixed here:** asked
-"can you copy and paste a file," the model called `read_clipboard`
-(reasonably - the clipboard actually held `"llama3.1:8b"`, leftover from an
-earlier model-picker selection), then reported *"I have copied the contents
-of the file 'lama3.1' and pasted it into this chat window. The contents are
-8 bytes long."* - inventing a file name and a byte count that appear
-nowhere in the real, successful tool result. Every guard in this hardening
-log so far (Phase 6/11/12/15) catches a mismatch between *whether* a tool
-succeeded and what the model claims - this is different: the tool
-genuinely succeeded, and the model fabricated *specifics about its content*
-on top of a truthful success. Detecting that generically means comparing
-free-text claims against arbitrary JSON field values, not checking for a
-missing `"ok"` or an absent `tool_calls` entry - a meaningfully harder,
-still-open problem. Recorded here deliberately unsolved rather than papered
-over with a narrow, single-case regex that wouldn't generalize.
-
-**Verified:** `ctest` green (10/10). `POST /api/fs/copy` smoke-tested with
-the exact placeholder path from the transcript (`ok:false`, clear error) and
-with a bare `desktop/...` token (resolves correctly, reports
-`resolved_source_path`/`resolved_destination_path`).
-
-### Phase 17 — The fabrication guard's own success-scan was the vector, not just a mismatch ✅ implemented
-
-**Goal:** two real transcripts, days apart, showed the same shape recur four
-more times: the model calls an unrelated **read-only** tool (`list_connectors`,
-`list_open_windows`, `list_dir`, `self_status`), it succeeds, and that success
-alone is enough for `a_tool_call_already_succeeded_this_turn` (`cli/host.cpp`)
-to wave through a completely unrelated claim as "already backed by a real
-success" - "I've successfully copied the file" right after `list_connectors`
-returned an empty list; "The Recycle Bin is already running" right after
-`list_open_windows` returned a window list that doesn't contain it; "I called
-`list_dir`, then `run_command` to create it" right after a `list_dir` call,
-with no `run_command` call anywhere in that session. Phase 16 named a related,
-harder problem (fabricating *content* on top of a genuine success) as
-deliberately unsolved; this is a plainer bug in the guard's own scan - it
-checked "did *any* action this turn return `ok:true`," never whether that
-action had anything to do with the claim being made.
-
-**What shipped:** the scan in `run_agent_tool_loop` now only counts an action
-toward `a_tool_call_already_succeeded_this_turn` if its tool is also gated by
-`tool_call_requires_approval` (`copy_file`, `write_file`, `run_command`,
-`open_application`, etc. - the mutating/side-effecting set). A claim of a
-completed action can only be true if something that actually changes state
-ran; a read-only lookup succeeding is never evidence for it, regardless of
-what the claim is about. This doesn't solve Phase 16's harder open problem
-(verifying claim *content* against real tool output) - it closes the plainer
-gap of an unrelated success excusing an unrelated claim.
-
-**Verified:** `ctest` green (10/10), no regressions.
-
-### Phase 18 — Ground truth for `write_file`: a resolution gap Phase 16 missed, plus a real post-write filesystem check ✅ implemented
-
-**Goal:** three separate "create an image and save it to the Desktop"
-transcripts all ended with the user correctly saying "you didn't." Tracing it
-down: `write_file` (`cli/host.cpp`) was left out of the Phase 16 hardening
-pass entirely - no `looks_like_placeholder_path()`, no
-`substitute_bare_desktop_token()` - so a path like `"/Desktop/output.png"`
-went straight to `cli::write_file()` untouched. On Windows, a leading `/`
-means "root of the *current drive*," not "root of the filesystem" - so
-`std::filesystem` silently resolved it to `C:\Desktop\output.png` (auto-
-creating that bogus folder, since `write_file` creates missing parents) and
-reported a perfectly genuine `ok:true` throughout. Confirmed live: a probe
-write to `/Desktop/probe_test.png` landed in `C:\Desktop\`, not
-`C:\Users\...\Desktop\`. Separately, even `substitute_bare_desktop_token`
-itself had a gap: its word-boundary check only recognized a *bare*
-`desktop/...` token (preceded by whitespace/quote/nothing), not a *single
-leading* `/Desktop/...` - the exact shape the model actually produced.
-
-**What shipped:**
-
-- **`write_file` now gets the same guard pair** `copy_file`/`move_path`/
-  `delete_file` already had: `looks_like_placeholder_path()` rejects an
-  obvious template path outright, `substitute_bare_desktop_token()` resolves
-  a bare Desktop-relative token before the write ever happens, reporting
-  `resolved_path` when it fires (same convention as the other three tools).
-- **`substitute_bare_desktop_token()` extended** to also recognize a lone
-  leading `/` or `\` immediately before "desktop" (`cursor == 1 &&
-  (args[0] == '/' || args[0] == '\\')`) as a word boundary - distinguished
-  from a real absolute path like `C:\Users\...\Desktop\...` by *position*,
-  not just the character: a real absolute path has several characters before
-  "Desktop," never just one lone separator at the very start of the string.
-- **A real post-write ground-truth check**, not a repeat of the write's own
-  self-report: after `write_file` succeeds, it now calls `cli::stat_path()`
-  on the resolved path and returns `verified_exists`/`verified_size_bytes` -
-  an independent look at the actual filesystem state afterward, the same way
-  a human would run `ls` to confirm a command did what it claimed instead of
-  trusting its exit code alone. The tool description now tells the model
-  explicitly to trust these fields over its own assumption, and that
-  `write_file` cannot produce real binary image/media data (a related
-  transcript showed the model write the literal placeholder string `"<base64
-  encoded blue 512x512 pixel PNG image data>"` as file content and then claim
-  it had created a real image) - `run_ffmpeg` is now called out as the right
-  tool for that.
-
-**What this doesn't fix:** `verified_exists` only proves a file exists at
-whatever path the code ultimately resolved to - it can't independently judge
-whether that's *where the user meant*, and it can't validate file *content*
-(a real image vs. garbage text) beyond the explicit placeholder-content
-warning added to the tool description. Verifying claim content against
-arbitrary tool output generically is still Phase 16's named, deliberately
-open problem.
-
-**Verified:** `ctest` green (10/10). Live-probed against a running
-`--headless --no-ai` instance: a bare `/Desktop/...` path previously landed
-in a bogus `C:\Desktop\` (confirmed via `ls` before the fix); after the fix,
-the identical request resolves to the real
-`C:\Users\...\Desktop\...`, confirmed to exist there via `ls` and file
-content read-back, with `verified_exists:true` in the response.
-
-### Phase 19 — Content-signature ground truth, persistent location memory, and a "where are we" view ✅ implemented
-
-**Goal:** Phase 18 closed the *path* half of "did this really happen" for
-`write_file`; this phase closes the *content* half, plus two things the user
-asked for directly: a persistent memory of real, named locations the agent
-has already resolved (so a later turn - or a later session - doesn't have to
-re-`list_dir` the same folder again), and a live view of "where we are"
-(cwd, Desktop, and everything remembered).
-
-**What shipped:**
-
-- **`looks_like_mismatched_binary_content()`** (`cli/host.cpp`) - checked
-  before `write_file` ever touches disk, same "reject before it happens"
-  pattern as `looks_like_placeholder_path()`. If the path ends in a
-  recognized binary/image extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.bmp`),
-  the content must actually start with that format's real magic bytes
-  (e.g. PNG's `\x89PNG\r\n\x1a\n`) or the write is rejected with
-  `ok:false` and guidance toward `run_ffmpeg` - the tool that can actually
-  produce real image bytes. Directly targets the exact failure from Phase
-  18's transcript: `write_file` "succeeding" with the literal placeholder
-  string `"<base64 encoded blue 512x512 pixel PNG image data>"` as file
-  content. Smoke-tested live: that exact string against a `.png` path is
-  now rejected outright with a clear error instead of silently creating a
-  fake image file.
-- **`KnownLocation`** (`cli/memory_store.hpp`/`.cpp`) - a new `known_locations`
-  SQLite table (`name TEXT PRIMARY KEY COLLATE NOCASE, resolved_path,
-  created_at, updated_at`), alongside the existing `memory_entries`/
-  `command_lessons` tables in the same `MemoryStore` database. Two new agent
-  tools: `remember_location` (`name`, `path` - `path` is resolved via
-  `substitute_bare_desktop_token()` and must pass a live `stat_path()` check
-  before it's stored, so a location that doesn't actually exist right now is
-  never remembered; upserts by name, so remembering "Release_1" again
-  updates it rather than duplicating it) and `get_known_locations`
-  (read-only, no arguments - returns cwd, `desktop_path`, and every
-  remembered location). Same "recording knowledge, not touching the OS"
-  rationale as `record_command_fix` (Phase 8) - neither tool is gated behind
-  `tool_call_requires_approval()`.
-- **New `GET/POST /api/locations`** route (`cli/http_mount.cpp`) mirroring
-  the tool pair above for non-agent callers.
-- **A new "Locations" panel** in the TUI (`cli/tui.cpp`, `locations_view`) -
-  the fifth left-column panel alongside Connectors/Tasks/Agent Tools/Apps,
-  same equal-flex sizing. Polled the same way as Tasks/Connectors (not
-  derived from the log stream the way Tools/Apps/Log are), since this
-  reflects current stored state, not a history of past events: shows cwd and
-  the real Desktop path first, then every remembered `name -> path` mapping,
-  most recently updated first.
-
-**What this doesn't fix:** the content-signature check only covers a fixed
-list of common binary/image extensions and only checks the *start* of the
-content, not the whole file - it catches the specific "claims to be a real
-media file, isn't" shape from the observed transcripts, not a general
-content-quality judgment (Phase 16's still-open problem). Separately, JSON-
-over-HTTP is a lossy transport for genuine binary bytes in the first place
-(confirmed while smoke-testing this phase: round-tripping real `0x89`-led
-PNG bytes through a JSON string field via `Invoke-RestMethod`'s UTF-8 body
-encoding corrupted them before they ever reached the server) - another
-reason `write_file` is the wrong tool for real image/media data regardless
-of this guard, which the tool description already says explicitly.
-
-**Verified:** `ctest` green (10/10). Live-probed against a running
-`--headless --no-ai` instance: `remember_location` on a real path succeeds
-and round-trips through `get_known_locations`/`GET /api/locations` with the
-resolved path and an `updated_at` timestamp; the same call against a
-nonexistent path is rejected with a clear error; `write_file` against a
-`.png` path with the exact placeholder string from the Phase 18 transcript
-is rejected before any file is created.
-
-### Phase 20 — A bare filename defaults to the real Desktop, not droidcli's own working directory ✅ implemented
-
-**Goal:** the Phase 18/19 transcripts all shared a root cause: droidcli is a
-personal desktop assistant (see "Agent properties" above), but every file/
-command-execution tool defaulted a location-less reference to droidcli's own
-process working directory - in practice, the git repo it was built and run
-from during development. Asked to save an image "to Desktop," the model
-wrote a bare `output.png` with no directory at all, and it landed in the
-`metaagent` repo root instead - a real, reproducible instance of exactly the
-wrong default for what this agent is.
-
-**What shipped:**
-
-- **`default_bare_filename_to_desktop()`** (`cli/host.cpp`) - a bare filename
-  (no `/` or `\` anywhere in it) defaults to the real Desktop; anything with
-  *any* directory information at all, even a relative one (`subdir/x.png`,
-  `./x.png`), is left untouched as the caller having already specified where.
-  Composes with `substitute_bare_desktop_token()` (Phase 7/18), not a
-  replacement for it - that one resolves an explicit `desktop/...` reference,
-  this one covers the case where "desktop" was never mentioned at all. Wired
-  into `write_file`, `copy_file` (both `source_path`/`destination_path`),
-  `move_path` (both paths), and `delete_file`.
-- **`run_command`/`run_ffmpeg`'s `work_dir`** now defaults to the real
-  Desktop when the caller doesn't pass one, rather than inheriting
-  droidcli's own working directory - a bare relative output filename in a
-  shell command's redirection or ffmpeg's own args (its single most common
-  shape, e.g. `... output.png`) now lands on the Desktop by default. Reported
-  back via a new `resolved_work_dir` field whenever the default applied, same
-  convention as `resolved_path`/`resolved_command`/`resolved_args`. This was
-  a deliberate, broader-scope choice (not limited to the file tools) since
-  droidcli's own role is a desktop assistant, not a dev/build tool - an
-  explicit `work_dir` always overrides it.
-- **Tool descriptions and the system prompt** (`cli/host.cpp`,
-  `HostConfig::system_prompt` in `cli/host.hpp`) updated to state the new
-  default explicitly and point the model at `resolved_path`/
-  `resolved_work_dir` for reporting the true location back to the user.
-
-**Verified:** `ctest` green (10/10). Live-probed against a running
-`--headless --no-ai` instance: `POST /api/fs/write` with a bare filename and
-no directory resolves to and creates the file at the real
-`C:\Users\...\Desktop\...` (confirmed via `ls`); `POST /api/run` with a
-command that writes a bare relative output filename and no `work_dir`
-reports `resolved_work_dir` as the real Desktop and the file is confirmed
-there afterward, not in the droidcli working directory.
-
-### Phase 21 — droidcli's own built-in knowledge of Windows itself (Recycle Bin, Settings pages, ...) ✅ implemented
-
-**Goal:** two real transcripts showed `open_application` fail on "Recycle
-Bin" and "Sound Settings" - neither is an installed application (no Add/
-Remove Programs entry, no discoverable `.exe` by that name), so
-`find_installed_app_match`/`collect_installed_app_matches` never find them,
-and a literal `CreateProcess("Sound Settings")` can never succeed no matter
-how it's spelled. The model has no way to know this distinction on its own -
-it needs droidcli to actually know what's part of Windows itself versus what
-has to be looked up as an installed application.
-
-**What shipped:**
-
-- **`find_well_known_windows_target()`** (`cli/host.cpp`) - a small, hand-
-  maintained table mapping common names (Recycle Bin, Sound/Display/Network/
-  Bluetooth Settings, Windows Update, Control Panel, Task Manager, Device
-  Manager, Disk Management, This PC, Downloads folder) to a real
-  executable + argument `CreateProcess` can actually launch - no
-  `ShellExecute` needed, since `explorer.exe` accepts a `shell:`/`ms-settings:`
-  URI as an ordinary command-line argument and hands it to the shell itself.
-  Narrow and evidence-driven (two observed failures), not an attempt at an
-  exhaustive Windows/CLSID list.
-- **Wired into `DroidHost::open_application()` itself**, checked only after
-  both the normal App Paths/PATH resolution and the installed-apps index
-  come up empty - so a real installed app of the same name always takes
-  priority, and this fallback works identically regardless of whether the
-  request came through the deterministic quick-open bypass or the model
-  calling `open_application` directly (one shared resolution path, not two
-  copies).
-- **`try_quick_open_json`** additionally reports `resolved_windows_target`/
-  `windows_target_display_name` (candidates empty only) so the TUI's
-  quick-open confirmation prompt reads "Open Sound Settings (a built-in
-  Windows location, not an installed app)?" instead of the generic "isn't in
-  the installed-apps index" message - display-only, the launch itself
-  already works via the shared fallback above regardless of this field.
-
-**Verified:** `ctest` green (10/10). Live-probed against a running
-`--headless --no-ai` instance: `POST /api/open` with `path_or_name` of
-`"Recycle Bin"` and, separately, `"Sound Settings"` both return `ok:true`
-with a real PID; `POST /api/apps/quick_open` for "open Sound Settings"
-returns `resolved_windows_target:true` with the correct display name and
-underlying `explorer.exe ms-settings:sound` target.
-
-### Phase 22 — More of what droidcli already knows about this machine, and a real bullet-point Locations panel ✅ implemented
-
-**Goal:** the Locations panel only showed `cwd`/Desktop as flat "label:
-path" lines - the user asked for more of what droidcli already has real OS
-access to (Home, "where the apps are," ...) and a clearer per-location
-layout instead of a single long line that gets unreadable once the path is
-long.
-
-**What shipped:**
-
-- **`SystemInfo` extended** (`cli/system_info.{hpp,cpp}`) with `home_path`
-  (`FOLDERID_Profile`), `documents_path` (`FOLDERID_Documents`),
-  `downloads_path` (`FOLDERID_Downloads`), and `program_files_path`
-  (`FOLDERID_ProgramFiles` - "where the apps are," distinct from the
-  installed-apps index, which is a *list* of what's there, not a path).
-  `detect_desktop_path()`'s Known-Folder-lookup logic was factored out into
-  a shared `detect_known_folder()` helper reused by all four new lookups,
-  rather than four more copies of the same PWSTR/WideCharToMultiByte dance.
-  POSIX fallbacks are `$HOME`-relative best-effort guesses, same honesty
-  contract as the existing Desktop fallback (empty, not a wrong guess, if
-  `$HOME` isn't set); `program_files_path` is honestly empty on POSIX - no
-  single answer exists across package managers.
-- **`list_known_locations_json()`** (`cli/host.cpp`) now also returns a
-  `system_locations` array (`{"name":...,"path":...}`) built from these four
-  fields, each entry skipped entirely (not shown empty) if it couldn't be
-  resolved.
-- **The Locations panel** (`cli/tui.cpp`, `locations_view`) now renders every
-  location - cwd, Desktop, the four new system locations, and every
-  remembered `known_locations` entry - as a bullet: a short bold `"* Name"`
-  line, then the real path on its own `paragraph()`-wrapped line below it,
-  instead of one long `"Name: path"` line. System locations and remembered
-  locations are visually separated (a `separator()` between the two groups)
-  and colored differently (white vs. cyan) since they have different
-  provenance - a live OS query versus a persisted memory.
-
-**Verified:** `ctest` green (10/10). Live-probed against a running
-`--headless --no-ai` instance: `GET /api/locations` returns real, resolved
-paths for Home/Documents/Downloads/Program Files alongside cwd/Desktop and
-the previously-remembered location from Phase 19's smoke test, confirming
-it persisted across the restart.
-
-### Phase 23 — A real `create_directory` tool, `read_file` gets the same guards as the other file tools, and the retry-nudge covers file ops too ✅ implemented
-
-**Goal:** a real transcript showed three compounding gaps in one exchange:
-"create a folder" was faked via `write_file` with empty content (which
-creates a *file*, not a directory) at a path `substitute_bare_desktop_token`
-didn't recognize (`./desktop/new_folder` - "desktop" starts at index 2 there,
-past both the bare-token and single-leading-separator cases Phases 7/18
-covered); the model's own attempt to fix it guessed a literal placeholder
-path (`/Users/username/Desktop/folder_name`) that `read_file` - unlike every
-other file tool - had no guard against at all; and every failure only ever
-triggered the "don't lie about it" fabrication nudge (Phase 6/17), never a
-push to actually retry with a corrected path, so it took four user turns to
-even get the real Desktop path via `get_system_info`.
-
-**What shipped:**
-
-- **`create_directory`** (`cli/filesystem_tools.{hpp,cpp}`, `cli/host.cpp`) -
-  a real directory via `std::filesystem::create_directories` (so missing
-  parents are created too), idempotent (`ok:true` if the directory already
-  exists, matching `mkdir -p`), `ok:false` if the path already exists as a
-  file. Gated (`tool_call_requires_approval`), gets the same placeholder-path/
-  desktop-token/bare-filename-defaults-to-Desktop treatment as
-  `copy_file`/`move_path`/`delete_file`, and the same post-creation
-  `stat_path()` ground-truth check as `write_file`
-  (`verified_is_directory`). New `POST /api/fs/mkdir` route.
-- **`substitute_bare_desktop_token` extended** (`cli/host.cpp`) to also
-  recognize a leading `./`/`.\` ("desktop" starting at index 2, one past the
-  single-leading-separator case Phase 18 added) as a word boundary - same
-  position-based distinction as before: a real absolute path never starts
-  with a literal `.`.
-- **`read_file` wired into the same guard/resolution trio** every other
-  filesystem tool already has: `looks_like_placeholder_path`,
-  `substitute_bare_desktop_token`, `default_bare_filename_to_desktop`. It was
-  the one file tool left out of all three.
-- **`looks_like_placeholder_path` extended** with a `"username"` pattern -
-  `/Users/username/...` is the exact same "documentation-convention
-  placeholder" shape as `path/to/...`, just a different one (the generic
-  `username` a man page or Stack Overflow answer uses in place of a real
-  one), and none of the existing patterns caught it.
-- **The Phase 12 command-retry-nudge extended** from `run_command`/
-  `run_ffmpeg` only to also cover `read_file`/`write_file`/`copy_file`/
-  `move_path`/`delete_file`/`create_directory` - a failed file-tool call now
-  gets the same "analyze the real error and retry with corrected input
-  yourself, don't ask permission" push those two already had, pointing the
-  model at `list_dir`/`stat_path`/`get_system_info` if it needs the real
-  path/username instead of guessing again.
-
-**Verified:** `ctest` green (10/10). Live-probed against a running
-`--headless --no-ai` instance: `create_directory` on a bare name creates a
-real directory on the Desktop (confirmed idempotent on a second call);
-`./desktop/...` now resolves to the real Desktop instead of droidcli's own
-working directory; `read_file` against the exact placeholder path from the
-transcript (`/Users/username/Desktop/folder_name`) is now rejected with a
-clear error instead of reaching the OS.
-
-### Phase 24 — Ground-truth verification made uniform across every mutating tool ✅ implemented
-
-**Goal:** `write_file` (Phase 18) and `create_directory` (Phase 23) each got
-an independent post-action `stat_path()` check instead of trusting their own
-return value - but `copy_file`, `move_path`, `delete_file`, and
-`write_clipboard` didn't get the same treatment, so "did this actually
-happen" was answered reliably for some mutating tools and not others. Asked
-directly: the checker should cover every tool that changes state, not just
-the two that happened to get hardened first.
-
-**What shipped:** the same "immediate, independent re-check via the same OS
-API, not a repeat of the operation's own report" pattern, extended to the
-remaining four mutating tools:
-
-- **`copy_file`** — `verified_exists`/`verified_size_bytes` on the
-  destination, checked fresh right after the copy.
-- **`move_path`** — `verified_exists` (destination) *and*
-  `verified_source_removed` (source) - checking only one side would miss a
-  "copied but didn't remove the original" half-failure, which a plain
-  `std::filesystem::rename` success wouldn't otherwise surface.
-- **`delete_file`** — `verified_deleted`, confirming the path genuinely no
-  longer exists.
-- **`write_clipboard`** — `verified_matches`, a read-back of the clipboard
-  performed right after the write. This one has a real failure mode the
-  filesystem tools don't: another application (or the user, mid-copy) can
-  win a race for clipboard ownership between the write and whenever the
-  model reports success, so a self-reported "ok" here is weaker evidence
-  than it is for a file write.
-
-All four fields are populated inline, in the same request/response - "real
-time" in the sense that matters here: before the tool's result ever reaches
-the model, not a delayed or asynchronous check bolted on afterward.
-
-**Verified:** `ctest` green (10/10). Live-probed end-to-end against a running
-`--headless --no-ai` instance: wrote a file, copied it
-(`verified_exists`/`verified_size_bytes` on the copy), moved the copy
-(`verified_exists` on the new location, `verified_source_removed` on the
-old), deleted it (`verified_deleted`), and wrote/verified a clipboard value
-(`verified_matches`) - all five ground-truth fields confirmed correct via
-independent checks, not just the tool's own `"ok"`.
-
-### Phase 25 — There is exactly one real Desktop; a structural check against ever inventing a second one ✅ implemented
-
-**Goal:** every prior Desktop-path phase (7/18/20/23) fixed a specific
-*pattern* the model was observed typing (a bare token, a leading separator, a
-leading `./`) - but `substitute_bare_desktop_token` deliberately leaves
-anything that already *looks* like a real absolute path untouched, since
-`"Desktop"` preceded by more path is indistinguishable from an already-
-correct `"C:\Users\...\Desktop\..."` by pattern alone. That leaves a gap: a
-model can type an absolute-*looking* path with its own invented `"desktop"`
-segment that was never one of the recognized shapes at all - e.g. a literal
-`"C:\desktop\hello"` (root-level, not the real per-user Desktop) - and
-nothing catches it, since it doesn't match any specific bad pattern, it just
-isn't the *one real path*.
-
-**What shipped:**
-
-- **`looks_like_invented_desktop_path()`** (`cli/host.cpp`) - a structural
-  check, not another pattern to add to the list: after
-  `substitute_bare_desktop_token`/`default_bare_filename_to_desktop` have
-  already run, does the resolved path contain a `"desktop"` path segment
-  (bounded by separators, so a real folder that merely contains "desktop" as
-  part of a longer name never false-positives) that ISN'T the real, resolved
-  `desktop_path` prefix? If so, it's rejected outright with the real
-  `desktop_path` spelled out in the error - there is no second `"desktop"`
-  folder anywhere on the machine a path should ever be rooted at, so any
-  survivor here is definitionally wrong, not just probably wrong. Wired into
-  all six file tools (`read_file`, `write_file`, `copy_file`, `move_path`,
-  `delete_file`, `create_directory`).
-- **`HostConfig::system_prompt`** (`cli/host.hpp`) states this directly:
-  there is exactly one real Desktop folder (`desktop_path`), never construct
-  or guess a second one - if a path has "desktop" in it anywhere and isn't
-  exactly the real one, that's wrong.
-
-**Verified:** `ctest` green (10/10). Live-probed against a running
-`--headless --no-ai` instance (via PowerShell - Bash/MSYS mangles backslashes
-in a JSON body's Windows paths, which produced a false alarm on first try): a
-literal `C:\desktop\hello` is now rejected with the real Desktop path spelled
-out in the error; a bare name, a `desktop/...` token, and the real absolute
-Desktop path all still succeed exactly as before - the guard doesn't
-false-positive on any of the three already-legitimate shapes.
-
-### Phase 26 — The 25 guards get permanent regression tests, not just a live-probe verification ✅ implemented
-
-**Goal:** every guard/heuristic in the Phase 6-25 hardening log was verified
-by live-probing a running instance during the session that built it - real,
-but not durable. Nothing stopped a future edit to `cli/host.cpp` from
-silently breaking `looks_like_invented_desktop_path` or
-`substitute_bare_desktop_token`'s leading-`./` case; the only way anyone
-would find out was another real incident. Named as the single highest-
-leverage, cheapest fix available: these are already pure functions with no
-host I/O, they just weren't in a testable location.
-
-**What shipped:**
-
-- **Two new portable core modules**, `src/reliability/claim_guards.{hpp,cpp}`
-  (`looks_like_unverified_action_claim`, `looks_like_degenerate_role_leak`,
-  `looks_like_capability_denial`) and `src/reliability/path_guards.{hpp,cpp}`
-  (`substitute_bare_desktop_token`, `default_bare_filename_to_desktop`,
-  `looks_like_placeholder_path`, `looks_like_invented_desktop_path`,
-  `looks_like_mismatched_binary_content`) - moved out of `cli/host.cpp`'s
-  anonymous namespace verbatim (same logic, same comments explaining each
-  incident), registered in `droidcli_core.cpp` like every other core module.
-  `cli/host.cpp` now `#include`s these headers and pulls the names in via a
-  single `using namespace droidcli::reliability;` at the top of its own
-  anonymous namespace, rather than defining local copies.
-- **`tests/claim_guards_test.cpp`/`tests/path_guards_test.cpp`** - each real
-  transcript that motivated a guard (Phase 6/7/11/16/18/19/20/23/25's
-  incidents) is now encoded as its own assertion, plus the false-positive
-  cases each guard is specifically designed not to catch (a genuine truthful
-  report, a real absolute Desktop path, a real PNG's magic bytes, an already-
-  correct relative path). Registered in `CMakeLists.txt` like every other
-  per-module test.
-
-**What this doesn't cover:** the reliability-*loop* behavior itself
-(`run_agent_tool_loop`'s hop/nudge/retry budget interactions in
-`cli/host.cpp`) isn't unit-tested here - that requires a live or mocked
-`ai::ModelProvider`, a materially larger undertaking than extracting pure
-string functions. The guards this phase covers are the load-bearing,
-easy-to-silently-break primitives those loop interactions are built on;
-locking those down first is the higher-leverage move.
-
-**Verified:** `ctest` green - 12/12 (10 pre-existing plus
-`claim_guards_test`/`path_guards_test`, both passing on first run against the
-extracted code).
-
-### Phase 27 — A destructive-command warning surfaced in the approval prompt ✅ implemented
-
-**Goal:** `run_command`/`run_ffmpeg` is droidcli's single largest blast-
-radius capability - arbitrary shell execution - gated by a human approval
-prompt that only ever showed the raw command string. That prompt's safety
-depends entirely on a human actually reading it every time, which gets
-harder the more routine approving becomes across a session.
-
-**What shipped:**
-
-- **`looks_like_destructive_command()`** (`src/reliability/command_guards.{hpp,cpp}`) -
-  a narrow, conservative pattern list for unambiguously destructive/
-  irreversible shapes: recursive/forced delete (`rm -rf`, `rd /s`,
-  `Remove-Item -Recurse -Force`, ...), disk/partition-level operations
-  (`format`, `diskpart`, `dd if=...`), broad forced process kills or
-  shutdown/reboot, and a fork bomb. Explicitly a visibility aid, not a
-  safety gate - `tool_call_requires_approval` is still the only real one; a
-  false negative here just means no extra warning, never a behavior change.
-- **`DroidHost::build_pending_tool_call_response`** (`cli/host.cpp`) now
-  checks the pending `run_command`/`run_ffmpeg` call's `command`/`args`
-  field and includes `"looks_destructive"` in the `pending_tool_call` JSON.
-- **The TUI's approval prompt** (`parse_agent_turn_response`, `cli/tui.cpp`)
-  prefixes `"[!! DESTRUCTIVE !!] "` to the `[AGENT WANTS TO] ...` line when
-  set, so a destructive-shaped command reads differently from a routine one
-  at a glance, rather than requiring the human to parse the raw string
-  themselves every time.
-
-**Verified:** `ctest` green (13/13, `command_guards_test` covers every
-pattern plus deliberate non-matches - an ordinary `dir`/`echo`/`ffmpeg`/`git`
-command and a single, non-recursive `del` of one named file must never be
-flagged).
-
-**Still open (named, not solved here):** the underlying root cause across
-most of Phases 6-25 is model quality, not infrastructure -
-`llama3.1:8b`/`gemma3:1b` are the models repeatedly shown fabricating,
-guessing paths, and giving up; `llama3-groq-tool-use` is already in the
-model-picker's pull list. Deliberately not addressed with code in this
-phase: it requires an actual A/B comparison of incident rate across models
-under real use, which needs a live Ollama instance and repeated real
-sessions to produce a trustworthy answer, not something that can be
-fabricated or simulated. Worth running deliberately before continuing to
-patch string heuristics one transcript at a time.
-
-### Phase 28 — A recurring scheduler, not just one-shot delay ✅ implemented
-
-**Goal:** the "next hardening priorities" list above named this gap
-explicitly: `Task::scheduled_for_ms` (Phase 9) answers "run this once, in N
-minutes" but not "run this every N minutes" (a cron/SOP concept) - the
-single most concretely-specified, still-open item from that list.
-
-**What shipped:**
-
-- **`Task::recurrence_ms`** (`src/app/tasks.hpp`) - 0 (default) means
-  one-shot, unchanged from before; a positive value is a recurrence interval
-  in milliseconds. `TaskQueue::complete()`/`fail()` (`tasks.cpp`) now check
-  it: a recurring task cycles back to `"pending"` with
-  `scheduled_for_ms = now + recurrence_ms` instead of terminating in
-  `"done"`/`"failed"` - and it cycles back **whether the run succeeded or
-  failed**, matching real cron/SOP semantics (a failure doesn't kill a
-  recurring job, it just tries again next time; the error is still recorded
-  in `error_message` either way). `tick_tasks()` (`cli/host.cpp`) needed no
-  changes at all - it already re-calls `claim_next()` every poll iteration,
-  which already respects `scheduled_for_ms`, so a rescheduled task is picked
-  up on its own next due time with no separate scheduler thread or code
-  path, exactly as the priorities list predicted.
-- **`Task::run_count`** - incremented each time `claim_next()` returns the
-  task, so a recurring task's run history is observable via
-  `GET /api/tasks/{id}`/`list_tasks` without a separate log query.
-  `result_json` holds the *most recent* run's result, overwritten each cycle.
-- **`TaskQueue::cancel()`** and the new **`cancel_task`** agent tool/
-  `POST /api/tasks/{id}/cancel` route - the only way to stop a recurring
-  task for good (it would otherwise reschedule itself forever). Gated
-  (`tool_call_requires_approval`), same as `enqueue_task`. Also works on a
-  still-pending one-shot task (e.g. cancelling a delayed task before it
-  fires); a no-op (`ok:false`) on an already-terminal task.
-- **`enqueue_task`'s `recurrence_ms` parameter** (`parse_task_request_from_json`)
-  - usable together with the existing `delay_ms` to control both the first
-  run's timing and the recurrence interval independently.
-
-**Verified:** `ctest` green (13/13) - `task_queue_test` covers a recurring
-task's successful-run reschedule, failed-run reschedule (error recorded, still
-reschedules), `cancel()` (including the double-cancel/unknown-id no-op
-cases), and confirms a one-shot task's `complete()`/`fail()` behavior is
-unchanged. Live-probed end-to-end against a running `--headless --no-ai`
-instance: a task with `recurrence_ms:2000` ran repeatedly with `run_count`
-incrementing and `updated_at_ms` deltas of ~2000ms between runs (confirmed
-via three separate polls), stayed `"pending"` (never terminal) between
-cycles, and `cancel_task` stopped it for good - a repeat poll after
-cancelling showed a stable `run_count` and `"status":"cancelled"`, and a
-second cancel attempt correctly returned `ok:false`.
-
-### Phase 29 — The model now knows what time it actually is ✅ implemented
-
-**Goal:** a real, concrete gap surfaced while reviewing this document
-against OpenClaude's own design: `get_system_info` and the seeded system
-prompt report OS/hostname/username/cwd/Desktop, but neither ever reports the
-current date/time - and the system prompt is only sent once, when a
-session's transcript is empty (`agent_turn()`, `cli/host.cpp`), so even
-adding a date/time string there naively would go stale the moment a session
-runs past that instant. The model had no way to reason about "what time is
-it" or "how long has this session been running" at all.
-
-**What shipped:**
-
-- **`current_datetime`** added to `build_system_info_json()`'s response
-  (`cli/host.cpp`) - computed fresh via `make_full_log_timestamp()` on
-  *every* call, unlike the rest of `SystemInfo` (queried once at startup and
-  cached). The `get_system_info` tool description now tells the model this
-  explicitly: call it whenever the actual current time is needed, not just
-  at session start.
-- **The seeded system prompt** (`agent_turn()`) now also states the date/
-  time as of session start - explicitly labeled *"as of the start of this
-  session"*, with an explicit instruction to call `get_system_info` for a
-  fresh read later, rather than implying the seeded value stays current for
-  the life of a long-running session.
-
-**Verified:** `ctest` green (13/13, no regressions - this phase didn't touch
-any tested pure function, only `build_system_info_json`'s output and the
-system-prompt string). Live-probed against a running `--headless --no-ai`
-instance: `GET /api/system` returns a `current_datetime` field matching the
-real wall-clock time at the moment of the call.
-
-### Phase 30 — Ollama telemetry: per-hop latency and token feedback, structured ✅ implemented
-
-**Goal:** `agent_turn`'s hop loop called Ollama and only ever kept
-`assistant_message`/`tool_calls`/`error_message` from the response -
-`/api/chat`'s own generation telemetry (`total_duration`, `eval_duration`,
-`prompt_eval_count`, `eval_count`, `done_reason`) was parsed nowhere, and no
-log line recorded how long a hop actually took. Debugging "the agent felt
-slow" or comparing models (see the still-open item 4 discussion above) had
-no data to look at beyond re-reading raw transcripts by hand.
-
-**What shipped:**
-
-- **`OllamaChatResponse`** (`src/ai/types.hpp`) gained
-  `total_duration_ns`/`eval_duration_ns`/`prompt_eval_count`/`eval_count`/
-  `done_reason`, populated in `parse_ollama_chat_response`
-  (`src/ai/ollama_client.cpp`) via the existing `net::extract_json_int_field`
-  helper - no new hand-rolled numeric parser. All fields default to
-  zero/empty so an older Ollama version or a non-2xx body (already handled
-  earlier in the function) never needs special-casing.
-- **`ProviderResponse`** (`src/ai/model_provider.hpp`) carries the same data
-  through the provider-agnostic seam as
-  `total_duration_ms`/`eval_duration_ms`/`prompt_tokens`/`completion_tokens`/
-  `done_reason` - `OllamaProvider::parse_response`
-  (`src/ai/model_provider.cpp`) does the ns→ms conversion at the adapter
-  boundary, so `DroidHost::agent_turn` never touches Ollama's wire units
-  directly, matching this file's provider-abstraction contract.
-- **`DroidHost::append_app_log`** (`cli/host.cpp`/`host.hpp`) gained an
-  optional trailing `extra_json_fields` parameter: raw `"key":value` JSON
-  text a specific call site can append into its JSONL line without widening
-  the fixed summary/success shape every other channel's log lines use. Only
-  the durable `logs/log.jsonl` write is affected - the console line and the
-  in-memory `app_log_`/`GET /api/app/log` shape are both unchanged, same
-  discipline `session_id` (Phase 3) already established.
-- **`run_agent_tool_loop`**'s hop loop now wraps its retry loop in
-  `std::chrono::steady_clock` timing and logs one structured `"ollama"`
-  channel entry per hop - wall-clock latency (spanning every empty-reply
-  retry the hop needed, not just the final attempt), Ollama's own
-  `model_total_ms`/`model_eval_ms`, `prompt_tokens`/`completion_tokens`,
-  `done_reason`, the model name, and the tool-call count - independent of
-  the existing "chat" channel's human-summary lines, which are unchanged.
-
-**Verified:** `ctest` green (13/13); added telemetry-specific cases to
-`ollama_client_test.cpp` and `model_provider_test.cpp` (a populated-fields
-response and an absent-fields response, plus the ns→ms conversion). Live-
-probed against a running `--headless` instance with a real local Ollama
-server (`llama3-groq-tool-use`): sent a real `POST /api/agent/turn` that
-triggered a real tool call, then inspected `logs/log.jsonl` by hand -
-confirmed two `"channel":"ollama"` lines, each valid standalone JSON, with
-real (non-zero) `prompt_tokens`, `completion_tokens`, `model_total_ms`, and
-`done_reason":"stop"` values matching the actual turn.
-
-### Phase 31 — Live-verified that Phase 14's narrow non-goal doesn't need widening ✅ verified, no code change
-
-**Goal:** Phase 14's own writeup names two shapes its deterministic
-command-confirmation bypass deliberately does not recognize - "yes but make
-it bigger" (a modified confirmation) and a command proposed several turns
-back (only the immediately preceding Assistant message is checked). Revisited
-whether either is worth fixing. Widening the bypass itself was rejected as
-the fix: `intent::extract_proposed_command`/`is_bare_affirmative`
-(`cli/host.cpp`) skip `tool_call_requires_approval`'s human-in-the-loop gate
-entirely, so a false positive there means autonomously executing a stale or
-misread command with zero approval prompt - exactly the failure mode
-extension point 7 in `AGENTS.md` says to guard against, not the false
-negatives (which just fall through to the normal loop) that are safe to
-accept freely. The question that mattered instead: does that fallback
-actually hold up, or was the non-goal note just asserting safety without
-having exercised it?
-
-**What was verified, live, against a running `--headless` instance with a
-real local Ollama model (`llama3-groq-tool-use`) - not a synthetic/mocked
-transcript:**
-
-- **A bare "yes" after a fenced command with no explicit permission
-  phrase** (so the Phase 14 bypass correctly never even considers it) still
-  resolved correctly: the model initially claimed success with no tool call
-  (caught and nudged by Phase 6's fabrication guard), then issued a real,
-  correctly-gated `run_ffmpeg` call matching the exact command it had shown.
-- **"yes but make it 400x400 instead"** - the literal "yes but X" shape the
-  non-goal note names - correctly produced a *new*, correctly-modified
-  gated `pending_tool_call` (`s=400x400`, not the stale `s=200x200`), not a
-  blind re-execution of the earlier proposal. `is_bare_affirmative` rejecting
-  this phrase is doing exactly its job: forcing it through the model, which
-  got the modification right.
-- **A confirmation several turns after the original proposal** ("ok yes, go
-  ahead with that green image," sent after an unrelated intervening question
-  had already abandoned the pending tool call per Phase 14's own abandonment
-  handling) did *not* silently misfire in either direction: the model tried
-  to claim success with no real tool call, got nudged once by the
-  fabrication guard, then - still failing to make a real tool call - the
-  guard **overrode with an honest refusal** ("I wasn't actually able to
-  complete this... please try again") rather than passing a fabricated
-  success through. No wrong command executed, no lie surfaced to the user.
-
-**Conclusion:** the two non-goal shapes don't need the bypass widened,
-because they're not actually gaps in end-to-end correctness - they're just
-places the *narrow, high-confidence* shortcut correctly declines to guess,
-handing off to the general-purpose loop, which is independently backstopped
-by Phase 6's fabrication guard and Phase 14's own pending-call abandonment
-handling. The worst observed outcome for an unrecognized shape was an honest
-"please retry," never a wrong silent action - the layered-guard design is
-doing its job as intended.
-
-**Verified:** no source change; `ctest` still 13/13 (nothing touched). The
-above is a real `logs/log.jsonl` transcript from a live multi-turn session,
-inspected by hand.
-
-### Phase 32 — A second `ai::ModelProvider`: Anthropic ✅ implemented
-
-**Goal:** close roadmap item 4 - the `ModelProvider` interface (Phase 1) and
-`ProviderRequest`/`ProviderResponse` (Phase 1, extended with telemetry in
-Phase 30) already existed specifically so a second provider would be
-additive. Nothing had exercised that promise until now.
-
-**What shipped:**
-
-- **`src/ai/anthropic_client.{hpp,cpp}`** (new, `#include`d into
-  `droidcli_core.cpp` alongside `ollama_client.cpp`): `build_anthropic_messages_request`/
-  `parse_anthropic_messages_response`, mirroring `ollama_client`'s
-  free-function, no-I/O shape. `AnthropicConfig`/`AnthropicOutboundRequest`/
-  `AnthropicChatResponse` added to `src/ai/types.hpp` alongside the existing
-  Ollama structs.
-- **Role-alternation mapping, not a schema change.** The Anthropic Messages
-  API requires strict `user`/`assistant` alternation and non-empty message
-  content; droidcli's internal transcript is finer-grained (a hop with two
-  tool calls records two consecutive `ChatRole::Tool` entries with no
-  `Assistant` entry between them). Rather than adding a `tool_call_id` field
-  to `ChatMessage` to reconstruct Anthropic's native `tool_use`/`tool_result`
-  block pairing, `anthropic_serialize_messages` maps `System` to the
-  top-level `"system"` field, `User`/`Tool` to `"user"`, `Assistant` to
-  `"assistant"`, and **merges consecutive same-mapped-role entries** into one
-  message - always strictly alternating regardless of droidcli's own
-  transcript granularity, with no schema change and no dependency on
-  Anthropic's own tool-use/tool-result id matching. An `Assistant` turn with
-  empty content (it only made a tool call, no narration text) gets a
-  placeholder (`"(used a tool)"`) rather than serializing an empty message,
-  which Anthropic rejects.
-- **`AnthropicProvider`** (`src/ai/model_provider.{hpp,cpp}`) adapts the
-  above behind `ModelProvider`, same adapter-only discipline as
-  `OllamaProvider` - no request/response-shaping logic of its own.
-- **Auth headers required a real transport change.** Anthropic needs
-  `x-api-key`/`anthropic-version` headers Ollama never needed, so
-  `ProviderRequest` gained a `headers` field, `LanguageAiTransportCallbacks::post_json`
-  and `tools::sync_http_post_json`/`sync_http_request` (`tools/sync_http_client.{hpp,cpp}`)
-  all gained an `extra_headers` parameter (threaded through both the WinHTTP
-  HTTPS path and the raw-socket HTTP path), and every existing call site
-  updated to pass an empty array - Ollama's own requests are byte-identical
-  to before this phase.
-- **`DroidHost::make_model_provider()`** (`cli/host.cpp`/`host.hpp`)
-  replaces the two inline `OllamaProvider` construction blocks that used to
-  live in `agent_turn`/`agent_tool_decision` - selects Ollama or Anthropic
-  from `HostConfig::ai_provider` at runtime, returning
-  `std::unique_ptr<ai::ModelProvider>` (a runtime choice can no longer bind a
-  stack value to a `const ModelProvider&` the way the single-provider code
-  did). Neither call site's control flow otherwise changed.
-- **CLI flags** (`cli/droidcli.cpp`): `--provider ollama|anthropic`,
-  `--anthropic-api-key` (else `ANTHROPIC_API_KEY` env var), `--anthropic-model`
-  (default `claude-3-5-haiku-latest`). `--provider anthropic` with no key
-  anywhere is rejected at startup with a clear error, not a lazily-discovered
-  failure on the first chat turn.
-- **Phase 30's per-hop telemetry generalized**, not left mislabeled: the
-  JSONL channel name and the `"model"` field both now come from
-  `config_.ai_provider`/the active model name instead of being hardcoded
-  `"ollama"`/`config_.ollama_model` - an Anthropic turn's telemetry now logs
-  under `"channel":"anthropic"` with the Anthropic model name, not silently
-  mislabeled as Ollama's.
-
-**Verified:** `ctest` 14/14 (new `anthropic_client_test.cpp` covering request
-building - URL, auth headers, system-field extraction, tool schema shape,
-missing-key/disabled rejection - and response parsing - text replies,
-`tool_use` blocks with raw JSON `input`, the error envelope's message field,
-transport failure, and the consecutive-Tool-message role-merge producing
-exactly 3 alternating messages instead of 4; `model_provider_test.cpp`
-extended to exercise `AnthropicProvider` through the `ModelProvider`
-interface, the same way `OllamaProvider` already was). **Not live-verified
-against the real Anthropic API** - no API key was available in this session,
-same honesty pattern as Phase 14's unexercised live shape: correctness here
-rests on the unit tests plus matching Anthropic's public Messages API
-documentation, not a live round trip.
-
-### Phase 33 — Config hardening: a settings file, secrets encrypted at rest ✅ implemented
-
-**Goal:** close roadmap item 2, scoped to the concrete gap that mattered
-most once Phase 34 (below) made unattended background operation possible:
-the bearer token and any provider API key were plaintext-only (CLI flag or
-env var, never persisted, regenerated every restart if neither was given).
-An installed, always-on service is a materially higher-value credential
-target than a foreground process a human is watching - see the roadmap
-reasoning above.
-
-**What shipped:**
-
-- **`cli/settings_store.{hpp,cpp}`** (new, host-tier - real file I/O and
-  Windows-specific crypto, `cli/` not `src/` per the core/host golden rule):
-  `HostSettings` (port, `enable_ai`, `enable_hardware_scan`, Ollama/Anthropic
-  config, `api_token`, `anthropic_api_key`) plus `load_settings`/
-  `save_settings` against a JSON file (default `db/droidcli_settings.json`,
-  same git-ignored `db/` convention as `droidcli_state.json`).
-- **Secrets encrypted at rest via Windows DPAPI**
-  (`CryptProtectData`/`CryptUnprotectData`, `crypt32.lib`) - tied to the
-  current Windows user account, no key management of our own needed. Stored
-  as hex-encoded `*_dpapi_hex` fields, never plaintext, with a plaintext
-  fallback field honored on load (for a human hand-editing the file or
-  migrating a value from a CLI flag) that gets re-encrypted on the next save.
-  On a non-Windows build (no DPAPI equivalent wired up) secrets fall back to
-  plaintext with a loud, explicit console warning rather than a silent gap -
-  this asymmetry is accepted, not hidden.
-- **`cli/droidcli.cpp`** gained `--settings <path>` and a
-  `resolve_setting_string` precedence helper (CLI flag, if actually present
-  in `argv`, else the settings file's value, else the hardcoded default) -
-  deliberately checks `argv` directly rather than reusing `parse_string_arg`'s
-  own already-defaulted return, which would make "flag passed" and "flag
-  omitted" indistinguishable and let the hardcoded default always beat the
-  settings file. Resolved settings (including the token, whether it came
-  from a flag, env var, the settings file, or was freshly generated) are
-  **saved immediately at every startup**, not just on clean exit like
-  `droidcli_state.json`'s connectors - a later `--install-service` run (Phase
-  34) must not depend on this process having shut down gracefully first.
-- **A concrete, positive side effect**: since `resolve_api_token` now checks
-  the settings file before generating a fresh token, droidcli no longer
-  regenerates a new random bearer token on every restart when no `--token`/
-  `DROIDCLI_API_TOKEN` is given - it reuses the one from the previous run.
-  Not the phase's goal, but a direct, welcome consequence of it.
-
-**Explicit non-goal:** a full TOML config schema, autonomy levels, and a
-workspace concept (all named in the original roadmap item) remain undone -
-this phase scoped to the credential-exposure gap specifically, per this
-codebase's own discipline against building config infrastructure ahead of a
-concrete need for the rest of it.
-
-**Verified:** `ctest` 14/14 (unaffected - this phase is entirely host-tier,
-no `src/` module touched). Live-probed end-to-end on this machine: ran
-droidcli with `--token mysecret123`, confirmed `db/droidcli_settings.json`
-was created with `"api_token_dpapi_hex":"<hex>"` (not plaintext) and an
-empty plaintext `"anthropic_api_key":""` (nothing to encrypt); ran again with
-*no* `--token` flag and confirmed no "generated API token" banner appeared
-(the persisted token was reused); started a third, independent process with
-no `--token` flag and confirmed `GET /api/status` with
-`Authorization: Bearer mysecret123` succeeded - proving the DPAPI
-encrypt/decrypt round trip is correct, not just that a file got written.
-
-### Phase 34 — A real background service: Windows Service support ✅ implemented (Windows only)
-
-**Goal:** close roadmap item 1, the item this section has called the
-highest-leverage remaining one since Phase 28 - `--daemon` was a documented
-no-op; "always ready to act" (Phase 9's watchdog, Phase 28's recurring
-scheduler) means little if the process itself doesn't survive a reboot or
-logoff.
-
-**What shipped:**
-
-- **`cli/windows_service.{hpp,cpp}`** (new, `#if defined(_WIN32)`, host-tier):
-  `run_as_windows_service(run_loop, on_stop)` registers a
-  `SERVICE_CTRL_HANDLER` and drives the exact same poll/tick loop shape
-  `--headless` already uses, via a caller-supplied callback - `on_stop` runs
-  the same `save_state(host)`/`server.stop()` a normal foreground exit
-  already does. `install_windows_service`/`uninstall_windows_service` wrap
-  `CreateService`/`DeleteService` (Service Control Manager, requires an
-  elevated/Administrator process), reporting *why* to stderr on failure
-  (e.g. `OpenSCManager` access-denied) rather than a bare `false`.
-- **Win32's `SERVICE_TABLE_ENTRY` needs a raw, non-capturing function
-  pointer** for `ServiceMain` - the caller's `std::function`s are stashed in
-  file-local globals that the C-style `service_main`/`service_ctrl_handler`
-  read back, documented inline as a one-shot-per-process pattern (droidcli
-  only ever calls `run_as_windows_service` once).
-- **`cli/droidcli.cpp`**: `--install-service`/`--uninstall-service` are
-  one-shot SCM actions handled *before* any host/HTTP-server setup, always
-  exiting immediately after. The install command line is deliberately just
-  `--service --headless --settings <path>` - no `--token`/
-  `--anthropic-api-key` on it, since Phase 33's settings file (already
-  freshly written by this same invocation, before the install branch runs)
-  is what the installed service reads its secrets from instead - a service's
-  command line is visible to any process on the machine (Task Manager,
-  `wmic process`, the Event Log), which a plaintext secret there would
-  expose. A new `--service` flag is the SCM's own entry point; if it's ever
-  passed without actually being launched by the SCM (e.g. typed by hand from
-  a console), `run_as_windows_service` returns `false` immediately - without
-  blocking - and droidcli fails loudly rather than silently falling through
-  to an interactive-looking foreground run.
-- **`current_executable_path()`** resolves the real absolute path via
-  `GetModuleFileNameA` for the install command line, rather than trusting
-  `argv[0]`'s relative/PATH-resolved form (which `CreateService` requires to
-  be absolute).
-
-**Explicit scope note:** a systemd unit for Linux (also named in the
-original roadmap item) is not included - nothing in this session's
-environment could build or exercise one, and this codebase's own discipline
-is against writing unverified platform-integration code. `--daemon` remains
-a documented no-op on non-Windows for now.
-
-**Verified, with an honest limit:** `ctest` 14/14 (unaffected - entirely
-host-tier). Live-probed everything reachable without Administrator
-privileges, which this session's shell does not have: `--install-service`
-correctly fails with `OpenSCManager failed (error 5) - are you running as
-Administrator?`; `--uninstall-service` against a not-installed service
-correctly reports that; `--service` run directly from a console correctly
-returns immediately (does not hang) with the "not launched by the SCM"
-message and a non-zero exit code, confirming `StartServiceCtrlDispatcher`'s
-non-blocking failure path is wired correctly. **Not verified**: an actual
-`sc create`/`sc start` round trip under an elevated shell - that step needs
-Administrator privileges this session doesn't have, and is a reasonable next
-manual verification step for whoever runs this with elevation.
-
-### Phase 35 — Full paths in the approval prompt ✅ implemented
-
-**Goal:** a gated tool call's approval prompt (`build_pending_tool_call_response`)
-showed `arguments_json` completely raw - if the model wrote a bare filename
-("notes.txt") or a Desktop-relative shortcut, that's what a human approving
-it saw, even though `execute_write_file`/`execute_copy_file`/etc. resolve it
-to a full path before actually touching disk. A user approving "yes" was
-approving a path they couldn't fully verify at a glance.
-
-**What shipped:**
-
-- **`DroidHost::display_arguments_with_full_paths(tool_name, arguments_json)`**
-  (`cli/host.cpp`/`host.hpp`) rewrites the well-known path field(s) - `"path"`
-  for `write_file`/`delete_file`/`create_directory`, `"source_path"`/
-  `"destination_path"` for `copy_file`/`move_path` - to a full absolute path,
-  using the *same* resolution chain the execution path already uses
-  (`substitute_bare_desktop_token` + `default_bare_filename_to_desktop`,
-  `src/reliability/path_guards.hpp`) plus `std::filesystem::absolute` to
-  collapse any remaining relative path against droidcli's own working
-  directory. `build_pending_tool_call_response` calls it for both the
-  pending call itself and every already-executed action shown alongside it.
-- **Display-only, by design - never touches what actually executes.** The
-  rewrite operates on a *copy* of the arguments JSON built just for this
-  response; the `ai::ToolCall`/`PendingToolActionRecord` stored in
-  `pending_tool_call_` (and later handed to `execute_agent_tool` on
-  approval) is completely untouched. This means every existing
-  path-fabrication guard (`looks_like_placeholder_path`,
-  `looks_like_invented_desktop_path`, Phases 16/19/25) still runs unchanged,
-  at execution time, against the original unmodified string - this phase
-  adds a display layer, it doesn't touch the validation pipeline at all.
-- **A placeholder-looking path is deliberately left unresolved**, not
-  absolute-ified: `display_arguments_with_full_paths` checks
-  `looks_like_placeholder_path`/`looks_like_invented_desktop_path` before
-  rewriting and leaves the field untouched if either matches. Running an
-  obviously-fake path (e.g. `/Users/username/Desktop/...`) through
-  `fs::absolute()` could turn it into something that merely *looks* more
-  legitimate (a real-looking absolute path containing the literal word
-  "username") - the human approving it should see the fake path exactly as
-  fake as it is, not laundered.
-- **`run_command`/`run_ffmpeg` are deliberately untouched.** Both take a
-  free-form shell/ffmpeg argument string, not a single well-known JSON path
-  field - a path can appear anywhere in arbitrary position, quoting, or flag
-  context. Attempting to find-and-rewrite path-shaped substrings inside a
-  live shell command risks corrupting it in exactly the way
-  `run_command`/`run_ffmpeg`'s own `via_shell=false` argv-based execution
-  (see "Phase 7" above) was built to avoid - safer to leave these two shown
-  exactly as the model wrote them than to risk showing (and, worse,
-  approving) a subtly different command than what actually runs.
-- **`build_pending_tool_call_response` is no longer `static`** (it now needs
-  `system_info_.desktop_path` via the new helper) - no caller changes needed,
-  both call sites (`agent_turn`, `agent_tool_decision`'s resume path) already
-  called it unqualified from within another member function.
-
-**Verified:** `ctest` 14/14 (no test previously depended on this function
-being `static`, and no `src/` module was touched - this is entirely
-host-tier). Live-probed end-to-end against a running `--headless` instance
-with a real local Ollama model: asked it to write a file by bare filename
-("hello_fullpath_test.txt"), confirmed the resulting approval prompt's
-`arguments_json` showed the full path
-(`C:\Users\luisarandas\Desktop\hello_fullpath_test.txt`, not the bare name
-the model wrote), declined the call via `POST /api/agent/tool_decision`, and
-confirmed the file was never actually created - proving the rewrite is
-display-only and the real execution path is unaffected.
-
-### Phase 36 — Model/provider changes persist at runtime too, not just at startup ✅ implemented
-
-**Goal:** Phase 33's settings file persists whatever `--ollama-model`/
-`--provider`/etc. resolved to *at startup*. It did not cover the model
-changing mid-session: `POST /api/config`, `POST /api/ollama/config`, and the
-TUI's own model picker all call `DroidHost::update_config`/
-`update_ollama_config`, which only ever updated the in-memory `config_` -
-none of them touched the settings file, so a model picked interactively was
-silently forgotten the moment droidcli restarted, reverting to whatever the
-last CLI flag/settings-file value had been. The concrete ask: pick a model
-once, in any way, and have droidcli keep using it next time until something
-explicitly changes it again.
-
-**What shipped:**
-
-- **`DroidHost::persist_current_settings_locked()`** (`cli/host.cpp`/
-  `host.hpp`): loads the *existing* settings file, overlays only the fields
-  `config_` has authoritative, current values for (`ollama_url`,
-  `ollama_model`, `ai_provider`, `anthropic_model`, `anthropic_api_key`,
-  `enable_ai`, `enable_hardware_scan`), and saves the merged result back.
-  Deliberately does **not** touch `port`/`api_token` - `HostConfig` has no
-  field for either (the bearer token deliberately never reaches `DroidHost`
-  at all, only `cli/droidcli.cpp` and the HTTP server ever see it - see
-  Phase 33), so overwriting them from `config_` would silently blank out
-  whatever was already correctly persisted. Called (while `mutex_` is
-  already held, matching this file's other `_locked` helpers) at the end of
-  both `update_config()` and `update_ollama_config()` - the internal
-  post-model-pull call site (`cli/host.cpp`, install/pull flow) already
-  funnels through `update_ollama_config()`, so it's covered for free.
-- **`HostConfig` gained a `settings_path` field**, empty by default (a test
-  harness or embedder that never sets it gets a no-op persist, not a crash
-  or a write to a surprising default location) - `cli/droidcli.cpp`'s
-  `main()` sets it to the same `--settings`-resolved path already used for
-  Phase 33's startup load/save, so both mechanisms write the exact same
-  file.
-
-**Verified:** `ctest` 14/14 (no `src/` module touched - entirely host-tier).
-Live-probed end-to-end: started droidcli with `--ollama-model llama3.2`,
-confirmed the settings file showed `"ollama_model":"llama3.2"`; called
-`POST /api/ollama/config {"model":"llama3-groq-tool-use"}` and confirmed the
-settings file updated immediately, in the running process, to
-`"llama3-groq-tool-use"`, with `api_token_dpapi_hex` still present and
-unchanged (not clobbered); killed the process and restarted with **zero**
-CLI flags; confirmed both that the persisted bearer token still
-authenticated `GET /api/status` and that `GET /api/config` reported
-`"ollama_model":"llama3-groq-tool-use"` - the runtime-picked model, not the
-original `--ollama-model llama3.2` from the first launch.
-
-### Phase 37 — Context window (`num_ctx`), a controllable default, not a fixed constant ✅ implemented
-
-**Goal:** close the first "OpenClaude" candidate above. `build_ollama_chat_request`
-never set `num_ctx` at all, meaning every request silently fell back to
-whatever context window the loaded Ollama model's own `Modelfile` defaults
-to - often much smaller than the model's actual maximum, and smaller than a
-long agent-turn transcript (system prompt + full tool-calling history) can
-need. OpenClaude's own default is 32768; the ask was to match that as a
-default, but keep it a real, persisted, per-instance setting - not a second
-hardcoded constant standing in for the first.
-
-**What shipped:**
-
-- **`ai::OllamaConfig` gained `num_ctx`** (`src/ai/types.hpp`, default
-  `32768`), sent inside the request's `"options"` object on **every** call -
-  unconditionally, unlike `temperature`, which stays opt-in via its `-1.0f`
-  sentinel (`src/ai/ollama_client.cpp`). Requesting it every time, not just
-  when a caller happens to set it, is the actual point: the whole failure
-  mode is a transcript silently exceeding a *default* nobody explicitly
-  reasoned about.
-- **A controllable value threaded through the same layers as `ollama_model`**,
-  not a second, parallel path: `HostConfig::ollama_num_ctx` (`cli/host.hpp`),
-  set at all four `ai::OllamaConfig` construction sites in `cli/host.cpp`
-  (`initialize()`, `update_config`, `update_ollama_config`,
-  `make_model_provider`); `HostSettings::ollama_num_ctx`
-  (`cli/settings_store.{hpp,cpp}`), loaded/saved in the same JSON settings
-  file as everything else from Phase 33, including by Phase 36's
-  runtime-persist path (so changing it via a future config endpoint would
-  survive a restart the same way the model does today - no endpoint
-  currently changes it at runtime, only `--ollama-num-ctx` does, but the
-  storage is already wired for one); `--ollama-num-ctx <N>`
-  (`cli/droidcli.cpp`), resolved via a new `resolve_setting_int` - the same
-  CLI-flag-if-present > settings-file > default precedence
-  `resolve_setting_string` already established, just for an integer.
-  Rejected outright (exit 1) if `<= 0`.
-
-**Verified:** `ctest` 14/14, including new `ollama_client_test.cpp` cases:
-`num_ctx` present and correct in the request body alongside `temperature`,
-and present with `temperature` correctly absent when the sentinel is unset -
-confirming the two fields are independent, not accidentally coupled through
-the shared `"options"` object. Live-probed end-to-end against a real running
-Ollama server: started droidcli with `--ollama-num-ctx 16384`, drove a real
-`POST /api/agent/turn` that completed a real tool call (proving Ollama
-accepted the resulting request body without error), and confirmed
-`db/droidcli_settings.json` persisted `"ollama_num_ctx":16384`. Also
-confirmed `--ollama-num-ctx -5` is rejected at startup with a clear error
-rather than silently sent to Ollama or clamped.
-
-### Phase 38 — Windows panel awareness: wider known-locations table, plus a real way for the model to answer "what can you open" ✅ implemented
-
-**Goal:** a real transcript (via the TUI, which routes through the
-deterministic `POST /api/apps/quick_open` path - see Phase 11) showed "open
-the Windows panel that shows memory usage" fail outright: `find_well_known_windows_target`
-already had "task manager" in its table, but this matcher works by substring
-containment, and "the windows panel that shows memory usage" never contains
-the literal text "task manager" - so it fell through to a literal
-`CreateProcess("Windows panel that shows memory usage")`, which can never
-succeed. The user then asked "What windows panels can you open?" and the
-model, having no real way to answer that, fabricated a response - correctly
-caught and overridden by Phase 6's fabrication guard (an honest "I wasn't
-actually able to complete this" rather than a lie), but the underlying
-question genuinely had no way to get answered truthfully at all.
-
-**What shipped, both by explicit request to widen past the original
-"one incident, one entry" discipline (see the comment above the table in
-`cli/host.cpp`):**
-
-- **`kWellKnownWindowsTargets`** (renamed and promoted from a function-local
-  `static` array to file scope, `cli/host.cpp`) gained real entries for
-  Resource Monitor (`resmon.exe`), Performance Monitor (`perfmon.exe`),
-  Services (`services.msc`), Event Viewer, System Information, Registry
-  Editor, System Properties, Programs and Features, Network Connections,
-  Power Options, Date and Time, Storage Settings, About, Apps & Features,
-  Windows Security, and Printers & Scanners - roughly 18 new targets. Task
-  Manager specifically gained four additional aliases ("process manager",
-  "memory usage", "cpu usage", "running processes") on separate rows sharing
-  its `display_name`/`path_or_name`, since one `WellKnownWindowsTargetEntry`
-  only carries a single alias each - the fix for "described by what it does,
-  not by its exact name" is more *rows*, not a smarter matcher.
-- **A new read-only agent tool, `list_windows_locations`**, backed by
-  `list_well_known_windows_targets_json()` - deduplicates
-  `kWellKnownWindowsTargets` by `display_name` (several rows share one, per
-  the aliases above) and returns the plain list. Not gated by
-  `tool_call_requires_approval` (read-only, matching `list_connectors`/
-  `get_system_info`). The system prompt (`cli/host.hpp`) now explicitly
-  tells the model to call this - and answer from the real result - when
-  asked what it can open, instead of guessing.
-
-**Verified:** `ctest` 14/14 (this is host-tier lookup-table/tool-dispatch
-logic with no `src/` module involved - no dedicated unit test, consistent
-with the rest of `cli/host.cpp`'s host-tier helpers). Live-probed against a
-running instance: `POST /api/apps/quick_open` with the exact real phrase
-from the incident, `"I want you to open the Windows panel that shows memory
-usage"`, now returns `"resolved_windows_target":true,
-"windows_target_display_name":"Task Manager"` deterministically - no LLM
-call involved, matching the request path the TUI actually uses. Also probed
-`"open resource monitor"` and `"open the thing that shows cpu usage"`,
-both resolving correctly. Separately confirmed `list_windows_locations`
-itself returns `"ok":true` and the full deduplicated location list when
-called as an agent tool.
-
-### Phase 39 — TUI session line shows the active model ✅ implemented
-
-**Goal:** the TUI's session-id status line gave no visibility into which
-model a session was actually talking to - relevant now that both the model
-(Phase 36, persisted/runtime-changeable) and the provider itself (Phase 32)
-can vary between runs.
-
-**What shipped:**
-
-- **`DroidHost::active_model_name()`** (`cli/host.cpp`/`host.hpp`): returns
-  `config_.anthropic_model` or `config_.ollama_model`, whichever
-  `config_.ai_provider` selects - the same ternary Phase 30's per-hop
-  telemetry logging already computed inline in `run_agent_tool_loop`, now a
-  single shared method instead of two copies (the telemetry call site was
-  updated to call it too).
-- **The TUI's session line** (`cli/tui.cpp`) now reads
-  `"session: <id> | model: <name>"` (or `"none"` if `active_model_name()`
-  is somehow empty - `HostConfig`'s own default is a real model name, so
-  this is a defensive fallback, not an expected state). Since
-  `active_model_name()` reflects whatever the settings file resolved to at
-  startup (Phase 33) or has been changed to at runtime since (Phase 36),
-  this is always "last session's model" on a fresh launch and "the current
-  model" thereafter - the same value by construction, nothing to
-  separately track.
-
-**Verified:** `ctest` 14/14 (no `src/` module touched). Live-probed by
-launching the actual TUI (not headless) with `--ollama-model
-llama3-groq-tool-use` and inspecting the raw terminal output stream:
-confirmed the rendered status line reads exactly
-`session: <id> | model: llama3-groq-tool-use`.
-
-### Phase 40 — `open_application` full-path display, plus real execution transparency ✅ implemented
-
-**Goal:** two things surfaced by a real transcript. First, "Full paths in
-the approval prompt" (Phase 35) never covered `open_application`'s
-`path_or_name`, since it's usually a bare app name, not a path - but when it
-*is* a path, the same reasoning from Phase 35 applies. Second, and more
-serious: the transcript showed `open_application({"path_or_name":"Memory"})`
-report `"ok":true, "launched":true, "pid":19484` for a request to open "the
-Windows panel that shows memory usage" - the call succeeded, but neither the
-model nor a human reading the log could tell *what* had actually launched.
-"Memory" resolved to something before ever reaching `find_well_known_windows_target`
-(checked last, only once App Paths/PATH/the installed-apps index all come up
-empty) - there was no way to confirm or rule out whether it was really Task
-Manager.
-
-**What shipped:**
-
-- **`LaunchAppResult` gained `resolved_path`** (`cli/command_runner.{hpp,cpp}`):
-  on Windows, queried back from the *live process handle* via
-  `QueryFullProcessImageNameA` right after a successful `CreateProcess` -
-  the real path the OS actually launched, not an echo of whatever
-  `launch_application`'s own App Paths registry lookup guessed. Concretely
-  caught a second real case immediately: launching `"notepad.exe"` resolved
-  to the Windows Store package
-  (`...\WindowsApps\Microsoft.WindowsNotepad_...\Notepad.exe`), not the
-  classic `System32\notepad.exe` - invisible before this phase, obvious
-  after it. `DroidHost::open_application`'s JSON result now includes it, and
-  the `open_application` tool description tells the model to report it (or
-  its filename) back to the user, especially for a loosely-worded request -
-  see AGENTS.md's "resolved_args"/"resolved_command" precedent (Phase 7)
-  for why reporting what actually happened back to the model matters more
-  than what it originally typed.
-- **`looks_like_path`** (was a `command_runner.cpp`-local helper) is now
-  exported from `command_runner.hpp`, so `DroidHost::display_arguments_with_full_paths`
-  (Phase 35) can reuse the exact same "is this a path or a bare name" check
-  `launch_application` itself already uses, rather than a second,
-  potentially-diverging heuristic.
-- **`display_arguments_with_full_paths` gained an `open_application` branch**,
-  deliberately narrower than the Phase 35 filesystem-tool branches: it only
-  rewrites `path_or_name` when `looks_like_path` is true (an actual path was
-  given), never for a bare name ("notepad", "Memory") - running a bare name
-  through the filesystem branches' Desktop-defaulting logic would have been
-  wrong (a bare app name isn't a Desktop-relative filename). A bare name is
-  shown to the human exactly as the model wrote it; an actual path is shown
-  fully resolved.
-- **Two concrete, narrow fixes traced directly to this transcript's failures**,
-  same "one incident, one entry" discipline Phase 38 already established:
-  - `kWellKnownWindowsTargets` gained "memory panel" (Task Manager) and
-    "disk partition"/"partition manager"/"manage disks" (Disk Management) -
-    the exact phrases from this transcript ("the memory panel of Window",
-    "disk partition") that had no matching alias at all.
-  - `strip_leading_courtesy` (`src/intent/open_intent.cpp`) gained "i
-    basically want you to "/"i really want you to "/"i just want you to "
-    (and their "...want to " variants) - "Ok I basically want you to open
-    the memory panel of Window" fell through to the unreliable LLM path
-    because "i " alone was never a courtesy prefix (only multi-word units
-    like "i want you to " are), so an adverb wedged between "i" and "want"
-    broke the match entirely, the same class of gap Phase 14/38's own
-    "great "/"now " fix closed for a different wedge position.
-- **`open_application`'s tool description** now tells the model to call
-  `list_windows_locations` (Phase 38) first for a vague/descriptive request
-  and pass back the real name, rather than guessing a bare word straight
-  into `path_or_name` - directly addressing how "Memory" got guessed in the
-  first place, on top of the new aliases covering this specific case
-  deterministically before the model is ever involved.
-
-**Verified:** `ctest` 14/14, including a new `intent_test.cpp` case for the
-exact "i basically want you to" phrasing. Live-probed end-to-end against a
-running instance: `POST /api/apps/quick_open` with the exact two failing
-phrases from the transcript - `"Ok I basically want you to open the memory
-panel of Window"` and `"can you open now disk partition"` - both now resolve
-deterministically to Task Manager and Disk Management respectively, no LLM
-involved. A real `POST /api/open {"path_or_name":"notepad.exe"}` returned
-`"resolved_path":"C:\\...\\WindowsApps\\Microsoft.WindowsNotepad_...\\Notepad.exe"`.
-Drove three real approval prompts via `POST /api/agent/turn`: an
-already-absolute path passed through unchanged, a bare `"notepad"` shown
-exactly as given (not path-ified), and a relative `"tools\notepad.exe"`
-correctly expanded to a full absolute path - confirming the narrower
-`open_application` branch's "only rewrite when it's actually a path"
-condition works as intended.
-
-### Phase 41 — The Windows execution ruleset: trust-ordered resolution, verified before every launch ✅ implemented
-
-**Goal:** Phase 40 added transparency (`resolved_path`, `resolution_source`)
-but didn't fix the actual resolution *order* bug it had just diagnosed.
-`DroidHost::open_application` called `launch_application(path_or_name, ...)`
-- App Paths registry lookup, then a **blind** CreateProcess bare-name
-attempt (letting the OS search its own directory, cwd, system directories,
-PATH with zero verification) - as its *first* step. If that blind search
-coincidentally matched *anything*, `launched:true` came back before the
-installed-apps index or droidcli's own curated Windows-locations table (both
-strictly more trustworthy) ever got a chance to run. This is exactly how
-`open_application("Memory")` reported success while giving no way to
-confirm what had actually launched. Explicit ask: formalize a Windows
-execution ruleset - resolve to a real, verified, full path before ever
-calling `CreateProcess`, in a fixed trust order, and make that ruleset
-something this codebase treats as a stable contract, not code that
-casually changes shape.
-
-**What shipped:**
-
-- **`DroidHost::open_application`'s resolution is now a single, explicit,
-  trust-ordered pipeline** (`cli/host.cpp`), replacing the old
-  "call `launch_application`, catch what its own internal blind search
-  happens to find, then try two more trustworthy sources only if that
-  failed" shape:
-  1. `given_path` - the caller already supplied a path (`looks_like_path`);
-     honored exactly as given, no re-resolution.
-  2. `app_paths_registry` - `resolve_app_paths_registry` (now exported from
-     `command_runner.hpp`, was previously local to `launch_application`).
-  3. `installed_apps_index` - `find_installed_app_match` against the
-     startup-scanned Add/Remove Programs index.
-  4. `windows_known_location` - `find_well_known_windows_target` (Phase 21/38),
-     further resolved to a full absolute path via `which_executable` rather
-     than left as a bare name like `"taskmgr.exe"`.
-  5. `path_search` - **last resort only**: a *verified* PATH search
-     (`which_executable`, which checks the candidate file actually exists)
-     rather than a blind, unverified `CreateProcess` bare-name gamble.
-  6. **Nothing resolved → outright rejection**, before `CreateProcess` is
-     ever called - `resolution_source` stays empty, `launched` stays
-     `false`, and the error explicitly tells the caller to ask the user for
-     the exact name/path rather than guessing again. No tier below "verified
-     to exist" is ever attempted.
-- **`resolution_source` in the response** names exactly which tier matched -
-  the same "report what really happened" discipline as `resolved_path`
-  (Phase 40), now covering *how* something was found, not just *what* was
-  launched.
-- **The `open_application` tool description** was rewritten to state the
-  trust order explicitly and tell the model an unresolved name is rejected
-  outright, not attempted blindly - reinforcing the same discipline at the
-  model-facing layer, not just the implementation.
-- See the new **"Windows execution ruleset"** section immediately below -
-  this phase's actual deliverable is that section being a real, standing
-  contract this repository treats as stable, not just a phase-log entry
-  describing a one-off fix.
-
-**Verified:** `ctest` 14/14 (host-tier resolution logic, no `src/` module
-touched). Live-probed the exact incident end-to-end against a running
-instance: `POST /api/open {"path_or_name":"Memory"}` now returns
-`"resolution_source":"windows_known_location"`,
-`"resolved_path":"C:\\Windows\\System32\\Taskmgr.exe"` - the real Task
-Manager, not an unverifiable guess. Also probed a legitimate installed app
-by bare name (`"notepad"` → `resolution_source":"app_paths_registry"`,
-resolved to the Windows Store package path) and a genuinely nonexistent name
-(`"totally made up nonsense xyz123"` → clean `"ok":false` rejection with no
-process spawned at all, confirmed via the error message and no PID).
-
-### Phase 42 — Never propose an unresolvable action ✅ implemented
-
-**Goal:** Phase 41 made execution-time resolution trust-ordered and
-verified, but resolution still only ran *after* a human approved the call -
-`DroidHost::open_application` (the resolver) is only ever reached once
-`agent_tool_decision` executes an approved `open_application` call.
-`run_agent_tool_loop`'s approval gate (`tool_call_requires_approval`) shows
-the model's raw, unverified `path_or_name` in the yes/no prompt and only
-finds out whether it actually resolves to anything real *after* the human
-says yes. Explicit ask: the proposal itself should never reference something
-that doesn't exist, and an approved call should never fail.
-
-**What shipped:**
-
-- **`DroidHost::resolve_open_application_target`** - Phase 41's resolution
-  logic extracted out of `open_application()` into its own method, returning
-  a `ResolvedLaunchTarget` (`resolved`, `target`, `effective_args`, `source`,
-  `error_message`). One implementation, shared by two call sites (below) -
-  they can never resolve the same input differently.
-- **`DroidHost::precheck_and_resolve_gated_call`** runs at *both* points
-  `run_agent_tool_loop` checks `tool_call_requires_approval` (the
-  `resume_calls` resumption path and the fresh-hop path), strictly *before*
-  a gated call is ever turned into a `pending_tool_call_`/shown to the
-  human. For `open_application` specifically:
-  - **Resolves successfully** → rewrites the call's `arguments_json` in
-    place to the fully-resolved, already-verified-to-exist target before
-    the approval prompt is built. What the human approves and what actually
-    executes are now the exact same, pre-verified string - approving it
-    cannot fail for a resolution reason (it can still fail for something
-    outside droidcli's control - the app crashing on launch, a permissions
-    issue - but never for "this name didn't resolve to anything").
-  - **Resolves to nothing** → the approval prompt is never shown at all.
-    The call is recorded as an immediately-failed action (same JSON shape
-    `open_application()` itself would have returned) and the loop
-    continues - the model sees the failure and, since `open_application`
-    was added to `kRetriableTools` in this same phase, gets the same "you
-    have enough information, retry now" push `run_command`/the filesystem
-    tools already get (Phase 12/23), pointed at `list_windows_locations`/
-    `find_application` by the error message itself. A doomed guess never
-    reaches the human as a decision to make.
-  - Every other tool is a no-op passthrough - this precheck is
-    `open_application`-specific by design, not a generic gate.
-
-**Verified:** `ctest` 14/14 (no `src/` module touched). Live-probed
-end-to-end against a running instance with a real local Ollama model: asked
-it to call `open_application` with `path_or_name:"Memory"` - the resulting
-approval prompt already showed the fully-resolved
-`"C:\\Windows\\system32\\taskmgr.exe"`, not the bare guess; approving it
-launched the real Task Manager (PID confirmed, `resolution_source:"given_path"`
-on the now-pre-resolved rewrite). Separately asked it to open
-`"xyzNonexistentApp123"` - confirmed **no `pending_tool_call` ever appeared
-in the response at all**: the call failed immediately with
-`resolution_source:""` and the real "could not be resolved" error, and the
-turn continued without ever asking a human to approve something guaranteed
-to fail.
+droidcli has gone through 42 phases of hardening. Phases 1-5 were planned,
+ranked extension work (closing the original ZeroClaw Core-tier gaps); Phase
+6 onward were overwhelmingly incident-driven - each one exists because a
+real transcript showed a local model fail in a specific, reproducible way,
+not because it was on a roadmap in advance. This section used to carry the
+full phase-by-phase incident narrative; it's been compressed to what's
+still load-bearing for understanding *why* the current architecture looks
+the way it does - the concrete guard/algorithm list itself lives in
+"Algorithms reference" below, not here. Phase numbers are kept as stable
+references (other sections cite them), even where the narrative behind a
+given number has been folded into its era's summary paragraph.
+
+### Phases 1-5 — Core-tier foundations
+
+The original set of ranked, planned gaps versus ZeroClaw's Core tier,
+closed in dependency order (each phase's interface choices constrain the
+next): a real `ai::ModelProvider` interface `agent_turn` is coded against,
+not Ollama-specific logic (Phase 1); `MemoryStore`, a SQLite-backed
+persistent session/history store keyed by whatever Phase 1 settled on
+(Phase 2); structured JSONL logging (`logs/log.jsonl`, one object per line,
+`session_id` attribution) replacing plain-text log lines (Phase 3);
+`core::spawn()`, named `std::thread` construction reporting
+"spawned"/"joined"/"threw: ..." so background threads are observable, not
+silent (Phase 5). Phase 4 (a `Channel`/messaging-connector concept) was
+scoped but deliberately not started - see "Current status and next
+hardening priorities" above for why it stays parked until a specific
+channel is actually requested.
+
+### Phases 6-27 — Agent-turn reliability: the largest single investment
+
+The local models droidcli runs against are small, tool-calling-tuned, and
+unreliable in specific, reproducible ways - this 22-phase span is the
+guard layer that resulted from running real transcripts against them and
+fixing exactly what broke, incident by incident, rather than guessing at
+failure modes in advance. The classes of failure this closed: **fabricated
+success claims** (the model saying it did something with no tool call to
+back it up, or a tool call that never happened, first caught in Phase 6 and
+hardened again in Phase 17 once the guard's own success-scan turned out to
+be a vector for laundering an unrelated success into an unrelated claim);
+**false capability denial** (the model claiming it can't do something it
+demonstrably can); **unretried command/file-tool failures** (a failed
+`run_command`/`write_file`/etc. that should have been retried with
+corrected input instead of silently given up on or re-asked of the user,
+Phase 12/23); **invented paths** (a plausible-looking but fabricated
+Desktop/placeholder path never checked against reality, Phases 16/18-20/25);
+and **unverified mutation claims** (a tool reporting success without an
+independent re-check that the claimed effect actually happened - ground-truth
+verification, made uniform across every mutating tool in Phase 24). Also
+from this span: human-in-the-loop approval for every side-effecting tool
+call (Phase 6), deterministic bypasses for the highest-confidence request
+shapes so they never depend on the model's own tool-calling judgment at all
+(`open_application`/Windows-location recognition in Phase 11, a bare "yes"
+confirming a just-proposed command in Phase 14), persistent command-fix
+memory so a past mistake doesn't get repeated (Phase 8), a self-health
+watchdog folded into the existing poll loop (Phase 9), a read-only opt-in
+hardware inventory (Phase 10), a destructive-command warning surfaced in
+the approval prompt (Phase 27), and permanent regression tests for all of
+the above, not just live-probe verification (Phase 26). The concrete
+guard-by-guard list is the "Agent-turn reliability" table in "Algorithms
+reference" below.
+
+### Phases 28-31 — Scheduling, time-awareness, and a verification pass
+
+A recurring/cron-style task scheduler (`Task::recurrence_ms`, `cancel_task`)
+on top of Phase 2's one-shot delayed scheduling (Phase 28); the model
+gained real date/time awareness via a freshly-read-every-call
+`current_datetime` field, not just a value cached at session start (Phase
+29); per-hop Ollama telemetry (latency, token counts) structured into
+`logs/log.jsonl` (Phase 30); and a live-verification pass confirming that
+two narrow, deliberately-unwidened non-goals in Phase 14's deterministic
+command-confirmation bypass ("yes but modify it," a confirmation several
+turns removed from the original proposal) don't actually need widening -
+the existing fabrication guard and pending-call abandonment handling
+already catch both correctly when they fall through to the normal loop
+(Phase 31, no code change).
+
+### Phases 32-37 — Multi-provider, config hardening, background service
+
+The three items this document used to rank as the top open priorities,
+closed in the same pass: a second `ai::ModelProvider` (Anthropic, selected
+at runtime via `--provider` - Phase 32); a JSON settings file with secrets
+DPAPI-encrypted at rest on Windows, persisted at every startup and updated
+immediately on every runtime config change, not just at the next restart
+(Phase 33, 36); and a real Windows Service entry point (`--service`,
+`--install-service`) so the process itself can survive a reboot/logoff, not
+just `--headless` (Phase 34). Alongside these: full paths shown in gated-tool
+approval prompts instead of a bare, unverifiable guess (Phase 35), and a
+configurable Ollama context window (`num_ctx`, default 32768 matching
+OpenClaude, via `--ollama-num-ctx`) requested on every chat call instead of
+silently relying on Ollama's own often-smaller per-model default (Phase 37).
+
+### Phases 38-44 — Windows app/execution reliability
+
+A real transcript showed `open_application("Memory")` report success while
+giving no way to confirm what had actually launched, and a second showed
+two natural phrasings ("the memory panel of Window," "disk partition") fail
+outright with no matching alias. This span is the fix, in increments: a
+much wider known-Windows-locations table plus a `list_windows_locations`
+tool so the model can answer "what can you open" from real data instead of
+guessing (Phase 38); the TUI session line showing the active model (Phase
+39); `resolved_path`/`resolution_source` reporting what actually launched,
+not an echo of the request (Phase 40); a trust-ordered, verified resolution
+pipeline replacing the old "try a blind CreateProcess search first, fall
+back to more trustworthy sources only if that happened to fail" order
+(Phase 41); running that same resolution *before* a gated call is ever
+shown to a human as a yes/no, so an approved call is guaranteed to succeed
+and an unresolvable one never reaches the human at all (Phase 42); and
+closing the two gaps that remained even after that - the
+built-in-Windows-locations tier silently falling back to an unverified bare
+name if a PATH search failed, and a given path never being checked for
+existence at all - by resolving curated targets deterministically against
+the real Windows System/Windows-root directories instead of PATH, verifying
+a given path before ever calling it "resolved," and making
+`launch_application` itself refuse an unresolved bare name rather than
+still carrying its own now-legacy blind-search fallback (Phase 43). A third
+transcript then showed "open the partition disk" fail outright (the alias
+is "disk partition" - reversed word order, no substring relationship either
+way) and, worse, get proposed for a "try it anyway" confirmation with no
+escape valve once declined-or-failed - closed by a word-order-independent
+matching fallback plus making the TUI's deterministic quick-open path fall
+through to the normal agent loop (which can search further via
+`find_application`/`list_windows_locations`) instead of committing to a
+guess it can't back up, whenever nothing was actually found to open (Phase
+44). This work is now a living, current-state document rather than a
+historical narrative - see "Windows execution ruleset" immediately below,
+which is the thing to read (and keep accurate) going forward, not this
+paragraph.
 
 ---
 
@@ -3430,28 +1088,39 @@ across `cli/command_runner.cpp` and `cli/host.cpp`.
 
 1. **Never call `CreateProcess` (or any process-spawning API) with an
    unresolved bare name.** Every launch target must first be resolved to a
-   real, verified path - "verified" meaning either the resolution source
-   itself is inherently trustworthy (the caller gave an explicit path, the
-   Windows App Paths registry, droidcli's own startup-scanned installed-apps
-   index) or the candidate's existence was actually checked on disk
-   (`which_executable`'s PATH search, `fs::exists`). The OS's own implicit
-   bare-name search (calling process's directory → cwd → system
-   directories → PATH, all unverified by droidcli) is never allowed to run
-   *first* - see rule 2.
-2. **Resolution is trust-ordered, not first-match.** The order, from most to
-   least trustworthy, is: an explicit path the caller already gave → the
-   Windows App Paths registry → droidcli's own installed-apps index →
-   droidcli's own curated built-in-Windows-locations table
-   (`list_windows_locations`) → a verified PATH search, as an explicit last
-   resort. A more specific, more curated source always gets first refusal
-   over a more generic one - a coincidental PATH match must never pre-empt a
-   real installed app or a known Windows panel. See
-   `DroidHost::open_application` (`cli/host.cpp`) for the implementation of
-   this exact order.
+   real, verified path. `launch_application` (`cli/command_runner.cpp`)
+   itself enforces this as a hard precondition - it refuses outright
+   (`looks_like_path` check) if handed anything that isn't already a
+   resolved path, rather than doing any resolution of its own. It used to
+   *be* a resolution step (an App Paths registry lookup, then a blind
+   CreateProcess bare-name attempt as fallback); that was removed once every
+   caller started pre-resolving (Phase 43) - a live fallback there would be
+   reachable only if a caller's own resolution had a gap, and would
+   silently reintroduce the exact unverified-launch risk this rule exists
+   to eliminate, undetected, the next time it happened to fire on a
+   coincidental match.
+2. **Resolution is trust-ordered, not first-match, and every tier is
+   independently verified - never dependent on the PATH environment
+   variable being configured a particular way.** The order, from most to
+   least trustworthy: an explicit path the caller gave (verified via
+   `fs::exists`, Phase 43) → the Windows App Paths registry → droidcli's own
+   installed-apps index → droidcli's own curated built-in-Windows-locations
+   table (`list_windows_locations`), resolved against the real Windows
+   System/Windows-root directories via `resolve_system_executable`
+   (`GetSystemDirectoryA`/`GetWindowsDirectoryA`, Phase 43 - *not* a PATH
+   search, since every curated target genuinely lives in one of those two
+   places regardless of PATH) → a verified PATH search (`which_executable`),
+   as an explicit last resort only. A more specific, more curated source
+   always gets first refusal over a more generic one - a coincidental PATH
+   match must never pre-empt a real installed app or a known Windows panel,
+   and a misconfigured PATH must never cause a *curated* target to fall
+   through to an unverified guess. See `DroidHost::resolve_open_application_target`
+   (`cli/host.cpp`) for the implementation of this exact order.
 3. **If nothing resolves, fail outright - never guess.** An unresolved bare
-   name is a clean, explicit error (`resolution_source` empty, `launched:false`,
-   a message telling the caller to ask the user for the exact name or full
-   path), not an attempt with the OS's own unverified search as a hope-it-works
+   name (or a given path that doesn't actually exist, Phase 43) is a clean,
+   explicit error (`resolution_source` empty, `launched:false`, a message
+   telling the caller to ask the user for the exact name or full path), not
+   an attempt with the OS's own unverified search as a hope-it-works
    fallback. A false negative here (refusing something that might have
    worked) is always safe; a false positive (launching the wrong thing while
    reporting success) is the actual failure mode this rule exists to prevent.
@@ -3460,11 +1129,7 @@ across `cli/command_runner.cpp` and `cli/host.cpp`.
    back from the live process handle) and `resolution_source` (Phase 41) are
    both present on every success - a caller (human or model) should never
    have to trust an echo of its own input as proof of what ran.
-5. **A real path (relative or absolute, given directly) is honored exactly
-   as given, not re-resolved against the trust chain above.** The caller
-   already specified where - matches the same "any directory information at
-   all is left untouched" discipline the filesystem tools use (Phase 20).
-6. **A command needing real shell features (pipes, redirects, env var
+5. **A command needing real shell features (pipes, redirects, env var
    expansion) goes through `run_command`'s `via_shell=true` (the default,
    routing through `cmd.exe /c`); a command that's just "run this program
    with these arguments" and needs no shell features uses `via_shell=false`
@@ -3473,9 +1138,11 @@ across `cli/command_runner.cpp` and `cli/host.cpp`.
    quotes) for why routing a quote-sensitive command through `cmd.exe`'s own
    re-tokenizing grammar is a real, observed corruption risk, not a
    theoretical one. `run_ffmpeg` is the existing precedent
-   (`cli/ffmpeg_tool.cpp`); apply the same judgment to any new command-shaped
-   tool rather than defaulting to shell execution out of habit.
-7. **Filesystem mutations (`write_file`, `copy_file`, `move_path`,
+   (`cli/ffmpeg_tool.cpp`, `resolve_ffmpeg` - itself a verified-resolution
+   function following this same ruleset); apply the same judgment to any new
+   command-shaped tool rather than defaulting to shell execution out of
+   habit.
+6. **Filesystem mutations (`write_file`, `copy_file`, `move_path`,
    `delete_file`, `create_directory`) never go through the command line at
    all** - they call `std::filesystem`/Win32 file APIs directly
    (`cli/filesystem_tools.cpp`), so there is no shell-quoting surface for
@@ -3486,14 +1153,30 @@ across `cli/command_runner.cpp` and `cli/host.cpp`.
    rejection, invented-Desktop-path rejection, ground-truth post-write
    verification - see the "Agent-turn reliability" table in "Algorithms
    reference" below).
+7. **Search before giving up, and never let deterministic recognition trap a
+   request it can't actually resolve.** `find_well_known_windows_target` has
+   a word-order-independent fallback tier (Phase 44) - "partition disk"
+   still finds the "disk partition" alias even though neither phrase
+   contains the other. But no matcher covers every phrasing, so recognizing
+   *that* a message is an open-request (`parse_open_intent`'s verb-shape
+   check) is not the same thing as having found something real to open -
+   the TUI's deterministic quick-open path only commits to its yes/no
+   confirmation flow when a candidate or a resolved target actually exists;
+   otherwise it falls through to the normal agent loop instead of proposing
+   a guaranteed-to-fail "try it anyway" (Phase 44). The agent loop has
+   `find_application`/`list_windows_locations` and can search further
+   before honestly reporting it couldn't find anything - a dead end in the
+   fast, deterministic path is always recoverable one layer up, never a
+   final answer on its own.
 
 ### Where this is enforced (defense in depth, not one checkpoint)
 
 | Layer | What it does | Where |
 |---|---|---|
-| Deterministic recognition | A high-confidence request shape ("open the memory panel") resolves to a real Windows target *before the model is ever asked to decide* - no LLM guess enters the picture at all for the shapes this covers. | `src/intent/open_intent.cpp`, `find_well_known_windows_target` (`cli/host.cpp`) |
+| Deterministic recognition | A high-confidence request shape ("open the memory panel") resolves to a real Windows target *before the model is ever asked to decide* - no LLM guess enters the picture at all for the shapes this covers. Word-order-independent (Phase 44), and never commits to a doomed confirmation when nothing actually resolves - falls through to the agent loop instead (Phase 44). | `src/intent/open_intent.cpp`, `find_well_known_windows_target` (`cli/host.cpp`), the quick-open handler (`cli/tui.cpp`) |
 | Pre-approval resolution (Phase 42) | Runs the full trust-ordered resolution *before* a gated call is ever shown to a human as a yes/no - rewrites the proposal to the already-verified target on success, or fails immediately (no prompt at all) if nothing resolves. The human never approves a proposal that references something that doesn't exist. | `DroidHost::precheck_and_resolve_gated_call` (`cli/host.cpp`) |
 | Resolution (this ruleset) | Rules 1-3 above - trust-ordered, verified-or-refused, never a blind guess. Shared by the pre-approval precheck and execution itself, so they can't resolve the same input differently. | `DroidHost::resolve_open_application_target` (`cli/host.cpp`) |
+| Execution-layer enforcement (Phase 43) | The last line of defense against a resolution bug: even if a caller somehow got this wrong, `launch_application` itself refuses to run an unresolved bare name rather than falling back to its own blind search. | `launch_application` (`cli/command_runner.cpp`) |
 | Tool-facing documentation | The `open_application`/`run_command`/`run_ffmpeg` tool descriptions state the trust order and the "ask, don't guess" rule explicitly, so a model that *isn't* caught by the deterministic layer is still told the same discipline. | `agent_tool_definitions()` (`cli/host.cpp`) |
 | Human-facing transparency | The approval prompt shows a full, resolved path when one was given (Phase 35/40), not a bare guess a human can't verify at a glance. | `display_arguments_with_full_paths` (`cli/host.cpp`) |
 | Post-execution truth | `resolved_path`/`resolution_source` report what actually ran, independent of what was asked for - the last line of defense if every earlier layer still let something surprising through. | `LaunchAppResult` (`cli/command_runner.hpp`), `DroidHost::open_application` |
@@ -3529,63 +1212,57 @@ doesn't follow) is still caught by the layers below it.
 ## Algorithms reference
 
 Every non-obvious algorithm/heuristic in the codebase, in one place, for
-findability. Each entry is deliberately short - the "why" (the real
-transcript that motivated it, the trade-off it makes) is in the Phase log
-above; this table is the index into that, not a replacement for it. Grouped
-by what part of the system each one serves.
+findability. Each entry is one line - the incident/rationale behind it lives
+in the Chronological hardening log above (cited by phase number here), not
+duplicated in this table. File/function names are given instead of line
+numbers, which drift too fast in an actively-changing file to stay trustworthy.
 
-### Agent-turn reliability (`cli/host.cpp`)
+### Agent-turn reliability (`cli/host.cpp`, `src/reliability/`)
 
-These all exist because the local models droidcli runs against are small,
-tool-calling-tuned, and unreliable in specific, reproducible ways - each
-guard was written against a real observed failure, not a hypothetical one.
-See "The agent turn" diagram earlier in this document for how they compose
-inside `DroidHost::run_agent_tool_loop`.
+Exists because the local models droidcli runs against are small,
+tool-calling-tuned, and unreliable in specific, reproducible ways (Phases
+6-27). See "The agent turn" diagram earlier in this document for how these
+compose inside `DroidHost::run_agent_tool_loop`.
 
 | Algorithm | Location | What it does |
 |---|---|---|
-| `looks_like_unverified_action_claim` | `src/reliability/claim_guards.cpp` (Phase 26) | Lowercases the assistant's text and checks for a claim phrase ("i've ", "i'll ", "successfully", "already ", ...) *combined with* an action verb ("create", "delete", "move", "list ", ...). Both must match - a claim phrase alone isn't enough, since ordinary narration ("I'll answer that") shouldn't false-positive. Deliberately loose (substring matching, not real NLP): a false positive only costs one extra nudge round-trip, never a wrong final answer. |
-| `looks_like_degenerate_role_leak` | `src/reliability/claim_guards.cpp` (Phase 26) | Structural, not semantic: catches a reply that starts with a bare chat-role label ("assistant"/"system"/"user") standing alone at the start of the trimmed text - a real sentence never opens that way. Catches a distinct failure mode `looks_like_unverified_action_claim` misses: broken/garbled model output that isn't *claiming* anything, just malformed. |
-| `looks_like_capability_denial` | `src/reliability/claim_guards.cpp` (Phase 26) | Substring-matches a fixed list of phrases where the model falsely claims it can't execute something ("i can only assist", "you'll need to run", "one command at a time", ...) - all confirmed-false claims since droidcli's tools genuinely execute. Triggers the same corrective nudge path as a failed command retry. |
-| `a_tool_call_already_succeeded_this_turn` scan | `host.cpp:3071` (inside `run_agent_tool_loop`) | Before trusting a completion claim as legitimate (not fabricated), scans this turn's actions for one whose tool is in `tool_call_requires_approval` (mutating/gated) *and* returned `ok:true`. Restricted to mutating tools as of Phase 17 - the original version counted *any* successful action, which let an unrelated read-only success (e.g. `list_connectors`) launder a completely unrelated claim ("I've copied the file") past the guard. A read-only lookup succeeding is never evidence for a completion claim, regardless of what the claim is about. |
-| Hop/nudge/retry budget | `host.cpp:3071` (`run_agent_tool_loop`) | `kMaxHops` (9): total model round-trips in one turn. `kMaxEmptyRetries` (2, doesn't consume hop budget): retries a hop that came back with neither text nor a tool call - near-always transient. `kMaxUnverifiedClaimNudges` (1): a fabrication gets exactly one correction attempt, then an honest override - repeating the nudge measurably degrades small-model output further rather than fixing it (observed: literal `"assistant\n\n"` role-token leakage after four nudges). `kMaxCommandRetryNudges` (3): a failed `run_command`/`run_ffmpeg` gets the error fed back and is told to self-correct and retry, rather than asking the user's permission each time. |
-| `tool_call_requires_approval` | `host.cpp:223` | The fixed list of tools whose call pauses for human approval (`POST /api/agent/tool_decision`) before executing: anything with a real side effect (`run_command`, `run_ffmpeg`, `write_file`, `open_application`, `launch_connector`/`stop_connector`, `enqueue_task`, `copy_file`/`move_path`/`delete_file`, `write_clipboard`). Read-only tools are deliberately excluded - gating those would only slow the agent down for no safety benefit. Also doubles as the mutating-tool set for the `a_tool_call_already_succeeded_this_turn` scan above. |
-| `substitute_bare_desktop_token` | `src/reliability/path_guards.cpp` (Phase 26) | Rewrites a bare `desktop/...`/`desktop\...` token (preceded by whitespace, a quote, start-of-string, a single leading `/`/`\`, or a leading `./`/`.\`) into the real, OS-resolved Desktop path. Deliberately does *not* touch a `"Desktop"` appearing mid-path in an already-correct absolute path (there it's preceded by more path, not a word boundary) - distinguished by *position*, not just the preceding character. |
-| `looks_like_placeholder_path` | `src/reliability/path_guards.cpp` (Phase 26) | Rejects a path containing `path/to/`, `path\to\`, `<`, `username`, or a common template filename (`your_file`, `example.txt`, `filename.ext`) before a filesystem tool ever touches disk - catches a model inventing a plausible-looking documentation-style path instead of calling `list_dir`/`stat_path` to find the real one, a shape `substitute_bare_desktop_token` can't catch (no word-boundary "desktop" token to rewrite). |
-| `looks_like_mismatched_binary_content` | `src/reliability/path_guards.cpp` (Phase 26) | Checked before `write_file` ever writes: if the path ends in a recognized binary/image extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.bmp`), the content must start with that format's real magic bytes or the write is rejected. Catches a model writing literal placeholder/narration text to a path that claims to be a real image. |
-| `looks_like_invented_desktop_path` | `src/reliability/path_guards.cpp` (Phase 26) | Structural, not pattern-based: after Desktop-token substitution has already run, does the resolved path still contain a `"desktop"` path segment (bounded by separators) that ISN'T the real, resolved `desktop_path` prefix? There is exactly one real Desktop location, so any survivor here is definitionally invented, not just probably wrong - catches an absolute-*looking* path with its own guessed `"desktop"` segment (e.g. `C:\desktop\hello`, root-level) that never matched any of `substitute_bare_desktop_token`'s specific recognized shapes. Checked in all six file tools. |
-| `looks_like_destructive_command` | `src/reliability/command_guards.cpp` (Phase 27) | A visibility aid, not a gate: flags an unambiguously destructive/irreversible shell shape (recursive delete, disk-formatting, broad forced process kill, shutdown/reboot, a fork bomb) so the approval prompt can prefix a prominent warning. Never blocks anything on its own - `tool_call_requires_approval` is still the only real gate. |
-| Post-action ground-truth verification | `write_file`/`create_directory`/`copy_file`/`move_path`/`delete_file` (`host.cpp`), `write_clipboard_json` (`host.cpp:2625`) | After a successful mutating call, an independent re-check via the same OS API confirms the claimed effect actually happened, inline before the result reaches the model - `verified_exists`/`verified_size_bytes` (write/copy), `verified_is_directory` (mkdir), `verified_exists`+`verified_source_removed` (move - both sides, not just one), `verified_deleted` (delete), `verified_matches` (clipboard read-back, since another application can race for ownership). Extended from just `write_file`/`create_directory` (Phase 18/23) to all six in Phase 24 - "did this actually happen" should be answered reliably for every mutating tool, not just the ones hardened first. |
-| `remember_location_json` pre-store verification | `host.cpp:2756` | Before a name → path mapping is persisted, resolves it (`substitute_bare_desktop_token`) and requires a live `stat_path()` to confirm the path exists *right now* - a location is only remembered if it's real at the moment of remembering, not trusted on the model's word. |
+| `looks_like_unverified_action_claim` | `claim_guards.cpp` | A claim phrase ("i've ", "successfully", ...) *plus* an action verb, both required - ordinary narration alone doesn't match. |
+| `looks_like_degenerate_role_leak` | `claim_guards.cpp` | Catches a reply that opens with a bare chat-role label ("assistant") standing alone - malformed output, not a claim. |
+| `looks_like_capability_denial` | `claim_guards.cpp` | Matches fixed phrases where the model falsely claims it can't do something it demonstrably can. |
+| `a_tool_call_already_succeeded_this_turn` | `run_agent_tool_loop` (`host.cpp`) | Before trusting a completion claim, requires a *mutating* tool's `ok:true` this turn - a read-only success is never evidence for a completion claim (Phase 17). |
+| Hop/nudge/retry budgets | `run_agent_tool_loop` (`host.cpp`) | `kMaxHops`, `kMaxEmptyRetries`, `kMaxUnverifiedClaimNudges`, `kMaxCommandRetryNudges` - every self-correction path is bounded and terminates in an honest report, never silent looping. |
+| `tool_call_requires_approval` | `host.cpp` | The fixed list of side-effecting tools gated behind human approval; read-only tools are excluded. |
+| `substitute_bare_desktop_token` | `path_guards.cpp` | Rewrites a bare `desktop/...` token to the real, OS-resolved Desktop path - position-aware, doesn't touch `"Desktop"` mid-path. |
+| `looks_like_placeholder_path` | `path_guards.cpp` | Rejects a documentation-style invented path (`path/to/`, `username`, `example.txt`) before a filesystem tool touches disk. |
+| `looks_like_mismatched_binary_content` | `path_guards.cpp` | A `write_file` target ending in a binary/image extension must have real matching magic bytes, or the write is rejected. |
+| `looks_like_invented_desktop_path` | `path_guards.cpp` | Structural: any `"desktop"` path segment that isn't the one real, resolved Desktop is definitionally invented. |
+| `looks_like_destructive_command` | `command_guards.cpp` | Flags an unambiguously destructive shell shape so the approval prompt can warn - a visibility aid, not a gate. |
+| Post-action ground-truth verification | every mutating tool (`host.cpp`) | An independent re-check via the same OS API confirms a claimed effect actually happened, before the result reaches the model (Phase 18/24). |
+| `remember_location_json` pre-store check | `host.cpp` | A name → path mapping is only persisted if a live `stat_path()` confirms it's real right now. |
 
 ### Deterministic bypasses (`src/intent/`, portable core, no LLM call)
 
-For a narrow, high-confidence request shape, recognizing it with pure string
-scanning avoids waiting on (and trusting) the local model's own tool-calling
-judgment. Both share the same discipline: a false negative (falling through
-to the normal agent loop) is always safe, so recognition stays deliberately
-narrow.
+A narrow, high-confidence request shape is recognized by pure string
+scanning instead of trusting the local model's own tool-calling judgment.
+A false negative (falling through to the normal loop) is always safe, so
+recognition stays deliberately narrow.
 
 | Algorithm | Location | What it does |
 |---|---|---|
-| `parse_open_intent` | `src/intent/open_intent.cpp:160` | Recognizes "open/launch/start X" as the very first word of the message (after courtesy-stripping), then peels the target down via `strip_leading_courtesy` (a long, ordered list of lead-in phrases - "can you", "i want you to", "ok", "great", ... - re-run in a loop until none match), `strip_leading_filler` (a bare "the"/"a"/"an"/"this"/"up"), and `strip_trailing_filler` (trailing punctuation, then "please"/"for me"/"now"/"right now"). Deliberately narrow: the verb must be the very first word, so an ordinary question like "how do I open a file in Python" never matches. |
-| `extract_proposed_command` | `src/intent/pending_command.cpp:98` | Scans the assistant's *previous* message for an explicit permission phrase ("would you like me to run/execute", "should i run", ...) plus a fenced code block or a bare `ffmpeg ...` line - if both are present, the exact command is extracted so a bare "yes" reply can execute it directly instead of re-asking the (unreliable) model to decide all over again. |
-| `is_bare_affirmative` | `src/intent/pending_command.cpp:173` | Trims trailing punctuation and matches the whole remaining message, case-insensitively, against a fixed list of affirmatives ("yes", "y", "sure", "do it", "go ahead", ...) - whole-string match, not substring, so "yes but not that one" correctly does *not* trigger the bypass. |
+| `parse_open_intent` | `open_intent.cpp` | "open/launch/start X" as the first word, after courtesy/filler stripping - narrow enough that "how do I open a file in Python" never matches. |
+| `extract_proposed_command` | `pending_command.cpp` | Scans the assistant's previous message for a permission phrase plus a fenced/bare command, together - lets a bare "yes" execute it directly. |
+| `is_bare_affirmative` | `pending_command.cpp` | Whole-string match (not substring) against a fixed affirmative list - "yes but not that one" correctly doesn't trigger the bypass. |
+| `resolve_open_application_target` | `host.cpp` | The Windows execution ruleset's trust-ordered resolution - see that section above, not repeated here. |
 
-### Persistent memory (`cli/memory_store.cpp`)
-
-| Algorithm | Location | What it does |
-|---|---|---|
-| `MemoryStore::search_lessons` | `memory_store.cpp:246` | Case-insensitive `LIKE '%query%'` scan across tool/broken/failure_reason/lesson columns, most recent first, capped at `max_results`. Deliberately not semantic/embeddings search - matches the project's stated minimal-memory stance (durability and queryability only, see the `MemoryStore` class comment in `memory_store.hpp`). |
-| `MemoryStore::remember_location` | `memory_store.cpp` (added Phase 19) | `INSERT ... ON CONFLICT(name) DO UPDATE` upsert keyed on `name` (`COLLATE NOCASE`) - remembering the same name again updates `resolved_path`/`updated_at` in place rather than growing a duplicate row, while preserving the original `created_at`. |
-
-### Host infrastructure (`cli/host.cpp`, `tools/mini_http_server.cpp`, `cli/process_manager.cpp`)
+### Persistent memory (`cli/memory_store.cpp`) and host infrastructure
 
 | Algorithm | Location | What it does |
 |---|---|---|
-| `should_emit_periodic_log`/watchdog throttle | `host.cpp:1046`, used by `tick_watchdog` at `host.cpp:1065` | Folds a recurring health check (Ollama reachability) into the existing poll loop rather than a separate timer thread - compares elapsed wall-clock time against a minimum interval (`kWatchdogIntervalSeconds`) and only emits/checks when due, so the check happens at most once per interval regardless of how often `tick_watchdog()` itself gets called. |
-| Bearer-token gate | `tools/mini_http_server.cpp:99` (`request_requires_auth`), `:104` (`is_authorized`) | Centralized, not per-route: every `/api/*` and `/ai/chat` request is checked once in `MiniHttpServer::poll_once` before any route dispatch runs, so a new route automatically inherits the check with no per-route auth code needed. |
-| `ProcessManager` job/group tracking | `cli/process_manager.cpp` (Windows: `CreateJobObjectA` at `:60`; POSIX: `setpgid` at `:200`/`:212`) | A launched process is assigned to a Windows Job Object (or a POSIX process group) at launch time, so `stop()` can kill the whole process tree it spawned, not just the top-level PID - the same reason a plain `TerminateProcess`/`kill` on just the tracked PID would leave orphaned children behind. |
+| `MemoryStore::search_lessons` | `memory_store.cpp` | Case-insensitive `LIKE` scan, most recent first - deliberately not semantic/embeddings search. |
+| `MemoryStore::remember_location` | `memory_store.cpp` | Upsert keyed on name (`COLLATE NOCASE`) - remembering the same name again updates in place. |
+| `should_emit_periodic_log`/watchdog throttle | `tick_watchdog` (`host.cpp`) | Folds a recurring health check into the existing poll loop instead of a separate timer thread. |
+| Bearer-token gate | `MiniHttpServer::poll_once` (`mini_http_server.cpp`) | Centralized once, before any route dispatch - a new route inherits it automatically. |
+| `ProcessManager` job/group tracking | `process_manager.cpp` | A Windows Job Object / POSIX process group per launch, so `stop()` kills the whole spawned tree, not just the top PID. |
 
 Product usage, HTTP tables, and env vars: repository root `[README.md](./README.md)`.
 

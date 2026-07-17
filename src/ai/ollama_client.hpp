@@ -6,7 +6,7 @@
 // droidcli's provider seam (the Core-tier role ZeroClaw's zeroclaw-providers
 // plays - see ARCHITECTURE.md's crate comparison): Ollama is the one
 // concrete provider today. Request/response shaping lives here; DroidHost
-// owns the actual POST via LanguageAiTransportCallbacks. A second provider
+// owns the actual POST via LanguageTransportCallbacks. A second provider
 // (Anthropic/OpenAI/...) should implement the same request-build/
 // response-parse shape rather than being special-cased into DroidHost -
 // see the "Provider abstraction" phase in ARCHITECTURE.md's extension plan.

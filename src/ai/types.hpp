@@ -126,7 +126,7 @@ struct AnthropicChatResponse {
 	int64_t output_tokens = 0;
 };
 
-struct LanguageAiSnapshot {
+struct LanguageSnapshot {
 	bool runtime_enabled = false;
 	bool connected = false;
 	bool awaiting_response = false;

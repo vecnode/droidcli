@@ -74,7 +74,7 @@ connector can be queued as a `Task` (`src/app/tasks.hpp`,
 > it is pure state + parsing + JSON + validation, it belongs in `src/` (core).
 
 Core never links httplib, FFmpeg transport, WebView2, or GTK directly — hosts
-inject those through callbacks (`LanguageAiTransportCallbacks`,
+inject those through callbacks (`LanguageTransportCallbacks`,
 `HandlerContext`). When you add a feature, decide which side of this line it
 falls on **before** writing code. A new transport is a host concern; a new
 message shape or validation rule is a core concern.
@@ -193,7 +193,7 @@ in one change so the core/host/test trio stays in sync:
    auth code needed.
 2. **Ollama text-gen** — change request/response shaping in `ai/ollama_client` +
    `ai/language_runtime`; the host owns the actual POST via
-   `LanguageAiTransportCallbacks`. Do not bake a specific model/endpoint into core.
+   `LanguageTransportCallbacks`. Do not bake a specific model/endpoint into core.
    Tool-calling (`ToolDefinition`/`ToolCall`, `"tools"` request field,
    `message.tool_calls` response parsing) lives in `ai/ollama_client` too, but
    the multi-hop loop that executes tool calls is host-side

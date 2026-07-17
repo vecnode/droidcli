@@ -155,7 +155,7 @@ AiChatHandleResult handle_ai_chat(const HttpRequest& request, const HandlerConte
 		return result;
 	}
 
-	const ai::LanguageAiSnapshot snapshot = context.language_ai->snapshot();
+	const ai::LanguageSnapshot snapshot = context.language_ai->snapshot();
 	result.completed_turn = true;
 	result.response.body = "{"
 		+ json_bool_field("ok", true) + ","

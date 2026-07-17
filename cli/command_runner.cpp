@@ -1,5 +1,6 @@
 #include "command_runner.hpp"
 
+#include <filesystem>
 #include <thread>
 #include <vector>
 
@@ -60,6 +61,39 @@ core::String resolve_app_paths_registry(const core::String& name)
 		if (query_result == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && buffer_size > 0)
 		{
 			return core::String(buffer);
+		}
+	}
+
+	return {};
+}
+
+core::String resolve_system_executable(const core::String& name)
+{
+	char system_dir[MAX_PATH] = {};
+	const UINT system_dir_length = GetSystemDirectoryA(system_dir, MAX_PATH);
+	if (system_dir_length > 0 && system_dir_length < MAX_PATH)
+	{
+		std::error_code error;
+		const std::filesystem::path candidate = std::filesystem::path(system_dir) / name;
+		if (std::filesystem::exists(candidate, error) && std::filesystem::is_regular_file(candidate, error))
+		{
+			return candidate.string();
+		}
+	}
+
+	// explorer.exe (and most of droidcli's ms-settings:/shell: URI targets,
+	// which are all launched via explorer.exe) lives in the Windows root,
+	// not System32 - checked second so a genuine System32 tool never has to
+	// fall through an extra stat for no reason.
+	char windows_dir[MAX_PATH] = {};
+	const UINT windows_dir_length = GetWindowsDirectoryA(windows_dir, MAX_PATH);
+	if (windows_dir_length > 0 && windows_dir_length < MAX_PATH)
+	{
+		std::error_code error;
+		const std::filesystem::path candidate = std::filesystem::path(windows_dir) / name;
+		if (std::filesystem::exists(candidate, error) && std::filesystem::is_regular_file(candidate, error))
+		{
+			return candidate.string();
 		}
 	}
 
@@ -204,28 +238,30 @@ LaunchAppResult launch_application(
 		return result;
 	}
 
-	// A bare app name (no path separator) is checked against the App Paths
-	// registry first - most installed GUI apps register there instead of
-	// touching PATH, so "chrome"/"code" etc. resolve correctly even though
-	// which_executable()'s PATH-only search wouldn't find them. If there's
-	// no registry match, resolved_target stays as the caller's original
-	// string and CreateProcess falls back to its own bare-name search
-	// (calling process's directory, current directory, system directories,
-	// PATH) - same as before this resolution step existed.
-	core::String resolved_target = path_or_name;
+	// Callers (DroidHost::resolve_open_application_target - see "Windows
+	// execution ruleset" in ARCHITECTURE.md) are required to have already
+	// resolved path_or_name to a real, verified path before calling this -
+	// this function does no resolution of its own, and refuses a bare name
+	// outright rather than falling back to CreateProcess's own unverified
+	// bare-name search (calling process's directory, cwd, system
+	// directories, PATH). This used to *be* a resolution step (an App Paths
+	// registry lookup, then a blind CreateProcess attempt on whatever was
+	// left); removed once every caller started pre-resolving - a live
+	// fallback here, reachable only if a caller's own resolution had a gap,
+	// would silently reintroduce the exact unverified-launch risk the
+	// ruleset exists to eliminate, undetected, the next time it happened to
+	// fire on a coincidental PATH match.
 	if (!looks_like_path(path_or_name))
 	{
-		const core::String registry_path = resolve_app_paths_registry(path_or_name);
-		if (!registry_path.empty())
-		{
-			resolved_target = registry_path;
-		}
+		result.error_message = "'" + path_or_name + "' is not a resolved path - launch_application "
+			"requires a caller to resolve a bare name first (see the Windows execution ruleset in "
+			"ARCHITECTURE.md); it does not do so itself.";
+		return result;
 	}
 
-	// Quote the target in case it (or its resolved match) contains spaces;
-	// args are appended as given - caller's responsibility to quote
-	// individual arguments that need it.
-	core::String command_line = "\"" + resolved_target + "\"";
+	// Quote in case the path contains spaces; args are appended as given -
+	// caller's responsibility to quote individual arguments that need it.
+	core::String command_line = "\"" + path_or_name + "\"";
 	if (!args.empty())
 	{
 		command_line += " " + args;
@@ -261,9 +297,8 @@ LaunchAppResult launch_application(
 	{
 		const DWORD last_error = GetLastError();
 		result.error_message = "CreateProcess failed (" + std::to_string(last_error)
-			+ ") trying to launch \"" + resolved_target + "\" - not found via App Paths registry, "
-			"PATH, or as a direct path. Ask the user for the exact executable name or full path "
-			"rather than guessing.";
+			+ ") trying to launch the already-resolved path \"" + path_or_name
+			+ "\" - it may have been deleted or become inaccessible between resolution and launch.";
 		return result;
 	}
 
@@ -271,9 +306,8 @@ LaunchAppResult launch_application(
 	result.pid = static_cast<int64_t>(process.dwProcessId);
 
 	// Query the real path back from the live process handle rather than just
-	// echoing resolved_target - resolved_target is only ever our own best
-	// guess (the App Paths registry match, or the caller's original bare
-	// name if there wasn't one); this is what the OS actually launched. Any
+	// echoing path_or_name - this is what the OS actually launched, and the
+	// two can still legitimately differ (a symlink, a reparse point). Any
 	// failure here (permissions, a process that has already exited by the
 	// time we ask) leaves resolved_path empty rather than falling back to a
 	// guess presented as fact.
@@ -293,6 +327,12 @@ LaunchAppResult launch_application(
 
 // No Windows App Paths registry equivalent - always empty on this platform.
 core::String resolve_app_paths_registry(const core::String&)
+{
+	return {};
+}
+
+// No Windows System32/Windows-root concept on this platform.
+core::String resolve_system_executable(const core::String&)
 {
 	return {};
 }

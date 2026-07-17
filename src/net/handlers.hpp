@@ -7,7 +7,7 @@
 
 namespace droidcli::ai {
 class LanguageRuntime;
-struct LanguageAiTransportCallbacks;
+struct LanguageTransportCallbacks;
 } // namespace droidcli::ai
 
 namespace droidcli::net {
@@ -15,7 +15,7 @@ namespace droidcli::net {
 struct HandlerContext {
 	session::RuntimeSession session;
 	ai::LanguageRuntime* language_ai = nullptr;
-	const ai::LanguageAiTransportCallbacks* language_ai_transport = nullptr;
+	const ai::LanguageTransportCallbacks* language_ai_transport = nullptr;
 };
 
 struct NotifyHandleResult {
