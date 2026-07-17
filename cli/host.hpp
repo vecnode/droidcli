@@ -276,19 +276,6 @@ public:
 	// body: {"query":"..."}. Returns {"matches":[{"name":...,"path":...}]}.
 	core::String find_applications_json(const core::String& body) const;
 
-	// Deterministic, LLM-free scan for "open X" style phrasing (POST
-	// /api/apps/quick_open) - body: {"message":"..."}. Uses
-	// intent::parse_open_intent() (pure string scanning, no Ollama call) to
-	// recognize an app-launch request, then resolves it against the same
-	// installed-apps index find_applications_json uses. Returns
-	// {"matched":bool,"app_name":"...","ambiguous":bool,"resolved_name":"...",
-	// "resolved_path":"...","candidates":[{"name":...,"path":...}]} -
-	// resolved_name/resolved_path are only present when exactly one
-	// candidate matched. A caller (the TUI, or any other channel) uses this
-	// to react to an unambiguous open request instantly and ask the user to
-	// confirm, without waiting on a local model to decide to call a tool.
-	core::String try_quick_open_json(const core::String& body) const;
-
 	// Live snapshot of currently open windows and their PIDs (GET
 	// /api/apps/open) - re-enumerated fresh on every call, not cached like
 	// the installed-apps index, since "open right now" changes constantly.
@@ -453,23 +440,11 @@ public:
 	// {"session_ids":[...],"current_session_id":"..."}.
 	core::String build_agent_sessions_json() const;
 
-	// Public logging hook for the TUI's deterministic quick-open flow
-	// (try_quick_open_json recognition, the yes/no confirmation the human
-	// answers, and the resulting launch decision - cli/tui.cpp) so that path
-	// is visible in logs/log.jsonl and the App Log panel like every other
-	// action, not just the bare open_application() call it ends in. Before
-	// this, the only trace of a quick-open launch was the "open" channel
-	// entry open_application() itself logs - no record of what was
-	// recognized, what was asked, or what the human answered, which made a
-	// real incident (a quick-open launch appearing with no visible cause)
-	// hard to diagnose from logs/log.jsonl alone.
-	void log_quick_open_event(const core::String& summary, bool success = true);
-
 	// Public logging hook for TUI-local chat-pane entries that never round-trip
 	// through agent_turn()/agent_tool_decision() - approval-prompt replies,
 	// "Approved."/"Declined."/"Cancelled." banners, clipboard-copy feedback,
 	// new-session/resume banners, and caught-exception messages. Those calls
-	// already log themselves (every "chat" channel entry from classify_turn/
+	// already log themselves (every "chat" channel entry from classify_via_llm/
 	// execute_decision_or_pause/finish_turn_after_execution goes through
 	// append_app_log); this covers everything the TUI itself
 	// prints into the chat pane without going through DroidHost first, so the
@@ -591,32 +566,21 @@ private:
 	void persist_current_settings_locked() const;
 
 	// "Classify -> Execute -> Phrase" (see ARCHITECTURE.md's "The agent
-	// turn"): agent_turn()'s actual driver. classify_turn() decides at most
-	// one action for this turn - a
-	// deterministic recognizer match, or exactly one LLM classification call
-	// (classify_via_llm) if neither recognizer fires. execute_decision_or_pause()
-	// runs that decision through the unchanged tool_call_requires_approval/
-	// precheck_and_resolve_gated_call gate. finish_turn_after_execution()
-	// is the shared tail of agent_turn() and agent_tool_decision() once a
-	// decision has actually executed: one bounded auto-retry (via
-	// classify_via_llm, never by re-running the deterministic recognizers)
-	// if the result failed and the tool is retriable, then phrase_result().
-	classify::TurnDecision classify_turn(
-		const core::String& session_id,
-		const core::String& user_message,
-		const core::String& previous_assistant_text,
-		const core::Array<ai::ToolDefinition>& tools,
-		const ai::ModelProvider& provider);
-
-	// The one-LLM-call classification step itself - deterministic recognizers
-	// are not tried here (classify_turn already did, or a retry deliberately
-	// skips them - see finish_turn_after_execution). Takes the response's
-	// first tool_call only if it returned any (discarding the rest, and the
-	// accompanying assistant_message - never shown to the user, this is what
-	// removes the fabrication surface), else a PlainReply from
-	// assistant_message. Never persists its own assistant_message into
-	// agent_transcript_ - the caller records exactly one Assistant message
-	// per turn, whatever text actually ends up shown.
+	// turn"): agent_turn()'s actual driver. classify_via_llm() makes exactly
+	// one LLM classification call to decide at most one action for this
+	// turn. execute_decision_or_pause() runs that decision through the
+	// unchanged tool_call_requires_approval/precheck_and_resolve_gated_call
+	// gate. finish_turn_after_execution() is the shared tail of agent_turn()
+	// and agent_tool_decision() once a decision has actually executed: one
+	// bounded auto-retry (via classify_via_llm) if the result failed and the
+	// tool is retriable, then phrase_result().
+	//
+	// Takes the response's first tool_call only if it returned any
+	// (discarding the rest, and the accompanying assistant_message - never
+	// shown to the user, this is what removes the fabrication surface), else
+	// a PlainReply from assistant_message. Never persists its own
+	// assistant_message into agent_transcript_ - the caller records exactly
+	// one Assistant message per turn, whatever text actually ends up shown.
 	classify::TurnDecision classify_via_llm(
 		const core::String& session_id,
 		const core::Array<ai::ToolDefinition>& tools,
@@ -628,14 +592,12 @@ private:
 	// returns false and sets out_pending_response if it paused for human
 	// approval instead (pending_tool_call_ already set) - the caller must
 	// return out_pending_response immediately without touching `actions`
-	// further. `already_approved` (true only for a pending_command bare-"yes"
-	// match) skips the gate entirely, exactly like today's behavior.
+	// further.
 	bool execute_decision_or_pause(
 		const core::String& session_id,
 		const core::String& tool_name,
 		const core::String& arguments_json,
 		core::Array<PendingToolActionRecord>& actions,
-		bool already_approved,
 		core::String& out_tool_result,
 		core::String& out_pending_response);
 

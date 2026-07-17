@@ -18,16 +18,15 @@ frequently unreliable, and the old multi-hop `run_agent_tool_loop` design
 carried a growing set of guards to catch it fabricating success claims,
 leaking model output, or falsely denying capability. That design was
 replaced by **Classify -> Execute -> Phrase** (`DroidHost::agent_turn` -
-`classify_turn`/`execute_decision_or_pause`/`finish_turn_after_execution`/
+`classify_via_llm`/`execute_decision_or_pause`/`finish_turn_after_execution`/
 `phrase_result`, `cli/host.cpp`): the model decides at most one action per
-turn (a deterministic recognizer match, or one classification call) and
-never narrates its own outcome - execution is always deterministic code,
-and the reply is either a zero-LLM-call template or a second, narrowly
-grounded phrasing call. Most of the old narration-policing guards became
-unnecessary rather than relocated, since there's no free-form narration
-left for them to police. See "The agent turn" in `ARCHITECTURE.md` for the
-current flowchart, and extension point 7 below before adding a new
-deterministic bypass.
+turn, via exactly one classification call, and never narrates its own
+outcome - execution is always deterministic code, and the reply is either a
+zero-LLM-call template or a second, narrowly grounded phrasing call. Most of
+the old narration-policing guards became unnecessary rather than relocated,
+since there's no free-form narration left for them to police. See "The
+agent turn" in `ARCHITECTURE.md` for the current flowchart, and extension
+point 7 below before adding a deterministic bypass around the classifier.
 
 ## What this repository is
 
@@ -285,25 +284,17 @@ in one change so the core/host/test trio stays in sync:
      triggers the one bounded auto-retry (the real error is appended to the
      transcript and `classify_via_llm` is called once more) instead of just
      being reported and stopping there.
-7. **A deterministic recognizer that bypasses the LLM entirely** — for a
-   narrow, high-confidence request shape where waiting on (and trusting) the
-   local model's own tool-calling judgment has a demonstrated failure rate,
-   recognize the shape with pure string scanning instead. Two precedents,
-   both in `src/intent/` (portable, core, unit-tested — no LLM call, no I/O),
-   composed under one entry point by `classify::try_deterministic_classify`
-   (`src/classify/turn_decision.cpp`): `open_intent.cpp` ("open X" phrasing
-   → `try_quick_open_json`, `cli/host.cpp`, and now also `classify_turn`
-   directly) and `pending_command.cpp` (the assistant's own previous message
-   proposed a command and asked permission → a bare "yes" executes it
-   directly). Both share the same discipline: false negatives (falling
-   through to a real classification call) are always safe, so recognition
-   stays narrow and requires multiple corroborating signals — a false
-   positive that hijacks an unrelated message is the failure mode to guard
-   against, not the one to optimize false negatives away. Don't reach for
-   this for every reliability problem — it's for requests with a genuinely
-   narrow, common, recognizable shape; anything else belongs to
-   `classify_via_llm`'s one classification call instead (see "The agent
-   turn" in `ARCHITECTURE.md`).
+7. **Don't add a deterministic recognizer that bypasses the LLM classifier.**
+   An earlier design had a `src/intent/` module (`open_intent`,
+   `create_file_intent`, `create_image_intent`, `pending_command`) that
+   pattern-matched narrow, high-confidence request shapes with pure string
+   scanning ahead of `classify_via_llm`, plus a standalone TUI/HTTP
+   quick-open flow (`try_quick_open_json`) built on the same recognizer. It
+   was removed: `classify_via_llm`'s one LLM classification call is now the
+   sole source of every `TurnDecision`, for every request shape, no
+   exceptions. If a specific phrasing proves unreliable, fix it through the
+   tool description or the model/provider choice, not by adding a second,
+   parallel routing path that only some requests go through.
 
 **Every new core `src/<module>/*_test.cpp` must be registered in
 `CMakeLists.txt`** and pass under `ctest`.

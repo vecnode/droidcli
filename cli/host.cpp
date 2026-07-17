@@ -3,8 +3,6 @@
 #include "app_index.hpp"
 #include "windows_locations.hpp"
 #include "command_runner.hpp"
-#include "intent/open_intent.hpp"
-#include "intent/pending_command.hpp"
 #include "reliability/command_guards.hpp"
 #include "reliability/path_guards.hpp"
 #include "classify/turn_decision.hpp"
@@ -159,8 +157,8 @@ core::Array<InstalledApp> collect_installed_app_matches(
 // Real Windows locations - known folders, Administrative Tools shortcuts,
 // plus a small hardcoded exception list for the two categories with no
 // discoverable API (see windows_locations.hpp for the full breakdown) -
-// checked in try_quick_open_json only after the installed-apps index comes
-// up empty, so a real installed app of the same name (e.g. a third-party
+// checked only after the installed-apps index comes up empty, so a real
+// installed app of the same name (e.g. a third-party
 // "Sound Recorder") is never shadowed by this data.
 struct WellKnownWindowsTarget
 {
@@ -2203,67 +2201,6 @@ core::String DroidHost::find_applications_json(const core::String& body) const
 	return stream.str();
 }
 
-core::String DroidHost::try_quick_open_json(const core::String& body) const
-{
-	const core::String message = net::extract_json_string_field(body, "message");
-	const intent::OpenIntent parsed = intent::parse_open_intent(message);
-
-	std::ostringstream stream;
-	stream << '{' << net::json_bool_field("matched", parsed.matched);
-	if (!parsed.matched)
-	{
-		stream << '}';
-		return stream.str();
-	}
-	stream << ',' << net::json_string_field("app_name", parsed.app_name);
-
-	core::Array<InstalledApp> candidates;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		candidates = collect_installed_app_matches(installed_apps_, parsed.app_name, 5);
-	}
-
-	stream << ',' << net::json_bool_field("ambiguous", candidates.size() > 1);
-	if (candidates.size() == 1)
-	{
-		stream << ',' << net::json_string_field("resolved_name", candidates[0].name);
-		stream << ',' << net::json_string_field("resolved_path", candidates[0].path);
-	}
-	stream << ",\"candidates\":[";
-	for (size_t index = 0; index < candidates.size(); ++index)
-	{
-		if (index > 0)
-		{
-			stream << ',';
-		}
-		stream << '{' << net::json_string_field("name", candidates[index].name) << ','
-			<< net::json_string_field("path", candidates[index].path) << '}';
-	}
-	stream << ']';
-
-	// Only checked when the installed-apps index came up empty - a real
-	// third-party installed app of the same name (found above) always takes
-	// priority over droidcli's own built-in Windows knowledge.
-	if (candidates.empty())
-	{
-		core::Array<WindowsLocationEntry> windows_locations_snapshot;
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			windows_locations_snapshot = windows_locations_;
-		}
-		WellKnownWindowsTarget windows_target;
-		if (find_known_windows_target(parsed.app_name, windows_locations_snapshot, windows_target))
-		{
-			stream << ',' << net::json_bool_field("resolved_windows_target", true);
-			stream << ',' << net::json_string_field("windows_target_display_name", windows_target.display_name);
-			stream << ',' << net::json_string_field("windows_target_path_or_name", windows_target.path_or_name);
-			stream << ',' << net::json_string_field("windows_target_args", windows_target.args);
-		}
-	}
-	stream << '}';
-	return stream.str();
-}
-
 core::String DroidHost::list_open_windows_json() const
 {
 	const core::Array<OpenWindowInfo> windows = cli::list_open_windows();
@@ -3491,30 +3428,6 @@ core::String DroidHost::agent_turn(const core::String& body)
 		}
 	}
 
-	// Captured before the new user message is appended below - this is what
-	// extract_proposed_command() checks to see whether the assistant itself
-	// just proposed a command and asked permission to run it. Stops at the
-	// first Assistant entry found scanning backward (the normal case: the
-	// transcript always alternates, so this is simply the reply the user is
-	// responding to); breaks without matching on a User entry first, which
-	// only happens for a brand-new/empty transcript.
-	core::String previous_assistant_text;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		for (auto it = agent_transcript_.rbegin(); it != agent_transcript_.rend(); ++it)
-		{
-			if (it->role == ai::ChatRole::Assistant)
-			{
-				previous_assistant_text = it->content;
-				break;
-			}
-			if (it->role == ai::ChatRole::User)
-			{
-				break;
-			}
-		}
-	}
-
 	// record_agent_message() takes its own lock - must not be called while
 	// mutex_ is already held (std::mutex isn't recursive), hence reading
 	// the booleans/text above under lock and acting on them here instead.
@@ -3534,11 +3447,10 @@ core::String DroidHost::agent_turn(const core::String& body)
 	const ai::ModelProvider& provider = *provider_ptr;
 
 	// "Classify -> Execute -> Phrase" (see ARCHITECTURE.md's "The agent
-	// turn"): the model decides at most one action - a deterministic
-	// recognizer match, or one LLM classification call - and never both
-	// decides and narrates the outcome in the same breath.
-	const classify::TurnDecision decision =
-		classify_turn(session_id, user_message, previous_assistant_text, tools, provider);
+	// turn"): the model decides at most one action - the one LLM
+	// classification call - and never both decides and narrates the outcome
+	// in the same breath.
+	const classify::TurnDecision decision = classify_via_llm(session_id, tools, provider);
 
 	if (decision.kind == classify::TurnDecisionKind::TransportFailed)
 	{
@@ -3557,15 +3469,13 @@ core::String DroidHost::agent_turn(const core::String& body)
 		return build_final_agent_response(session_id, decision.plain_reply_text, {});
 	}
 
-	// DeterministicTool or LlmTool from here - run it through the exact same
-	// gate any decision goes through (already_approved skips it only for the
-	// pending_command bare-"yes" case).
+	// LlmTool from here - run it through the exact same gate any decision
+	// goes through.
 	core::Array<PendingToolActionRecord> actions;
 	core::String tool_result;
 	core::String pending_response;
 	if (!execute_decision_or_pause(
-		session_id, decision.tool_name, decision.arguments_json, actions, decision.already_approved,
-		tool_result, pending_response))
+		session_id, decision.tool_name, decision.arguments_json, actions, tool_result, pending_response))
 	{
 		return pending_response;
 	}
@@ -3622,23 +3532,6 @@ core::String DroidHost::agent_tool_decision(const core::String& body)
 	// bounded retry.
 	return finish_turn_after_execution(
 		session_id, decided_call.name, decided_call.arguments_json, tool_result, actions, tools, provider, /*allow_retry=*/approved);
-}
-
-classify::TurnDecision DroidHost::classify_turn(
-	const core::String& session_id,
-	const core::String& user_message,
-	const core::String& previous_assistant_text,
-	const core::Array<ai::ToolDefinition>& tools,
-	const ai::ModelProvider& provider)
-{
-	const classify::TurnDecision deterministic_decision =
-		classify::try_deterministic_classify(user_message, previous_assistant_text);
-	if (deterministic_decision.kind != classify::TurnDecisionKind::NoDeterministicMatch)
-	{
-		return deterministic_decision;
-	}
-
-	return classify_via_llm(session_id, tools, provider);
 }
 
 classify::TurnDecision DroidHost::classify_via_llm(
@@ -3768,7 +3661,6 @@ bool DroidHost::execute_decision_or_pause(
 	const core::String& tool_name,
 	const core::String& arguments_json,
 	core::Array<PendingToolActionRecord>& actions,
-	const bool already_approved,
 	core::String& out_tool_result,
 	core::String& out_pending_response)
 {
@@ -3777,7 +3669,7 @@ bool DroidHost::execute_decision_or_pause(
 	call.name = tool_name;
 	call.arguments_json = arguments_json;
 
-	if (!already_approved && tool_call_requires_approval(call.name))
+	if (tool_call_requires_approval(call.name))
 	{
 		// Never propose a yes/no for an open_application call that's
 		// guaranteed to fail - resolve first (rewriting call in place on
@@ -3830,8 +3722,7 @@ core::String DroidHost::finish_turn_after_execution(
 	{
 		// One bounded auto-retry, not a loop: tell the model the real error
 		// and let it make exactly one fresh classification with that context
-		// in view - never by re-running the deterministic recognizers again
-		// (they'd just recognize the identical shape and fail identically).
+		// in view.
 		const core::String failure_reason = net::extract_json_string_field(executed_result_json, "error");
 		record_agent_message(session_id, ai::ChatRole::System,
 			"(" + executed_tool_name + " failed: " + (failure_reason.empty() ? core::String("unknown error") : failure_reason)
@@ -3844,7 +3735,7 @@ core::String DroidHost::finish_turn_after_execution(
 			core::String retry_tool_result;
 			core::String retry_pending_response;
 			if (!execute_decision_or_pause(session_id, retry_decision.tool_name, retry_decision.arguments_json,
-				actions, /*already_approved=*/false, retry_tool_result, retry_pending_response))
+				actions, retry_tool_result, retry_pending_response))
 			{
 				return retry_pending_response;
 			}
@@ -4140,11 +4031,6 @@ void DroidHost::log_thread_event(const core::String& thread_name, const core::St
 	// not something to alarm on.
 	const bool success = event.rfind("threw", 0) != 0;
 	append_app_log("thread", thread_name, event, success);
-}
-
-void DroidHost::log_quick_open_event(const core::String& summary, const bool success)
-{
-	append_app_log("quick_open", "out", summary, success);
 }
 
 void DroidHost::log_chat_entry(const core::String& role, const core::String& text)
