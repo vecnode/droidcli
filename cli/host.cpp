@@ -617,7 +617,7 @@ void DroidHost::initialize()
 		if (config_.enable_ai)
 		{
 			language_ai_.set_runtime_enabled(true);
-			ai::OllamaConfig ollama_config;
+			ai::OpenAICompatConfig ollama_config;
 			ollama_config.base_url = config_.ollama_url;
 			ollama_config.model = config_.ollama_model;
 			ollama_config.enabled = true;
@@ -786,7 +786,7 @@ core::String DroidHost::build_config_json() const
 core::String DroidHost::active_model_name() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	return (config_.ai_provider == "anthropic") ? config_.anthropic_model : config_.ollama_model;
+	return config_.ollama_model;
 }
 
 core::String DroidHost::update_config(const core::String& body)
@@ -807,7 +807,7 @@ core::String DroidHost::update_config(const core::String& body)
 
 	if (config_.enable_ai)
 	{
-		ai::OllamaConfig ollama_config;
+		ai::OpenAICompatConfig ollama_config;
 		ollama_config.base_url = config_.ollama_url;
 		ollama_config.model = config_.ollama_model;
 		ollama_config.enabled = true;
@@ -1100,7 +1100,7 @@ core::String DroidHost::update_ollama_config(const core::String& body)
 	config_.ollama_model = model;
 	if (config_.enable_ai)
 	{
-		ai::OllamaConfig ollama_config;
+		ai::OpenAICompatConfig ollama_config;
 		ollama_config.base_url = config_.ollama_url;
 		ollama_config.model = config_.ollama_model;
 		ollama_config.enabled = true;
@@ -3280,21 +3280,12 @@ core::String DroidHost::list_known_locations_json() const
 std::unique_ptr<ai::ModelProvider> DroidHost::make_model_provider() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (config_.ai_provider == "anthropic")
-	{
-		ai::AnthropicConfig anthropic_config;
-		anthropic_config.api_key = config_.anthropic_api_key;
-		anthropic_config.model = config_.anthropic_model;
-		anthropic_config.enabled = true;
-		return std::make_unique<ai::AnthropicProvider>(anthropic_config);
-	}
-
-	ai::OllamaConfig ollama_config;
-	ollama_config.base_url = config_.ollama_url;
-	ollama_config.model = config_.ollama_model;
-	ollama_config.enabled = true;
-	ollama_config.num_ctx = config_.ollama_num_ctx;
-	return std::make_unique<ai::OllamaProvider>(ollama_config);
+	ai::OpenAICompatConfig provider_config;
+	provider_config.base_url = config_.ollama_url;
+	provider_config.model = config_.ollama_model;
+	provider_config.enabled = true;
+	provider_config.num_ctx = config_.ollama_num_ctx;
+	return std::make_unique<ai::OpenAICompatProvider>(provider_config);
 }
 
 void DroidHost::persist_current_settings_locked() const
@@ -3316,9 +3307,6 @@ void DroidHost::persist_current_settings_locked() const
 	settings.ollama_url = config_.ollama_url;
 	settings.ollama_model = config_.ollama_model;
 	settings.ollama_num_ctx = config_.ollama_num_ctx;
-	settings.ai_provider = config_.ai_provider;
-	settings.anthropic_model = config_.anthropic_model;
-	settings.anthropic_api_key = config_.anthropic_api_key;
 
 	save_settings(config_.settings_path, settings);
 }
@@ -3439,10 +3427,9 @@ core::String DroidHost::agent_turn(const core::String& body)
 
 	const core::Array<ai::ToolDefinition> tools = agent_tool_definitions();
 
-	// Coded against ai::ModelProvider, not any concrete provider type
-	// directly - make_model_provider() selects Ollama vs Anthropic from
-	// config_.ai_provider, nothing below this line changes either way. See
-	// "Second ModelProvider" in ARCHITECTURE.md and src/ai/model_provider.hpp.
+	// Coded against ai::ModelProvider, not the concrete OpenAICompatProvider
+	// type directly - see "The LLM provider" in ARCHITECTURE.md and
+	// src/ai/model_provider.hpp.
 	const std::unique_ptr<ai::ModelProvider> provider_ptr = make_model_provider();
 	const ai::ModelProvider& provider = *provider_ptr;
 
@@ -3615,9 +3602,18 @@ classify::TurnDecision DroidHost::classify_via_llm(
 		+ "\"completion_tokens\":" + std::to_string(response.completion_tokens) + ","
 		+ net::json_string_field("done_reason", response.done_reason) + ","
 		+ "\"tool_calls\":" + std::to_string(response.tool_calls.size());
-	append_app_log(config_.ai_provider, "out",
+	append_app_log("ollama", "out",
 		"classify (" + std::to_string(attempts_used) + " attempt(s), " + std::to_string(wall_clock_ms) + "ms)",
 		response.transport_ok && response.http_success, session_id, model_metrics_fields);
+
+	// Surfaced for observability only - logged under its own channel, never
+	// persisted into agent_transcript_ or treated as the model's actual
+	// reply. See "Thinking is observability, not narration" in
+	// ARCHITECTURE.md.
+	if (!response.thinking_text.empty())
+	{
+		append_app_log("thinking", "out", response.thinking_text, true, session_id);
+	}
 
 	classify::TurnDecision decision;
 	if (!response.transport_ok || !response.http_success)
@@ -3802,6 +3798,13 @@ core::String DroidHost::phrase_via_llm(
 		: false;
 
 	const ai::ProviderResponse response = provider.parse_response(status_code, response_body, transport_ok);
+	// response.thinking_text (if any) is deliberately not logged here -
+	// phrase_via_llm is const (see this method's own signature) and
+	// append_app_log isn't; the one classify_via_llm call already logs
+	// thinking under the "thinking" channel, which is the turn's real
+	// decision-making step - this second, narrowly-scoped phrasing call
+	// producing its own chain-of-thought isn't worth a const-correctness
+	// change to capture.
 	if (!response.transport_ok || !response.http_success || response.assistant_message.empty())
 	{
 		return generic_result_sentence(result_json);

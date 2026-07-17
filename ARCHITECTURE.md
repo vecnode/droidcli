@@ -115,10 +115,12 @@ MCP client. Extend it *with* these properties, not around them:
     trust order before it runs, and before a gated call is even shown to a
     human for approval — never an unverified guess (see "Windows execution
     ruleset" below).
-11. Multi-provider by construction: `ai::ModelProvider` is the interface
-    `agent_turn` is coded against; `OllamaProvider` and `AnthropicProvider`
-    are both adapters over it, selected at runtime via
-    `HostConfig::ai_provider`.
+11. One LLM backend, generically: `ai::ModelProvider` is the interface
+    `agent_turn` is coded against, with one concrete adapter
+    (`OpenAICompatProvider`) over any backend speaking the OpenAI Chat
+    Completions wire format - `HostConfig::ollama_url` defaults to a local
+    Ollama daemon's built-in `/v1` endpoint, but nothing about the request/
+    response shaping is Ollama-specific. See "The LLM provider" below.
 12. Configuration and secrets outlive the process: runtime settings persist
     to a JSON file across restarts and update immediately on change;
     secrets (bearer token, API keys) are DPAPI-encrypted at rest on
@@ -278,10 +280,61 @@ rather than being conflated with process/state management.
 
 | Module | Role |
 | --- | --- |
-| `ai/model_provider` | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`), adapted by `OllamaProvider` and `AnthropicProvider`. `DroidHost::agent_turn` is coded against the interface, selecting a concrete provider at runtime via `HostConfig::ai_provider` |
-| `ai/ollama_client` | Ollama request/response shaping, incl. **tool-calling** (`ToolDefinition`/`ToolCall`, `"tools"` request field, `message.tool_calls` response parsing) and per-call telemetry (`num_ctx`, token counts, timing) |
-| `ai/anthropic_client` | Anthropic Messages API request/response shaping - the same free-function, no-I/O shape as `ai/ollama_client`, including its own tool-calling (`tool_use` content blocks) and telemetry (`usage.input_tokens`/`output_tokens`) |
+| `ai/model_provider` | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`), adapted by `OpenAICompatProvider` - the one concrete implementation. `DroidHost::agent_turn` is coded against the interface, never the concrete type, so a second OpenAI-shaped backend later is a config change, not a new code path - see "The LLM provider" below |
+| `ai/openai_compat_client` | Request/response shaping for any backend speaking the OpenAI Chat Completions wire format, incl. **tool-calling** (`ToolDefinition`/`ToolCall`, `"tools"` request field, `choices[0].message.tool_calls` response parsing, JSON-string-encoded `arguments`), reasoning/thinking extraction (`extract_reasoning_field` - see "The LLM provider" below), and per-call telemetry (`num_ctx`, token counts) |
 | `ai/language_runtime` | Transcript + turn state for the legacy single-shot **Ollama text-gen** endpoint (`/ai/chat`); POST via `LanguageTransportCallbacks`. No tool-calling - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
+
+### The LLM provider
+
+One backend, generically: `ai::OpenAICompatProvider` (`src/ai/openai_compat_client.cpp`,
+`src/ai/model_provider.cpp`) speaks the OpenAI Chat Completions wire format
+(`POST {base_url}/chat/completions`) against whatever `HostConfig::ollama_url`
+names - a local Ollama daemon by default (`http://127.0.0.1:11434`, using
+Ollama's own built-in `/v1` compat endpoint), but nothing in the request
+builder or response parser is Ollama-specific. There is deliberately no
+second, parallel provider implementation - a different OpenAI-shaped backend
+(LM Studio, vLLM, a real OpenAI-style gateway) is a `--ollama-url` value, not
+new code. This replaces an earlier design with two separate concrete
+providers (a native-Ollama client and a native-Anthropic client, selected at
+runtime by `HostConfig::ai_provider`) - removed because maintaining a second
+wire-format implementation bought nothing a single generic client didn't
+already cover, and it doubled the surface every provider-level fix had to
+touch.
+
+**Reasoning/thinking extraction.** A reasoning-capable model (DeepSeek-R1,
+Qwen3's thinking mode, GLM's `-flash` variants, ...) served through an
+OpenAI-compatible endpoint returns its chain-of-thought as a JSON field
+outside the standard schema - `extract_reasoning_field`
+(`openai_compat_client.cpp`) scans the response message for either
+`reasoning_content` (DeepSeek/GLM-style naming) or `reasoning` (Ollama's own
+naming, confirmed directly against a local `glm-4.7-flash` response) and
+carries it through as `ProviderResponse::thinking_text`, independent of
+`assistant_message`.
+
+**Thinking is observability, not narration.** `thinking_text` is logged by
+`DroidHost::classify_via_llm` (`cli/host.cpp`) under its own `"thinking"`
+channel (`append_app_log`, visible in `logs/log.jsonl` and the TUI's App Log
+panel) - it is never appended to `agent_transcript_` and never treated as
+the assistant's actual reply. This follows the same discipline "The agent
+turn" below already applies to a tool call's accompanying prose: a model's
+own unverified narration doesn't get to stand in for - or quietly become - a
+turn's real, phrased output.
+
+**Ollama telemetry.** `classify_via_llm`'s structured per-classification-call
+log line (`"ollama"` channel) carries `model`, `attempts`, `wall_clock_ms`,
+and the response's `prompt_tokens`/`completion_tokens`/`done_reason` -
+`total_duration_ms`/`eval_duration_ms` always read zero, since the OpenAI
+Chat Completions wire format (unlike Ollama's native `/api/chat`) reports no
+per-call duration.
+
+**Context window (`num_ctx`).** Sent on every chat call via Ollama's own
+`"options"` request extension (`OpenAICompatConfig::num_ctx`, default 32768,
+matching OpenClaude's own default) - not left at Ollama's own, often
+smaller, per-model default context window, which can otherwise silently
+truncate a long agent-turn transcript. A sibling top-level field, not nested
+inside anything the standard OpenAI schema validates, so a strict
+(non-Ollama) OpenAI-compatible backend simply ignores it rather than
+rejecting the request.
 
 ### `droidcli-memory`
 
@@ -293,7 +346,7 @@ rather than being conflated with process/state management.
 
 | Module | Role |
 | --- | --- |
-| `settings_store` (`cli/settings_store.{hpp,cpp}`) | JSON settings file (port, Ollama/Anthropic config, provider selection) with secrets (bearer token, API key) DPAPI-encrypted at rest on Windows - loaded at startup and re-saved on every runtime change, not just at process start |
+| `settings_store` (`cli/settings_store.{hpp,cpp}`) | JSON settings file (port, Ollama/LLM-provider config) with secrets (bearer token) DPAPI-encrypted at rest on Windows - loaded at startup and re-saved on every runtime change, not just at process start |
 | `HostConfig` (`cli/host.hpp`) | In-memory config struct `DroidHost` actually runs against - populated from CLI flags, the settings file, or a runtime `POST /api/config`/`POST /api/ollama/config` update |
 
 ### `droidcli-tools` — callable tool implementations
@@ -721,8 +774,8 @@ flowchart LR
         RUNTIME["droidcli-runtime\nDroidHost::agent_turn loop · tool dispatch ·\nConnectorRegistry · TaskQueue"]
         MEMORY["droidcli-memory\nMemoryStore (SQLite) ·\nsessions, history, resume-after-restart ·\ncommand_lessons (procedural memory)"]
         CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · db/droidcli_state.json"]
-        PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOllamaProvider + AnthropicProvider\n(a third implements the same interface)"]
-        TOOLS["droidcli-tools\nfilesystem_tools · ffmpeg_tool\n(intent lives in droidcli-core, not here)"]
+        PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOpenAICompatProvider\n(any OpenAI Chat Completions backend)"]
+        TOOLS["droidcli-tools\nfilesystem_tools · ffmpeg_tool"]
         INFRA["droidcli-infra\nprocess_manager · command_runner ·\nos_registry · app_index · window_list ·\nsystem_info · hardware_info · windows_service"]
         RUNTIME --> MEMORY
         RUNTIME --> CONFIG
@@ -732,7 +785,7 @@ flowchart LR
         TOOLS --> INFRA
     end
 
-    LLM["LLM providers\nOllama · Anthropic ·\nfuture: OpenAI / ..."]
+    LLM["LLM provider\nlocal Ollama by default -\nany OpenAI-compatible backend"]
     OS["Filesystem · shell ·\ninstalled apps · processes"]
 
     CLIENTS --> GATEWAY
@@ -751,8 +804,9 @@ flowchart LR
 Every Core-tier gap the original ZeroClaw comparison identified is closed at
 the concrete-implementation level except a formal `Channel`/`Memory`/
 `Observer` trait layer, which nothing in droidcli needs yet. In place: a
-real provider abstraction (Ollama + Anthropic, selected at runtime), durable/
-queryable session memory (history, command lessons, known locations) with a
+real provider abstraction (any OpenAI-compatible backend, local Ollama by
+default), durable/queryable session memory (history, command lessons,
+known locations) with a
 procedural "lessons learned" store, structured JSONL logging, a self-health
 watchdog, a task queue with both one-shot delay and cron/SOP-style
 recurrence, a read-only opt-in local hardware inventory, and a reliability
@@ -1004,7 +1058,7 @@ flowchart TB
         DUser["User (TUI or HTTP client)"]
         DHost["DroidHost::agent_turn"]
         DLoop["classify_via_llm -> execute -> phrase\n(one decision per turn,\nplaceholder/desktop-path guards)"]
-        DOllama["ai::OllamaProvider\n(chat + tool-calling)"]
+        DOllama["ai::OpenAICompatProvider\n(chat + tool-calling, local Ollama)"]
         DTools["execute_agent_tool\n(native DroidHost methods -\nfiles, apps, clipboard, connectors)"]
         DVerify["Post-action ground-truth\nverification (stat_path/\nclipboard read-back)"]
         DMem["MemoryStore (SQLite):\nsessions, command lessons,\nknown_locations"]

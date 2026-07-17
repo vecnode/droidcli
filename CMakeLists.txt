@@ -66,13 +66,9 @@ add_executable(droidcli_net_handler_test tests/net_handler_test.cpp)
 target_link_libraries(droidcli_net_handler_test PRIVATE droidcli_core)
 add_test(NAME net_handler_test COMMAND droidcli_net_handler_test)
 
-add_executable(droidcli_ollama_client_test tests/ollama_client_test.cpp)
-target_link_libraries(droidcli_ollama_client_test PRIVATE droidcli_core)
-add_test(NAME ollama_client_test COMMAND droidcli_ollama_client_test)
-
-add_executable(droidcli_anthropic_client_test tests/anthropic_client_test.cpp)
-target_link_libraries(droidcli_anthropic_client_test PRIVATE droidcli_core)
-add_test(NAME anthropic_client_test COMMAND droidcli_anthropic_client_test)
+add_executable(droidcli_openai_compat_client_test tests/openai_compat_client_test.cpp)
+target_link_libraries(droidcli_openai_compat_client_test PRIVATE droidcli_core)
+add_test(NAME openai_compat_client_test COMMAND droidcli_openai_compat_client_test)
 
 add_executable(droidcli_language_runtime_test tests/language_runtime_test.cpp)
 target_link_libraries(droidcli_language_runtime_test PRIVATE droidcli_core)

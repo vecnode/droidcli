@@ -40,7 +40,7 @@ bool run_as_windows_service(
 // just returning false silently. `command_line` should include the full
 // invocation the SCM should launch, e.g. "\"C:\\...\\droidcli.exe\" --service
 // --headless --settings db/droidcli_settings.json" - deliberately no
-// --token/--anthropic-api-key on it: those come from the settings file (see
+// --token on it: that comes from the settings file (see
 // settings_store.hpp), never from a command line any process on the machine
 // can read (Task Manager, `wmic process`, the Event Log). No-ops (return
 // false) on a non-Windows build.

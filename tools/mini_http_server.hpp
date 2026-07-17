@@ -24,7 +24,7 @@ struct MiniHttpServerOptions {
 	droidcli::session::RuntimeSession session;
 	NotifyCallback on_notify;
 	bool enable_language_ai = true;
-	droidcli::ai::OllamaConfig ollama_config;
+	droidcli::ai::OpenAICompatConfig ollama_config;
 	droidcli::core::String system_prompt;
 	CustomRouteFn custom_dispatch;
 

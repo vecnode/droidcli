@@ -197,12 +197,16 @@ in one change so the core/host/test trio stays in sync:
    route (and `/ai/chat`) is gated by the bearer-token check in
    `tools::MiniHttpServer::poll_once` before any dispatch runs — no per-route
    auth code needed.
-2. **Ollama text-gen** — change request/response shaping in `ai/ollama_client` +
-   `ai/language_runtime`; the host owns the actual POST via
-   `LanguageTransportCallbacks`. Do not bake a specific model/endpoint into core.
+2. **Ollama text-gen** — change request/response shaping in
+   `ai/openai_compat_client` + `ai/language_runtime`; the host owns the
+   actual POST via `LanguageTransportCallbacks`. Do not bake a specific
+   model/endpoint into core - `ai/openai_compat_client` speaks the OpenAI
+   Chat Completions wire format generically, against whatever `--ollama-url`
+   names (a local Ollama daemon by default), not anything Ollama-specific.
    Tool-calling (`ToolDefinition`/`ToolCall`, `"tools"` request field,
-   `message.tool_calls` response parsing) lives in `ai/ollama_client` too, but
-   the multi-hop loop that executes tool calls is host-side
+   `choices[0].message.tool_calls` response parsing) lives in
+   `ai/openai_compat_client` too, but the multi-hop loop that executes tool
+   calls is host-side
    (`DroidHost::agent_turn` in `cli/host.cpp`) since it calls back into
    connector/task/process methods that aren't portable.
 3. **New connector (peer app)** — usually **config-only**, not a code change.
