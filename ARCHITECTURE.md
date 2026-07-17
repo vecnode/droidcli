@@ -784,6 +784,13 @@ vocabulary, not a claim that droidcli is secretly an 18-target build.
 
 ### Current status and next hardening priorities
 
+**As of Phase 34**, three of the four items this section used to rank as
+open (background service, config hardening, a second `ai::ModelProvider`)
+are done - see Phases 32-34 in the hardening log below. Only the `Channel`
+concept remains deliberately parked. The paragraph below is otherwise
+unchanged from Phase 28, since the Core-tier reliability work it describes
+didn't change in this pass.
+
 **As of Phase 28**, every Core-tier gap the original ZeroClaw comparison
 identified is closed at the concrete-implementation level except a formal
 `Channel`/`Memory`/`Observer` trait layer (which nothing in droidcli needs
@@ -804,55 +811,56 @@ the local model's tool-calling judgment at all. See the flowchart above for
 how those pieces fit together, and the hardening log below for the incident
 that motivated each one.
 
-**What droidcli still is, honestly:** a single-machine, single-operator
-daemon reached over localhost HTTP or an in-process TUI - not yet a
-background service that survives logoff/reboot, not yet reachable from a
-messaging platform, and still driven by whatever local model is loaded (this
-session's transcripts were all against small, tool-calling-tuned but
-frequently unreliable local models - the reliability layer above exists
-*because of*, not despite, that choice; a deliberate A/B comparison across
-models under real use, not simulated, is still the single most likely
-remaining lever on incident rate - see "OpenClaude" above for a concrete,
-comparable data point: `llama3-groq-tool-use` is already in the model
-picker's pull list and untested against the incumbent default). Closing
-those gaps, roughly in priority order:
+**What droidcli still is, honestly, as of Phase 28:** a single-machine,
+single-operator daemon reached over localhost HTTP or an in-process TUI -
+still driven by whatever local model is loaded (this session's transcripts
+were all against small, tool-calling-tuned but frequently unreliable local
+models - the reliability layer above exists *because of*, not despite, that
+choice). Two things Phase 28 flagged as true then are no longer true as of
+Phase 32-34: it's no longer Ollama-only (a second `ai::ModelProvider` exists
+- Phase 32), and it's no longer console-only-forever (a real Windows Service
+entry point exists - Phase 34). A deliberate A/B comparison of local models
+under real use is still the cheapest remaining lever on local-model incident
+rate specifically (see "OpenClaude" above - `llama3-groq-tool-use` is
+already in the model picker's pull list and untested against the incumbent
+default), but that's now one option among several once a second provider
+exists, not the only lever available. Remaining open items:
 
-1. **A real background service (`--daemon` is still a documented no-op).**
-   `--headless` (skip the TUI, keep the HTTP loop) is already the correct
-   foundation - a Windows Service (`ServiceMain`/`RegisterServiceCtrlHandler`)
-   and a systemd unit are two more host-side entry points around the same
-   `DroidHost`, not a redesign. Still the highest-leverage remaining item:
-   "always ready to act" (see the self-status/watchdog work in Phase 9, and
-   now the recurring scheduler in Phase 28) means little if the process
-   itself doesn't survive a reboot.
-2. **Config hardening**: flat JSON/CLI flags today, no TOML schema, no
-   autonomy levels, no workspace concept, and the bearer token is plaintext
-   (env var or CLI arg, never echoed back - see `CLAUDE.md`). A packaged,
-   unattended daemon (item 1) is a materially higher-value credential target
-   than an interactively-run one, so this should land before or alongside
-   real background operation, not after.
+1. ~~A real background service~~ - **done, Phase 34.** `--service` (Windows
+   Service, via `ServiceMain`/`RegisterServiceCtrlHandler`) is a third host
+   entry point around the same `DroidHost`, alongside the pre-existing
+   `--headless` and TUI modes - not a redesign. A systemd unit for Linux is
+   not included (nothing in this session's environment could build/test one
+   - see Phase 34's own scope note); `--daemon` remains a documented no-op
+   for that platform in the meantime.
+2. ~~Config hardening~~ - **done, Phase 33**, for the concrete gap that
+   mattered most (the bearer token/API keys being plaintext at rest, made a
+   materially higher-value target the moment Phase 34 made unattended
+   background operation possible): a JSON settings file with secrets
+   DPAPI-encrypted at rest on Windows. A full TOML schema, autonomy levels,
+   and a workspace concept remain undone - Phase 33 deliberately scoped to
+   the credential-exposure gap specifically rather than building broader
+   config infrastructure speculatively ahead of a concrete need for it.
 3. **A `Channel` concept, only once a channel is actually wanted** - do not
    build `zeroclaw-channels`-equivalent plumbing speculatively. `Connector`
    already generalizes "a peer droidcli talks to"; a messaging channel is a
    new `Connector` kind (`kind: "messaging_peer"` or similar) plus inbound
    webhook handling in `http_mount.cpp`, not a new subsystem. `MemoryStore`'s
    session model is what would key each external conversation's history
-   once this lands.
-4. **A second `ai::ModelProvider` implementation** (Anthropic/OpenAI/...) -
-   the interface (Phase 1) already exists and `agent_turn` is coded against
-   it, so this is additive: implement the interface, construct it instead of
-   `OllamaProvider` where it's selected. Deliberately not started
-   speculatively - there's nothing to route between until a second
-   implementation is actually needed, and a real local-model reliability
-   story (Phases 6-27) mattered more first. OpenClaude's descriptor-first
-   metadata/routing/transport split (see "OpenClaude" above) is a reasonable
-   shape to borrow *if and when* this actually starts.
+   once this lands. The only item left in this list.
+4. ~~A second `ai::ModelProvider` implementation~~ - **done, Phase 32**
+   (Anthropic). The interface (Phase 1) needed no changes; `agent_turn`
+   selects between providers by construction, not a second code path. A
+   third provider (OpenAI, ...) is the same additive shape if one is ever
+   actually needed.
 
-Two items from this list as of Phase 14 are now done and removed:
-~~a recurring scheduler~~ (Phase 28 - `Task::recurrence_ms`, `cancel_task`)
-and the model's own lack of date/time awareness (Phase 29 -
-`get_system_info`'s `current_datetime`, freshly read every call rather than
-cached at startup like the rest of `SystemInfo`).
+Four items from this list as of Phase 14 are now done and removed: ~~a
+recurring scheduler~~ (Phase 28 - `Task::recurrence_ms`, `cancel_task`), the
+model's own lack of date/time awareness (Phase 29 - `get_system_info`'s
+`current_datetime`, freshly read every call rather than cached at startup
+like the rest of `SystemInfo`), ~~a real background service~~ (Phase 34),
+and ~~a second `ai::ModelProvider`~~ (Phase 32). Config hardening (Phase 33)
+is narrowed rather than fully closed - see item 2 above.
 
 `zeroclaw-plugins` (dynamic plugin loading) remains intentionally out of
 scope - see the "droidcli does not consume MCP servers" guardrail in
@@ -1841,7 +1849,14 @@ arbitrary follow-up phrasing like "yes but make it bigger" (correctly
 rejected by `is_bare_affirmative`, which requires an exact whitelist match)
 or a command proposed several turns back (only the *immediately* preceding
 Assistant message is checked). Both fall through to the normal LLM loop, same
-as anything `parse_open_intent` doesn't recognize.
+as anything `parse_open_intent` doesn't recognize. **Deliberately not
+widened** - see the false-positive-vs-false-negative discipline in
+`AGENTS.md`'s extension point 7. This bypass skips
+`tool_call_requires_approval`'s gate entirely, so a false positive here means
+autonomously executing a stale or misread command with no approval prompt;
+a false negative just falls through to the normal loop, which is safe by
+construction (see Phase 31, which live-verifies that fallback actually holds
+up rather than just asserting it).
 
 **Verified:** `ctest` green (10/10, including the new `pending_command_test`
 - covers the exact real transcript specimen, a language-hint fence variant,
@@ -2580,6 +2595,633 @@ system-prompt string). Live-probed against a running `--headless --no-ai`
 instance: `GET /api/system` returns a `current_datetime` field matching the
 real wall-clock time at the moment of the call.
 
+### Phase 30 — Ollama telemetry: per-hop latency and token feedback, structured ✅ implemented
+
+**Goal:** `agent_turn`'s hop loop called Ollama and only ever kept
+`assistant_message`/`tool_calls`/`error_message` from the response -
+`/api/chat`'s own generation telemetry (`total_duration`, `eval_duration`,
+`prompt_eval_count`, `eval_count`, `done_reason`) was parsed nowhere, and no
+log line recorded how long a hop actually took. Debugging "the agent felt
+slow" or comparing models (see the still-open item 4 discussion above) had
+no data to look at beyond re-reading raw transcripts by hand.
+
+**What shipped:**
+
+- **`OllamaChatResponse`** (`src/ai/types.hpp`) gained
+  `total_duration_ns`/`eval_duration_ns`/`prompt_eval_count`/`eval_count`/
+  `done_reason`, populated in `parse_ollama_chat_response`
+  (`src/ai/ollama_client.cpp`) via the existing `net::extract_json_int_field`
+  helper - no new hand-rolled numeric parser. All fields default to
+  zero/empty so an older Ollama version or a non-2xx body (already handled
+  earlier in the function) never needs special-casing.
+- **`ProviderResponse`** (`src/ai/model_provider.hpp`) carries the same data
+  through the provider-agnostic seam as
+  `total_duration_ms`/`eval_duration_ms`/`prompt_tokens`/`completion_tokens`/
+  `done_reason` - `OllamaProvider::parse_response`
+  (`src/ai/model_provider.cpp`) does the ns→ms conversion at the adapter
+  boundary, so `DroidHost::agent_turn` never touches Ollama's wire units
+  directly, matching this file's provider-abstraction contract.
+- **`DroidHost::append_app_log`** (`cli/host.cpp`/`host.hpp`) gained an
+  optional trailing `extra_json_fields` parameter: raw `"key":value` JSON
+  text a specific call site can append into its JSONL line without widening
+  the fixed summary/success shape every other channel's log lines use. Only
+  the durable `logs/log.jsonl` write is affected - the console line and the
+  in-memory `app_log_`/`GET /api/app/log` shape are both unchanged, same
+  discipline `session_id` (Phase 3) already established.
+- **`run_agent_tool_loop`**'s hop loop now wraps its retry loop in
+  `std::chrono::steady_clock` timing and logs one structured `"ollama"`
+  channel entry per hop - wall-clock latency (spanning every empty-reply
+  retry the hop needed, not just the final attempt), Ollama's own
+  `model_total_ms`/`model_eval_ms`, `prompt_tokens`/`completion_tokens`,
+  `done_reason`, the model name, and the tool-call count - independent of
+  the existing "chat" channel's human-summary lines, which are unchanged.
+
+**Verified:** `ctest` green (13/13); added telemetry-specific cases to
+`ollama_client_test.cpp` and `model_provider_test.cpp` (a populated-fields
+response and an absent-fields response, plus the ns→ms conversion). Live-
+probed against a running `--headless` instance with a real local Ollama
+server (`llama3-groq-tool-use`): sent a real `POST /api/agent/turn` that
+triggered a real tool call, then inspected `logs/log.jsonl` by hand -
+confirmed two `"channel":"ollama"` lines, each valid standalone JSON, with
+real (non-zero) `prompt_tokens`, `completion_tokens`, `model_total_ms`, and
+`done_reason":"stop"` values matching the actual turn.
+
+### Phase 31 — Live-verified that Phase 14's narrow non-goal doesn't need widening ✅ verified, no code change
+
+**Goal:** Phase 14's own writeup names two shapes its deterministic
+command-confirmation bypass deliberately does not recognize - "yes but make
+it bigger" (a modified confirmation) and a command proposed several turns
+back (only the immediately preceding Assistant message is checked). Revisited
+whether either is worth fixing. Widening the bypass itself was rejected as
+the fix: `intent::extract_proposed_command`/`is_bare_affirmative`
+(`cli/host.cpp`) skip `tool_call_requires_approval`'s human-in-the-loop gate
+entirely, so a false positive there means autonomously executing a stale or
+misread command with zero approval prompt - exactly the failure mode
+extension point 7 in `AGENTS.md` says to guard against, not the false
+negatives (which just fall through to the normal loop) that are safe to
+accept freely. The question that mattered instead: does that fallback
+actually hold up, or was the non-goal note just asserting safety without
+having exercised it?
+
+**What was verified, live, against a running `--headless` instance with a
+real local Ollama model (`llama3-groq-tool-use`) - not a synthetic/mocked
+transcript:**
+
+- **A bare "yes" after a fenced command with no explicit permission
+  phrase** (so the Phase 14 bypass correctly never even considers it) still
+  resolved correctly: the model initially claimed success with no tool call
+  (caught and nudged by Phase 6's fabrication guard), then issued a real,
+  correctly-gated `run_ffmpeg` call matching the exact command it had shown.
+- **"yes but make it 400x400 instead"** - the literal "yes but X" shape the
+  non-goal note names - correctly produced a *new*, correctly-modified
+  gated `pending_tool_call` (`s=400x400`, not the stale `s=200x200`), not a
+  blind re-execution of the earlier proposal. `is_bare_affirmative` rejecting
+  this phrase is doing exactly its job: forcing it through the model, which
+  got the modification right.
+- **A confirmation several turns after the original proposal** ("ok yes, go
+  ahead with that green image," sent after an unrelated intervening question
+  had already abandoned the pending tool call per Phase 14's own abandonment
+  handling) did *not* silently misfire in either direction: the model tried
+  to claim success with no real tool call, got nudged once by the
+  fabrication guard, then - still failing to make a real tool call - the
+  guard **overrode with an honest refusal** ("I wasn't actually able to
+  complete this... please try again") rather than passing a fabricated
+  success through. No wrong command executed, no lie surfaced to the user.
+
+**Conclusion:** the two non-goal shapes don't need the bypass widened,
+because they're not actually gaps in end-to-end correctness - they're just
+places the *narrow, high-confidence* shortcut correctly declines to guess,
+handing off to the general-purpose loop, which is independently backstopped
+by Phase 6's fabrication guard and Phase 14's own pending-call abandonment
+handling. The worst observed outcome for an unrecognized shape was an honest
+"please retry," never a wrong silent action - the layered-guard design is
+doing its job as intended.
+
+**Verified:** no source change; `ctest` still 13/13 (nothing touched). The
+above is a real `logs/log.jsonl` transcript from a live multi-turn session,
+inspected by hand.
+
+### Phase 32 — A second `ai::ModelProvider`: Anthropic ✅ implemented
+
+**Goal:** close roadmap item 4 - the `ModelProvider` interface (Phase 1) and
+`ProviderRequest`/`ProviderResponse` (Phase 1, extended with telemetry in
+Phase 30) already existed specifically so a second provider would be
+additive. Nothing had exercised that promise until now.
+
+**What shipped:**
+
+- **`src/ai/anthropic_client.{hpp,cpp}`** (new, `#include`d into
+  `droidcli_core.cpp` alongside `ollama_client.cpp`): `build_anthropic_messages_request`/
+  `parse_anthropic_messages_response`, mirroring `ollama_client`'s
+  free-function, no-I/O shape. `AnthropicConfig`/`AnthropicOutboundRequest`/
+  `AnthropicChatResponse` added to `src/ai/types.hpp` alongside the existing
+  Ollama structs.
+- **Role-alternation mapping, not a schema change.** The Anthropic Messages
+  API requires strict `user`/`assistant` alternation and non-empty message
+  content; droidcli's internal transcript is finer-grained (a hop with two
+  tool calls records two consecutive `ChatRole::Tool` entries with no
+  `Assistant` entry between them). Rather than adding a `tool_call_id` field
+  to `ChatMessage` to reconstruct Anthropic's native `tool_use`/`tool_result`
+  block pairing, `anthropic_serialize_messages` maps `System` to the
+  top-level `"system"` field, `User`/`Tool` to `"user"`, `Assistant` to
+  `"assistant"`, and **merges consecutive same-mapped-role entries** into one
+  message - always strictly alternating regardless of droidcli's own
+  transcript granularity, with no schema change and no dependency on
+  Anthropic's own tool-use/tool-result id matching. An `Assistant` turn with
+  empty content (it only made a tool call, no narration text) gets a
+  placeholder (`"(used a tool)"`) rather than serializing an empty message,
+  which Anthropic rejects.
+- **`AnthropicProvider`** (`src/ai/model_provider.{hpp,cpp}`) adapts the
+  above behind `ModelProvider`, same adapter-only discipline as
+  `OllamaProvider` - no request/response-shaping logic of its own.
+- **Auth headers required a real transport change.** Anthropic needs
+  `x-api-key`/`anthropic-version` headers Ollama never needed, so
+  `ProviderRequest` gained a `headers` field, `LanguageAiTransportCallbacks::post_json`
+  and `tools::sync_http_post_json`/`sync_http_request` (`tools/sync_http_client.{hpp,cpp}`)
+  all gained an `extra_headers` parameter (threaded through both the WinHTTP
+  HTTPS path and the raw-socket HTTP path), and every existing call site
+  updated to pass an empty array - Ollama's own requests are byte-identical
+  to before this phase.
+- **`DroidHost::make_model_provider()`** (`cli/host.cpp`/`host.hpp`)
+  replaces the two inline `OllamaProvider` construction blocks that used to
+  live in `agent_turn`/`agent_tool_decision` - selects Ollama or Anthropic
+  from `HostConfig::ai_provider` at runtime, returning
+  `std::unique_ptr<ai::ModelProvider>` (a runtime choice can no longer bind a
+  stack value to a `const ModelProvider&` the way the single-provider code
+  did). Neither call site's control flow otherwise changed.
+- **CLI flags** (`cli/droidcli.cpp`): `--provider ollama|anthropic`,
+  `--anthropic-api-key` (else `ANTHROPIC_API_KEY` env var), `--anthropic-model`
+  (default `claude-3-5-haiku-latest`). `--provider anthropic` with no key
+  anywhere is rejected at startup with a clear error, not a lazily-discovered
+  failure on the first chat turn.
+- **Phase 30's per-hop telemetry generalized**, not left mislabeled: the
+  JSONL channel name and the `"model"` field both now come from
+  `config_.ai_provider`/the active model name instead of being hardcoded
+  `"ollama"`/`config_.ollama_model` - an Anthropic turn's telemetry now logs
+  under `"channel":"anthropic"` with the Anthropic model name, not silently
+  mislabeled as Ollama's.
+
+**Verified:** `ctest` 14/14 (new `anthropic_client_test.cpp` covering request
+building - URL, auth headers, system-field extraction, tool schema shape,
+missing-key/disabled rejection - and response parsing - text replies,
+`tool_use` blocks with raw JSON `input`, the error envelope's message field,
+transport failure, and the consecutive-Tool-message role-merge producing
+exactly 3 alternating messages instead of 4; `model_provider_test.cpp`
+extended to exercise `AnthropicProvider` through the `ModelProvider`
+interface, the same way `OllamaProvider` already was). **Not live-verified
+against the real Anthropic API** - no API key was available in this session,
+same honesty pattern as Phase 14's unexercised live shape: correctness here
+rests on the unit tests plus matching Anthropic's public Messages API
+documentation, not a live round trip.
+
+### Phase 33 — Config hardening: a settings file, secrets encrypted at rest ✅ implemented
+
+**Goal:** close roadmap item 2, scoped to the concrete gap that mattered
+most once Phase 34 (below) made unattended background operation possible:
+the bearer token and any provider API key were plaintext-only (CLI flag or
+env var, never persisted, regenerated every restart if neither was given).
+An installed, always-on service is a materially higher-value credential
+target than a foreground process a human is watching - see the roadmap
+reasoning above.
+
+**What shipped:**
+
+- **`cli/settings_store.{hpp,cpp}`** (new, host-tier - real file I/O and
+  Windows-specific crypto, `cli/` not `src/` per the core/host golden rule):
+  `HostSettings` (port, `enable_ai`, `enable_hardware_scan`, Ollama/Anthropic
+  config, `api_token`, `anthropic_api_key`) plus `load_settings`/
+  `save_settings` against a JSON file (default `db/droidcli_settings.json`,
+  same git-ignored `db/` convention as `droidcli_state.json`).
+- **Secrets encrypted at rest via Windows DPAPI**
+  (`CryptProtectData`/`CryptUnprotectData`, `crypt32.lib`) - tied to the
+  current Windows user account, no key management of our own needed. Stored
+  as hex-encoded `*_dpapi_hex` fields, never plaintext, with a plaintext
+  fallback field honored on load (for a human hand-editing the file or
+  migrating a value from a CLI flag) that gets re-encrypted on the next save.
+  On a non-Windows build (no DPAPI equivalent wired up) secrets fall back to
+  plaintext with a loud, explicit console warning rather than a silent gap -
+  this asymmetry is accepted, not hidden.
+- **`cli/droidcli.cpp`** gained `--settings <path>` and a
+  `resolve_setting_string` precedence helper (CLI flag, if actually present
+  in `argv`, else the settings file's value, else the hardcoded default) -
+  deliberately checks `argv` directly rather than reusing `parse_string_arg`'s
+  own already-defaulted return, which would make "flag passed" and "flag
+  omitted" indistinguishable and let the hardcoded default always beat the
+  settings file. Resolved settings (including the token, whether it came
+  from a flag, env var, the settings file, or was freshly generated) are
+  **saved immediately at every startup**, not just on clean exit like
+  `droidcli_state.json`'s connectors - a later `--install-service` run (Phase
+  34) must not depend on this process having shut down gracefully first.
+- **A concrete, positive side effect**: since `resolve_api_token` now checks
+  the settings file before generating a fresh token, droidcli no longer
+  regenerates a new random bearer token on every restart when no `--token`/
+  `DROIDCLI_API_TOKEN` is given - it reuses the one from the previous run.
+  Not the phase's goal, but a direct, welcome consequence of it.
+
+**Explicit non-goal:** a full TOML config schema, autonomy levels, and a
+workspace concept (all named in the original roadmap item) remain undone -
+this phase scoped to the credential-exposure gap specifically, per this
+codebase's own discipline against building config infrastructure ahead of a
+concrete need for the rest of it.
+
+**Verified:** `ctest` 14/14 (unaffected - this phase is entirely host-tier,
+no `src/` module touched). Live-probed end-to-end on this machine: ran
+droidcli with `--token mysecret123`, confirmed `db/droidcli_settings.json`
+was created with `"api_token_dpapi_hex":"<hex>"` (not plaintext) and an
+empty plaintext `"anthropic_api_key":""` (nothing to encrypt); ran again with
+*no* `--token` flag and confirmed no "generated API token" banner appeared
+(the persisted token was reused); started a third, independent process with
+no `--token` flag and confirmed `GET /api/status` with
+`Authorization: Bearer mysecret123` succeeded - proving the DPAPI
+encrypt/decrypt round trip is correct, not just that a file got written.
+
+### Phase 34 — A real background service: Windows Service support ✅ implemented (Windows only)
+
+**Goal:** close roadmap item 1, the item this section has called the
+highest-leverage remaining one since Phase 28 - `--daemon` was a documented
+no-op; "always ready to act" (Phase 9's watchdog, Phase 28's recurring
+scheduler) means little if the process itself doesn't survive a reboot or
+logoff.
+
+**What shipped:**
+
+- **`cli/windows_service.{hpp,cpp}`** (new, `#if defined(_WIN32)`, host-tier):
+  `run_as_windows_service(run_loop, on_stop)` registers a
+  `SERVICE_CTRL_HANDLER` and drives the exact same poll/tick loop shape
+  `--headless` already uses, via a caller-supplied callback - `on_stop` runs
+  the same `save_state(host)`/`server.stop()` a normal foreground exit
+  already does. `install_windows_service`/`uninstall_windows_service` wrap
+  `CreateService`/`DeleteService` (Service Control Manager, requires an
+  elevated/Administrator process), reporting *why* to stderr on failure
+  (e.g. `OpenSCManager` access-denied) rather than a bare `false`.
+- **Win32's `SERVICE_TABLE_ENTRY` needs a raw, non-capturing function
+  pointer** for `ServiceMain` - the caller's `std::function`s are stashed in
+  file-local globals that the C-style `service_main`/`service_ctrl_handler`
+  read back, documented inline as a one-shot-per-process pattern (droidcli
+  only ever calls `run_as_windows_service` once).
+- **`cli/droidcli.cpp`**: `--install-service`/`--uninstall-service` are
+  one-shot SCM actions handled *before* any host/HTTP-server setup, always
+  exiting immediately after. The install command line is deliberately just
+  `--service --headless --settings <path>` - no `--token`/
+  `--anthropic-api-key` on it, since Phase 33's settings file (already
+  freshly written by this same invocation, before the install branch runs)
+  is what the installed service reads its secrets from instead - a service's
+  command line is visible to any process on the machine (Task Manager,
+  `wmic process`, the Event Log), which a plaintext secret there would
+  expose. A new `--service` flag is the SCM's own entry point; if it's ever
+  passed without actually being launched by the SCM (e.g. typed by hand from
+  a console), `run_as_windows_service` returns `false` immediately - without
+  blocking - and droidcli fails loudly rather than silently falling through
+  to an interactive-looking foreground run.
+- **`current_executable_path()`** resolves the real absolute path via
+  `GetModuleFileNameA` for the install command line, rather than trusting
+  `argv[0]`'s relative/PATH-resolved form (which `CreateService` requires to
+  be absolute).
+
+**Explicit scope note:** a systemd unit for Linux (also named in the
+original roadmap item) is not included - nothing in this session's
+environment could build or exercise one, and this codebase's own discipline
+is against writing unverified platform-integration code. `--daemon` remains
+a documented no-op on non-Windows for now.
+
+**Verified, with an honest limit:** `ctest` 14/14 (unaffected - entirely
+host-tier). Live-probed everything reachable without Administrator
+privileges, which this session's shell does not have: `--install-service`
+correctly fails with `OpenSCManager failed (error 5) - are you running as
+Administrator?`; `--uninstall-service` against a not-installed service
+correctly reports that; `--service` run directly from a console correctly
+returns immediately (does not hang) with the "not launched by the SCM"
+message and a non-zero exit code, confirming `StartServiceCtrlDispatcher`'s
+non-blocking failure path is wired correctly. **Not verified**: an actual
+`sc create`/`sc start` round trip under an elevated shell - that step needs
+Administrator privileges this session doesn't have, and is a reasonable next
+manual verification step for whoever runs this with elevation.
+
+### Phase 35 — Full paths in the approval prompt ✅ implemented
+
+**Goal:** a gated tool call's approval prompt (`build_pending_tool_call_response`)
+showed `arguments_json` completely raw - if the model wrote a bare filename
+("notes.txt") or a Desktop-relative shortcut, that's what a human approving
+it saw, even though `execute_write_file`/`execute_copy_file`/etc. resolve it
+to a full path before actually touching disk. A user approving "yes" was
+approving a path they couldn't fully verify at a glance.
+
+**What shipped:**
+
+- **`DroidHost::display_arguments_with_full_paths(tool_name, arguments_json)`**
+  (`cli/host.cpp`/`host.hpp`) rewrites the well-known path field(s) - `"path"`
+  for `write_file`/`delete_file`/`create_directory`, `"source_path"`/
+  `"destination_path"` for `copy_file`/`move_path` - to a full absolute path,
+  using the *same* resolution chain the execution path already uses
+  (`substitute_bare_desktop_token` + `default_bare_filename_to_desktop`,
+  `src/reliability/path_guards.hpp`) plus `std::filesystem::absolute` to
+  collapse any remaining relative path against droidcli's own working
+  directory. `build_pending_tool_call_response` calls it for both the
+  pending call itself and every already-executed action shown alongside it.
+- **Display-only, by design - never touches what actually executes.** The
+  rewrite operates on a *copy* of the arguments JSON built just for this
+  response; the `ai::ToolCall`/`PendingToolActionRecord` stored in
+  `pending_tool_call_` (and later handed to `execute_agent_tool` on
+  approval) is completely untouched. This means every existing
+  path-fabrication guard (`looks_like_placeholder_path`,
+  `looks_like_invented_desktop_path`, Phases 16/19/25) still runs unchanged,
+  at execution time, against the original unmodified string - this phase
+  adds a display layer, it doesn't touch the validation pipeline at all.
+- **A placeholder-looking path is deliberately left unresolved**, not
+  absolute-ified: `display_arguments_with_full_paths` checks
+  `looks_like_placeholder_path`/`looks_like_invented_desktop_path` before
+  rewriting and leaves the field untouched if either matches. Running an
+  obviously-fake path (e.g. `/Users/username/Desktop/...`) through
+  `fs::absolute()` could turn it into something that merely *looks* more
+  legitimate (a real-looking absolute path containing the literal word
+  "username") - the human approving it should see the fake path exactly as
+  fake as it is, not laundered.
+- **`run_command`/`run_ffmpeg` are deliberately untouched.** Both take a
+  free-form shell/ffmpeg argument string, not a single well-known JSON path
+  field - a path can appear anywhere in arbitrary position, quoting, or flag
+  context. Attempting to find-and-rewrite path-shaped substrings inside a
+  live shell command risks corrupting it in exactly the way
+  `run_command`/`run_ffmpeg`'s own `via_shell=false` argv-based execution
+  (see "Phase 7" above) was built to avoid - safer to leave these two shown
+  exactly as the model wrote them than to risk showing (and, worse,
+  approving) a subtly different command than what actually runs.
+- **`build_pending_tool_call_response` is no longer `static`** (it now needs
+  `system_info_.desktop_path` via the new helper) - no caller changes needed,
+  both call sites (`agent_turn`, `agent_tool_decision`'s resume path) already
+  called it unqualified from within another member function.
+
+**Verified:** `ctest` 14/14 (no test previously depended on this function
+being `static`, and no `src/` module was touched - this is entirely
+host-tier). Live-probed end-to-end against a running `--headless` instance
+with a real local Ollama model: asked it to write a file by bare filename
+("hello_fullpath_test.txt"), confirmed the resulting approval prompt's
+`arguments_json` showed the full path
+(`C:\Users\luisarandas\Desktop\hello_fullpath_test.txt`, not the bare name
+the model wrote), declined the call via `POST /api/agent/tool_decision`, and
+confirmed the file was never actually created - proving the rewrite is
+display-only and the real execution path is unaffected.
+
+### Phase 36 — Model/provider changes persist at runtime too, not just at startup ✅ implemented
+
+**Goal:** Phase 33's settings file persists whatever `--ollama-model`/
+`--provider`/etc. resolved to *at startup*. It did not cover the model
+changing mid-session: `POST /api/config`, `POST /api/ollama/config`, and the
+TUI's own model picker all call `DroidHost::update_config`/
+`update_ollama_config`, which only ever updated the in-memory `config_` -
+none of them touched the settings file, so a model picked interactively was
+silently forgotten the moment droidcli restarted, reverting to whatever the
+last CLI flag/settings-file value had been. The concrete ask: pick a model
+once, in any way, and have droidcli keep using it next time until something
+explicitly changes it again.
+
+**What shipped:**
+
+- **`DroidHost::persist_current_settings_locked()`** (`cli/host.cpp`/
+  `host.hpp`): loads the *existing* settings file, overlays only the fields
+  `config_` has authoritative, current values for (`ollama_url`,
+  `ollama_model`, `ai_provider`, `anthropic_model`, `anthropic_api_key`,
+  `enable_ai`, `enable_hardware_scan`), and saves the merged result back.
+  Deliberately does **not** touch `port`/`api_token` - `HostConfig` has no
+  field for either (the bearer token deliberately never reaches `DroidHost`
+  at all, only `cli/droidcli.cpp` and the HTTP server ever see it - see
+  Phase 33), so overwriting them from `config_` would silently blank out
+  whatever was already correctly persisted. Called (while `mutex_` is
+  already held, matching this file's other `_locked` helpers) at the end of
+  both `update_config()` and `update_ollama_config()` - the internal
+  post-model-pull call site (`cli/host.cpp`, install/pull flow) already
+  funnels through `update_ollama_config()`, so it's covered for free.
+- **`HostConfig` gained a `settings_path` field**, empty by default (a test
+  harness or embedder that never sets it gets a no-op persist, not a crash
+  or a write to a surprising default location) - `cli/droidcli.cpp`'s
+  `main()` sets it to the same `--settings`-resolved path already used for
+  Phase 33's startup load/save, so both mechanisms write the exact same
+  file.
+
+**Verified:** `ctest` 14/14 (no `src/` module touched - entirely host-tier).
+Live-probed end-to-end: started droidcli with `--ollama-model llama3.2`,
+confirmed the settings file showed `"ollama_model":"llama3.2"`; called
+`POST /api/ollama/config {"model":"llama3-groq-tool-use"}` and confirmed the
+settings file updated immediately, in the running process, to
+`"llama3-groq-tool-use"`, with `api_token_dpapi_hex` still present and
+unchanged (not clobbered); killed the process and restarted with **zero**
+CLI flags; confirmed both that the persisted bearer token still
+authenticated `GET /api/status` and that `GET /api/config` reported
+`"ollama_model":"llama3-groq-tool-use"` - the runtime-picked model, not the
+original `--ollama-model llama3.2` from the first launch.
+
+### Phase 37 — Context window (`num_ctx`), a controllable default, not a fixed constant ✅ implemented
+
+**Goal:** close the first "OpenClaude" candidate above. `build_ollama_chat_request`
+never set `num_ctx` at all, meaning every request silently fell back to
+whatever context window the loaded Ollama model's own `Modelfile` defaults
+to - often much smaller than the model's actual maximum, and smaller than a
+long agent-turn transcript (system prompt + full tool-calling history) can
+need. OpenClaude's own default is 32768; the ask was to match that as a
+default, but keep it a real, persisted, per-instance setting - not a second
+hardcoded constant standing in for the first.
+
+**What shipped:**
+
+- **`ai::OllamaConfig` gained `num_ctx`** (`src/ai/types.hpp`, default
+  `32768`), sent inside the request's `"options"` object on **every** call -
+  unconditionally, unlike `temperature`, which stays opt-in via its `-1.0f`
+  sentinel (`src/ai/ollama_client.cpp`). Requesting it every time, not just
+  when a caller happens to set it, is the actual point: the whole failure
+  mode is a transcript silently exceeding a *default* nobody explicitly
+  reasoned about.
+- **A controllable value threaded through the same layers as `ollama_model`**,
+  not a second, parallel path: `HostConfig::ollama_num_ctx` (`cli/host.hpp`),
+  set at all four `ai::OllamaConfig` construction sites in `cli/host.cpp`
+  (`initialize()`, `update_config`, `update_ollama_config`,
+  `make_model_provider`); `HostSettings::ollama_num_ctx`
+  (`cli/settings_store.{hpp,cpp}`), loaded/saved in the same JSON settings
+  file as everything else from Phase 33, including by Phase 36's
+  runtime-persist path (so changing it via a future config endpoint would
+  survive a restart the same way the model does today - no endpoint
+  currently changes it at runtime, only `--ollama-num-ctx` does, but the
+  storage is already wired for one); `--ollama-num-ctx <N>`
+  (`cli/droidcli.cpp`), resolved via a new `resolve_setting_int` - the same
+  CLI-flag-if-present > settings-file > default precedence
+  `resolve_setting_string` already established, just for an integer.
+  Rejected outright (exit 1) if `<= 0`.
+
+**Verified:** `ctest` 14/14, including new `ollama_client_test.cpp` cases:
+`num_ctx` present and correct in the request body alongside `temperature`,
+and present with `temperature` correctly absent when the sentinel is unset -
+confirming the two fields are independent, not accidentally coupled through
+the shared `"options"` object. Live-probed end-to-end against a real running
+Ollama server: started droidcli with `--ollama-num-ctx 16384`, drove a real
+`POST /api/agent/turn` that completed a real tool call (proving Ollama
+accepted the resulting request body without error), and confirmed
+`db/droidcli_settings.json` persisted `"ollama_num_ctx":16384`. Also
+confirmed `--ollama-num-ctx -5` is rejected at startup with a clear error
+rather than silently sent to Ollama or clamped.
+
+### Phase 38 — Windows panel awareness: wider known-locations table, plus a real way for the model to answer "what can you open" ✅ implemented
+
+**Goal:** a real transcript (via the TUI, which routes through the
+deterministic `POST /api/apps/quick_open` path - see Phase 11) showed "open
+the Windows panel that shows memory usage" fail outright: `find_well_known_windows_target`
+already had "task manager" in its table, but this matcher works by substring
+containment, and "the windows panel that shows memory usage" never contains
+the literal text "task manager" - so it fell through to a literal
+`CreateProcess("Windows panel that shows memory usage")`, which can never
+succeed. The user then asked "What windows panels can you open?" and the
+model, having no real way to answer that, fabricated a response - correctly
+caught and overridden by Phase 6's fabrication guard (an honest "I wasn't
+actually able to complete this" rather than a lie), but the underlying
+question genuinely had no way to get answered truthfully at all.
+
+**What shipped, both by explicit request to widen past the original
+"one incident, one entry" discipline (see the comment above the table in
+`cli/host.cpp`):**
+
+- **`kWellKnownWindowsTargets`** (renamed and promoted from a function-local
+  `static` array to file scope, `cli/host.cpp`) gained real entries for
+  Resource Monitor (`resmon.exe`), Performance Monitor (`perfmon.exe`),
+  Services (`services.msc`), Event Viewer, System Information, Registry
+  Editor, System Properties, Programs and Features, Network Connections,
+  Power Options, Date and Time, Storage Settings, About, Apps & Features,
+  Windows Security, and Printers & Scanners - roughly 18 new targets. Task
+  Manager specifically gained four additional aliases ("process manager",
+  "memory usage", "cpu usage", "running processes") on separate rows sharing
+  its `display_name`/`path_or_name`, since one `WellKnownWindowsTargetEntry`
+  only carries a single alias each - the fix for "described by what it does,
+  not by its exact name" is more *rows*, not a smarter matcher.
+- **A new read-only agent tool, `list_windows_locations`**, backed by
+  `list_well_known_windows_targets_json()` - deduplicates
+  `kWellKnownWindowsTargets` by `display_name` (several rows share one, per
+  the aliases above) and returns the plain list. Not gated by
+  `tool_call_requires_approval` (read-only, matching `list_connectors`/
+  `get_system_info`). The system prompt (`cli/host.hpp`) now explicitly
+  tells the model to call this - and answer from the real result - when
+  asked what it can open, instead of guessing.
+
+**Verified:** `ctest` 14/14 (this is host-tier lookup-table/tool-dispatch
+logic with no `src/` module involved - no dedicated unit test, consistent
+with the rest of `cli/host.cpp`'s host-tier helpers). Live-probed against a
+running instance: `POST /api/apps/quick_open` with the exact real phrase
+from the incident, `"I want you to open the Windows panel that shows memory
+usage"`, now returns `"resolved_windows_target":true,
+"windows_target_display_name":"Task Manager"` deterministically - no LLM
+call involved, matching the request path the TUI actually uses. Also probed
+`"open resource monitor"` and `"open the thing that shows cpu usage"`,
+both resolving correctly. Separately confirmed `list_windows_locations`
+itself returns `"ok":true` and the full deduplicated location list when
+called as an agent tool.
+
+### Phase 39 — TUI session line shows the active model ✅ implemented
+
+**Goal:** the TUI's session-id status line gave no visibility into which
+model a session was actually talking to - relevant now that both the model
+(Phase 36, persisted/runtime-changeable) and the provider itself (Phase 32)
+can vary between runs.
+
+**What shipped:**
+
+- **`DroidHost::active_model_name()`** (`cli/host.cpp`/`host.hpp`): returns
+  `config_.anthropic_model` or `config_.ollama_model`, whichever
+  `config_.ai_provider` selects - the same ternary Phase 30's per-hop
+  telemetry logging already computed inline in `run_agent_tool_loop`, now a
+  single shared method instead of two copies (the telemetry call site was
+  updated to call it too).
+- **The TUI's session line** (`cli/tui.cpp`) now reads
+  `"session: <id> | model: <name>"` (or `"none"` if `active_model_name()`
+  is somehow empty - `HostConfig`'s own default is a real model name, so
+  this is a defensive fallback, not an expected state). Since
+  `active_model_name()` reflects whatever the settings file resolved to at
+  startup (Phase 33) or has been changed to at runtime since (Phase 36),
+  this is always "last session's model" on a fresh launch and "the current
+  model" thereafter - the same value by construction, nothing to
+  separately track.
+
+**Verified:** `ctest` 14/14 (no `src/` module touched). Live-probed by
+launching the actual TUI (not headless) with `--ollama-model
+llama3-groq-tool-use` and inspecting the raw terminal output stream:
+confirmed the rendered status line reads exactly
+`session: <id> | model: llama3-groq-tool-use`.
+
+### Phase 40 — `open_application` full-path display, plus real execution transparency ✅ implemented
+
+**Goal:** two things surfaced by a real transcript. First, "Full paths in
+the approval prompt" (Phase 35) never covered `open_application`'s
+`path_or_name`, since it's usually a bare app name, not a path - but when it
+*is* a path, the same reasoning from Phase 35 applies. Second, and more
+serious: the transcript showed `open_application({"path_or_name":"Memory"})`
+report `"ok":true, "launched":true, "pid":19484` for a request to open "the
+Windows panel that shows memory usage" - the call succeeded, but neither the
+model nor a human reading the log could tell *what* had actually launched.
+"Memory" resolved to something before ever reaching `find_well_known_windows_target`
+(checked last, only once App Paths/PATH/the installed-apps index all come up
+empty) - there was no way to confirm or rule out whether it was really Task
+Manager.
+
+**What shipped:**
+
+- **`LaunchAppResult` gained `resolved_path`** (`cli/command_runner.{hpp,cpp}`):
+  on Windows, queried back from the *live process handle* via
+  `QueryFullProcessImageNameA` right after a successful `CreateProcess` -
+  the real path the OS actually launched, not an echo of whatever
+  `launch_application`'s own App Paths registry lookup guessed. Concretely
+  caught a second real case immediately: launching `"notepad.exe"` resolved
+  to the Windows Store package
+  (`...\WindowsApps\Microsoft.WindowsNotepad_...\Notepad.exe`), not the
+  classic `System32\notepad.exe` - invisible before this phase, obvious
+  after it. `DroidHost::open_application`'s JSON result now includes it, and
+  the `open_application` tool description tells the model to report it (or
+  its filename) back to the user, especially for a loosely-worded request -
+  see AGENTS.md's "resolved_args"/"resolved_command" precedent (Phase 7)
+  for why reporting what actually happened back to the model matters more
+  than what it originally typed.
+- **`looks_like_path`** (was a `command_runner.cpp`-local helper) is now
+  exported from `command_runner.hpp`, so `DroidHost::display_arguments_with_full_paths`
+  (Phase 35) can reuse the exact same "is this a path or a bare name" check
+  `launch_application` itself already uses, rather than a second,
+  potentially-diverging heuristic.
+- **`display_arguments_with_full_paths` gained an `open_application` branch**,
+  deliberately narrower than the Phase 35 filesystem-tool branches: it only
+  rewrites `path_or_name` when `looks_like_path` is true (an actual path was
+  given), never for a bare name ("notepad", "Memory") - running a bare name
+  through the filesystem branches' Desktop-defaulting logic would have been
+  wrong (a bare app name isn't a Desktop-relative filename). A bare name is
+  shown to the human exactly as the model wrote it; an actual path is shown
+  fully resolved.
+- **Two concrete, narrow fixes traced directly to this transcript's failures**,
+  same "one incident, one entry" discipline Phase 38 already established:
+  - `kWellKnownWindowsTargets` gained "memory panel" (Task Manager) and
+    "disk partition"/"partition manager"/"manage disks" (Disk Management) -
+    the exact phrases from this transcript ("the memory panel of Window",
+    "disk partition") that had no matching alias at all.
+  - `strip_leading_courtesy` (`src/intent/open_intent.cpp`) gained "i
+    basically want you to "/"i really want you to "/"i just want you to "
+    (and their "...want to " variants) - "Ok I basically want you to open
+    the memory panel of Window" fell through to the unreliable LLM path
+    because "i " alone was never a courtesy prefix (only multi-word units
+    like "i want you to " are), so an adverb wedged between "i" and "want"
+    broke the match entirely, the same class of gap Phase 14/38's own
+    "great "/"now " fix closed for a different wedge position.
+- **`open_application`'s tool description** now tells the model to call
+  `list_windows_locations` (Phase 38) first for a vague/descriptive request
+  and pass back the real name, rather than guessing a bare word straight
+  into `path_or_name` - directly addressing how "Memory" got guessed in the
+  first place, on top of the new aliases covering this specific case
+  deterministically before the model is ever involved.
+
+**Verified:** `ctest` 14/14, including a new `intent_test.cpp` case for the
+exact "i basically want you to" phrasing. Live-probed end-to-end against a
+running instance: `POST /api/apps/quick_open` with the exact two failing
+phrases from the transcript - `"Ok I basically want you to open the memory
+panel of Window"` and `"can you open now disk partition"` - both now resolve
+deterministically to Task Manager and Disk Management respectively, no LLM
+involved. A real `POST /api/open {"path_or_name":"notepad.exe"}` returned
+`"resolved_path":"C:\\...\\WindowsApps\\Microsoft.WindowsNotepad_...\\Notepad.exe"`.
+Drove three real approval prompts via `POST /api/agent/turn`: an
+already-absolute path passed through unchanged, a bare `"notepad"` shown
+exactly as given (not path-ified), and a relative `"tools\notepad.exe"`
+correctly expanded to a full absolute path - confirming the narrower
+`open_application` branch's "only rewrite when it's actually a path"
+condition works as intended.
+
 ---
 
 ## Extension points
@@ -2839,17 +3481,15 @@ flowchart TB
 ```
 
 Candidates worth a deliberate yes/no decision once this diagram is iterated
-on further (none decided yet - listed, not adopted):
+on further:
 
-1. Request an explicit `num_ctx` on every Ollama chat call, matching
-   OpenClaude's 32768-token default, so a long agent-turn transcript can't be
-   silently truncated by Ollama's own context window the way OpenClaude's
-   docs say its OpenAI-shim otherwise would.
+1. ~~Request an explicit `num_ctx` on every Ollama chat call~~ - **adopted,
+   Phase 37.**
 2. Make `kMaxHops` a configurable value (per session or per connector),
    rather than a single hardcoded constant, mirroring the *idea* of
    OpenClaude's per-agent `maxSteps` without adopting sub-agent routing
-   itself.
+   itself. Not decided yet.
 3. A conversation-branch operation on top of the existing `MemoryStore`
    session model (mirroring `--fork-session`'s conversation-only branching,
    not filesystem isolation) - low-risk, additive, no schema change beyond a
-   new "forked from" pointer.
+   new "forked from" pointer. Not decided yet.

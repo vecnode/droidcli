@@ -13,6 +13,12 @@ struct ProviderRequest {
 	core::String url;
 	core::String body;
 	core::String error_message;
+
+	// Raw "Name: value" header lines the transport should send in addition
+	// to Content-Type/Content-Length - empty for OllamaProvider (no auth
+	// header needed for a local peer), populated by AnthropicProvider with
+	// "x-api-key"/"anthropic-version". See LanguageAiTransportCallbacks.
+	core::Array<core::String> headers;
 };
 
 // Result of parsing one inbound response for a ModelProvider. Mirrors
@@ -24,6 +30,20 @@ struct ProviderResponse {
 	core::String assistant_message;
 	core::Array<ToolCall> tool_calls;
 	core::String error_message;
+
+	// Generation telemetry, provider-agnostic units (milliseconds, token
+	// counts) - a second ModelProvider that has no equivalent field just
+	// leaves these at zero/empty rather than every caller special-casing
+	// "provider doesn't report this". Ollama's raw nanosecond durations are
+	// converted to milliseconds by OllamaProvider::parse_response; see
+	// ollama_client.hpp's OllamaChatResponse for the wire-unit source.
+	// Consumed by DroidHost::agent_turn for structured per-hop "ollama"
+	// channel logging - see "Ollama telemetry" in ARCHITECTURE.md.
+	int64_t total_duration_ms = 0;
+	int64_t eval_duration_ms = 0;
+	int64_t prompt_tokens = 0;
+	int64_t completion_tokens = 0;
+	core::String done_reason;
 };
 
 // Everything DroidHost::agent_turn needs from an LLM backend, decoupled
@@ -74,6 +94,29 @@ public:
 
 private:
 	OllamaConfig config_;
+};
+
+// Adapts ai::anthropic_client's free functions behind the ModelProvider
+// interface - same adapter-only discipline as OllamaProvider. This is the
+// second concrete ModelProvider (see "Second ModelProvider" in
+// ARCHITECTURE.md); DroidHost::agent_turn selects between the two by
+// constructing whichever one HostConfig::ai_provider names - nothing in
+// agent_turn's own control flow changes for either.
+class DROIDCLI_API AnthropicProvider : public ModelProvider {
+public:
+	explicit AnthropicProvider(AnthropicConfig config);
+
+	ProviderRequest build_request(
+		const core::Array<ChatMessage>& transcript,
+		const core::Array<ToolDefinition>& tools) const override;
+
+	ProviderResponse parse_response(
+		int32_t status_code,
+		const core::String& response_body,
+		bool transport_ok) const override;
+
+private:
+	AnthropicConfig config_;
 };
 
 } // namespace droidcli::ai

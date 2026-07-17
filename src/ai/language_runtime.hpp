@@ -8,7 +8,14 @@
 namespace droidcli::ai {
 
 struct LanguageAiTransportCallbacks {
-	std::function<bool(const core::String& url, const core::String& body, int32_t& status_code_out, core::String& response_body_out)> post_json;
+	// headers is a list of raw "Name: value" lines (see
+	// tools::sync_http_post_json's extra_headers) - every existing caller
+	// (Ollama) passes an empty array; a second ModelProvider whose wire
+	// format needs an auth header (e.g. Anthropic's "x-api-key") is the
+	// reason this exists. See "Second ModelProvider" in ARCHITECTURE.md.
+	std::function<bool(const core::String& url, const core::String& body,
+		const core::Array<core::String>& headers,
+		int32_t& status_code_out, core::String& response_body_out)> post_json;
 };
 
 class LanguageAiRuntime {

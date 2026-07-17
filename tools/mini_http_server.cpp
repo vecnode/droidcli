@@ -164,10 +164,11 @@ void MiniHttpServer::configure_language_ai(const MiniHttpServerOptions& options)
 	language_ai_transport_.post_json = [](
 		const core::String& url,
 		const core::String& body,
+		const core::Array<core::String>& headers,
 		int32_t& status_code_out,
 		core::String& response_body_out)
 	{
-		return sync_http_post_json(url, body, status_code_out, response_body_out);
+		return sync_http_post_json(url, body, status_code_out, response_body_out, headers);
 	};
 
 	if (!options.enable_language_ai)

@@ -15,6 +15,7 @@
 #include "app/tasks.cpp"
 #include "ai/types.cpp"
 #include "ai/ollama_client.cpp"
+#include "ai/anthropic_client.cpp"
 #include "ai/model_provider.cpp"
 #include "ai/language_runtime.cpp"
 #include "net/json.cpp"

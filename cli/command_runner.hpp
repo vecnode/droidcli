@@ -56,10 +56,29 @@ inline bool command_succeeded(const CommandRunResult& result)
 	return result.launched && result.exit_code == 0 && result.error_message.empty();
 }
 
+// True if `value` contains a path separator - i.e. the caller gave an actual
+// path (relative or absolute), not a bare name to be searched for. Exported
+// (was previously local to launch_application's own resolution logic) so
+// callers building a human-facing display - e.g. DroidHost's approval-prompt
+// path rewriting, see "Full paths in the approval prompt" in
+// ARCHITECTURE.md - can tell the two cases apart the same way
+// launch_application itself does, rather than a second, possibly-diverging
+// heuristic.
+bool looks_like_path(const core::String& value);
+
 struct LaunchAppResult {
 	bool launched = false;
 	int64_t pid = 0;
 	core::String error_message;
+	// The real, final path the OS actually launched - queried back from the
+	// live process handle (QueryFullProcessImageName on Windows) after a
+	// successful launch, not just echoed from whatever the caller or the App
+	// Paths registry resolution guessed. Empty on failure, or on a platform/
+	// path where querying it back isn't implemented. See "Windows app
+	// execution transparency" in ARCHITECTURE.md - the concrete motivation
+	// was a real incident where open_application("Memory") reported success
+	// with no way to tell what had actually launched.
+	core::String resolved_path;
 };
 
 // Starts `path_or_name` (resolved against PATH if it's a bare name, same as

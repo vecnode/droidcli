@@ -348,10 +348,17 @@ OllamaOutboundRequest build_ollama_chat_request(
 		+ "\"messages\":" + serialize_chat_messages(messages) + ","
 		+ droidcli::net::json_bool_field("stream", config.stream);
 
+	// num_ctx is sent on every call, unconditionally (unlike temperature,
+	// which is opt-in via a sentinel) - Ollama's own default context window
+	// is small enough that a long agent-turn transcript can silently get
+	// truncated without this. See "Context window (num_ctx)" in
+	// ARCHITECTURE.md's OpenClaude comparison for the incident this closes.
+	core::String options_fields = "\"num_ctx\":" + std::to_string(config.num_ctx);
 	if (config.temperature >= 0.0f)
 	{
-		request.body += ",\"options\":{\"temperature\":" + std::to_string(config.temperature) + "}";
+		options_fields += ",\"temperature\":" + std::to_string(config.temperature);
 	}
+	request.body += ",\"options\":{" + options_fields + "}";
 
 	if (!tools.empty())
 	{
@@ -435,6 +442,30 @@ OllamaChatResponse parse_ollama_chat_response(
 	{
 		result.done = !result.assistant_message.empty() || !result.tool_calls.empty();
 	}
+
+	// Telemetry fields Ollama appends to the final chunk of a chat response -
+	// top-level, siblings of "message"/"done", not nested under it. Absent on
+	// a non-2xx body (already returned above) or on older Ollama versions;
+	// extract_json_int_field leaves the field at its zero default in that
+	// case rather than erroring, matching the "done" pattern just above.
+	int64_t numeric_field = 0;
+	if (droidcli::net::extract_json_int_field(response_body, "total_duration", numeric_field))
+	{
+		result.total_duration_ns = numeric_field;
+	}
+	if (droidcli::net::extract_json_int_field(response_body, "eval_duration", numeric_field))
+	{
+		result.eval_duration_ns = numeric_field;
+	}
+	if (droidcli::net::extract_json_int_field(response_body, "prompt_eval_count", numeric_field))
+	{
+		result.prompt_eval_count = numeric_field;
+	}
+	if (droidcli::net::extract_json_int_field(response_body, "eval_count", numeric_field))
+	{
+		result.eval_count = numeric_field;
+	}
+	result.done_reason = extract_json_string_field(response_body, "done_reason");
 
 	if (result.assistant_message.empty() && result.tool_calls.empty())
 	{

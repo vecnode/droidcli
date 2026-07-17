@@ -43,6 +43,13 @@ struct OllamaConfig {
 	bool enabled = true;
 	bool stream = false;
 	float temperature = -1.0f;
+	// Context window size, in tokens, requested on every chat call - not
+	// left at Ollama's own (often small) per-model default, which can
+	// silently truncate a long agent-turn transcript. 32768 matches
+	// OpenClaude's own default (see "Context window (num_ctx)" in
+	// ARCHITECTURE.md's OpenClaude comparison) - overridable via
+	// HostConfig::ollama_num_ctx / --ollama-num-ctx, not a fixed constant.
+	int32_t num_ctx = 32768;
 };
 
 struct OllamaOutboundRequest {
@@ -61,6 +68,62 @@ struct OllamaChatResponse {
 	core::String assistant_message;
 	core::Array<ToolCall> tool_calls;
 	core::String error_message;
+
+	// Ollama's own generation telemetry, verbatim wire units (nanoseconds,
+	// token counts) - see parse_ollama_chat_response for the field names on
+	// the wire. Zero when the field was absent (older Ollama versions, or a
+	// non-2xx response that never reached this far). Consumed by
+	// ModelProvider::parse_response to feed structured per-hop logging in
+	// DroidHost::agent_turn - see "Ollama telemetry" in ARCHITECTURE.md.
+	int64_t total_duration_ns = 0;
+	int64_t eval_duration_ns = 0;
+	int64_t prompt_eval_count = 0;
+	int64_t eval_count = 0;
+	core::String done_reason;
+};
+
+// Second ai::ModelProvider (see "Second ModelProvider" in ARCHITECTURE.md) -
+// the Anthropic Messages API (https://api.anthropic.com/v1/messages).
+// Mirrors OllamaConfig's shape; api_key is required (unlike Ollama, which
+// needs no auth for a local peer).
+struct AnthropicConfig {
+	core::String base_url = "https://api.anthropic.com";
+	core::String api_key;
+	core::String model = "claude-3-5-haiku-latest";
+	core::String api_version = "2023-06-01";
+	bool enabled = true;
+	int32_t max_tokens = 4096;
+};
+
+// Mirrors OllamaOutboundRequest but adds `headers` - the Messages API
+// authenticates via an "x-api-key" header (plus a required
+// "anthropic-version" header), unlike Ollama's unauthenticated local peer.
+struct AnthropicOutboundRequest {
+	bool valid = false;
+	core::String url;
+	core::String body;
+	core::Array<core::String> headers;
+	core::String error_message;
+};
+
+struct AnthropicChatResponse {
+	bool transport_ok = false;
+	bool http_success = false;
+	int32_t status_code = 0;
+	core::String model;
+	core::String assistant_message;
+	core::Array<ToolCall> tool_calls;
+	core::String error_message;
+
+	// Generation telemetry, verbatim wire units - see
+	// parse_anthropic_messages_response for the field names on the wire.
+	// Mirrors OllamaChatResponse's telemetry fields' role (Phase 30) but
+	// under Anthropic's own field names (stop_reason, usage.input_tokens/
+	// output_tokens) - no per-call duration is reported on this wire format,
+	// unlike Ollama's total_duration/eval_duration.
+	core::String stop_reason;
+	int64_t input_tokens = 0;
+	int64_t output_tokens = 0;
 };
 
 struct LanguageAiSnapshot {
