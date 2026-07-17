@@ -16,12 +16,12 @@ void upsert_system_message(core::Array<ChatMessage>& transcript, const core::Str
 
 } // namespace
 
-void LanguageAiRuntime::set_ollama_config(const OllamaConfig& config)
+void LanguageRuntime::set_ollama_config(const OllamaConfig& config)
 {
 	ollama_config_ = config;
 }
 
-void LanguageAiRuntime::clear_transcript()
+void LanguageRuntime::clear_transcript()
 {
 	transcript_.clear();
 	last_user_message_.clear();
@@ -30,7 +30,7 @@ void LanguageAiRuntime::clear_transcript()
 	status_text_ = "Language AI transcript cleared.";
 }
 
-void LanguageAiRuntime::set_system_prompt(const core::String& prompt)
+void LanguageRuntime::set_system_prompt(const core::String& prompt)
 {
 	if (prompt.empty())
 	{
@@ -44,7 +44,7 @@ void LanguageAiRuntime::set_system_prompt(const core::String& prompt)
 	upsert_system_message(transcript_, prompt);
 }
 
-bool LanguageAiRuntime::submit_user_message(const core::String& message)
+bool LanguageRuntime::submit_user_message(const core::String& message)
 {
 	if (!runtime_enabled_)
 	{
@@ -77,7 +77,7 @@ bool LanguageAiRuntime::submit_user_message(const core::String& message)
 	return true;
 }
 
-OllamaOutboundRequest LanguageAiRuntime::build_pending_chat_request() const
+OllamaOutboundRequest LanguageRuntime::build_pending_chat_request() const
 {
 	if (!runtime_enabled_)
 	{
@@ -96,7 +96,7 @@ OllamaOutboundRequest LanguageAiRuntime::build_pending_chat_request() const
 	return build_ollama_chat_request(ollama_config_, transcript_);
 }
 
-bool LanguageAiRuntime::apply_chat_response(const OllamaChatResponse& response)
+bool LanguageRuntime::apply_chat_response(const OllamaChatResponse& response)
 {
 	if (!awaiting_response_)
 	{
@@ -127,7 +127,7 @@ bool LanguageAiRuntime::apply_chat_response(const OllamaChatResponse& response)
 	return true;
 }
 
-bool LanguageAiRuntime::complete_turn(const LanguageAiTransportCallbacks& transport)
+bool LanguageRuntime::complete_turn(const LanguageAiTransportCallbacks& transport)
 {
 	const OllamaOutboundRequest request = build_pending_chat_request();
 	if (!request.valid)
@@ -148,7 +148,7 @@ bool LanguageAiRuntime::complete_turn(const LanguageAiTransportCallbacks& transp
 	return apply_chat_response(parse_ollama_chat_response(status_code, response_body, transport_ok));
 }
 
-core::String LanguageAiRuntime::representation_text() const
+core::String LanguageRuntime::representation_text() const
 {
 	if (!last_assistant_message_.empty())
 	{
@@ -163,7 +163,7 @@ core::String LanguageAiRuntime::representation_text() const
 	return status_text_;
 }
 
-core::String LanguageAiRuntime::format_transcript() const
+core::String LanguageRuntime::format_transcript() const
 {
 	core::String formatted;
 	for (size_t index = 0; index < transcript_.size(); ++index)
@@ -182,7 +182,7 @@ core::String LanguageAiRuntime::format_transcript() const
 	return formatted;
 }
 
-LanguageAiSnapshot LanguageAiRuntime::snapshot() const
+LanguageAiSnapshot LanguageRuntime::snapshot() const
 {
 	LanguageAiSnapshot snapshot;
 	snapshot.runtime_enabled = runtime_enabled_;

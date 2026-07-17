@@ -616,6 +616,35 @@ private:
 		const ai::ToolCall& call,
 		const core::Array<PendingToolActionRecord>& actions_so_far) const;
 
+	// The result of running the Windows execution ruleset's trust-ordered
+	// resolution (see "Windows execution ruleset" in ARCHITECTURE.md)
+	// against a bare name or path - shared by open_application() itself and
+	// precheck_and_resolve_gated_call()'s pre-approval check below, so the
+	// two can never drift into resolving the same input differently.
+	struct ResolvedLaunchTarget {
+		bool resolved = false;
+		core::String target;         // full path to hand to launch_application
+		core::String effective_args; // args, filled in from a matched well-known target if the caller gave none
+		core::String source;         // "given_path" | "app_paths_registry" | "installed_apps_index" | "windows_known_location" | "path_search"
+		core::String error_message;  // set only when resolved is false
+	};
+	ResolvedLaunchTarget resolve_open_application_target(const core::String& path_or_name, const core::String& args) const;
+
+	// Runs resolve_open_application_target BEFORE a gated open_application
+	// call is ever shown to the user for yes/no approval, and rewrites
+	// `call`'s arguments_json in place to the fully-resolved target if one
+	// was found - so what the human approves and what actually executes are
+	// guaranteed identical and already-verified to exist, never a proposal
+	// that's certain to fail. If nothing resolves, returns false with
+	// out_result_json already holding the same-shaped failure JSON
+	// open_application() itself would return - the caller records that as a
+	// completed (failed) action and continues the loop instead of ever
+	// proposing a yes/no for something that cannot succeed. A no-op
+	// (returns true, arguments_json untouched) for any tool other than
+	// open_application. See "Never propose an unresolvable action" in
+	// ARCHITECTURE.md.
+	bool precheck_and_resolve_gated_call(ai::ToolCall& call, core::String& out_result_json) const;
+
 	// Returns `arguments_json` with any well-known path field ("path", or
 	// "source_path"/"destination_path" for copy/move) rewritten to a full
 	// absolute path, for display in an approval prompt only - never used for
@@ -643,7 +672,7 @@ private:
 
 	HostConfig config_;
 	session::RuntimeSession session_;
-	ai::LanguageAiRuntime language_ai_;
+	ai::LanguageRuntime language_ai_;
 	ai::LanguageAiTransportCallbacks language_ai_transport_;
 	net::RouteTable routes_;
 
@@ -689,7 +718,7 @@ private:
 	std::ofstream log_file_;
 
 	// Dedicated multi-turn transcript for the agent tool-calling loop, kept
-	// separate from language_ai_ (LanguageAiRuntime is single-shot request/
+	// separate from language_ai_ (LanguageRuntime is single-shot request/
 	// response and doesn't model a tool_calls -> tool-result -> follow-up
 	// hop cycle).
 	core::Array<ai::ChatMessage> agent_transcript_;

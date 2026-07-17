@@ -29,7 +29,7 @@ flowchart LR
     OLLAMA[("Ollama — ancillary text-gen :11434")]
 
     MA -->|"/api/connectors/{id}/call | launch | stop"| CONN
-    MA -->|ai::LanguageAiRuntime → /ai/chat\n--ollama-url| OLLAMA
+    MA -->|ai::LanguageRuntime → /ai/chat\n--ollama-url| OLLAMA
 ```
 
 | Concern | What it owns | Seam in this repo |
@@ -38,7 +38,7 @@ flowchart LR
 | **A connector** (operator-configured) | Whatever the operator points it at — an inference server, a media player, anything reachable by URL or local command | `net::Connector` (`http_peer` or `launched_process`), registered via `--config` or `POST /api/connectors` |
 
 > **Ollama stays separate.** Ollama is a general **text-generation** endpoint
-> behind `ai::LanguageAiRuntime` / `/ai/chat` — it is not a connector, it's
+> behind `ai::LanguageRuntime` / `/ai/chat` — it is not a connector, it's
 > built into the core AI seam. Any purpose-trained inference service is
 > registered as an ordinary
 > `http_peer` connector instead, with no special-cased code path. All
@@ -48,12 +48,20 @@ flowchart LR
 
 ## Design goals
 
-| Goal                   | How                                                                     |
-| ---------------------- | ----------------------------------------------------------------------- |
-| Portability            | C++17, `droidcli::core::`* value types, no engine/framework types      |
-| Single source of truth | Command validation, JSON shapes, connector/task state                   |
-| Testability            | CMake + unit tests without network, GPU, or GUI                         |
-| Host bridge            | Hosts inject transport/process I/O via `std::function` callbacks        |
+- **Portability** — C++17, `droidcli::core::` value types only, no
+  engine/framework types leaking into public headers or core logic.
+- **Ground-Truth** — a claimed success is independently re-verified against
+  real, observable state (a re-read after write, a live process/registry
+  check) rather than trusted on a tool's own say-so — see "Post-action
+  ground-truth verification" in the Algorithms reference below, and the
+  Chronological hardening log's Phase 18/24 entries for the incidents that
+  made this a hard rule.
+- **Testability** — CMake + unit tests run with no network, GPU, or GUI
+  required; command validation, JSON shapes, and connector/task state all
+  live in `src/` specifically so they can be exercised this way.
+- **Host Bridge** — hosts inject real transport/process/filesystem I/O into
+  core via `std::function` callbacks; core itself never touches a socket,
+  process, or window directly.
 
 **Rule of thumb:** if it touches a real socket, process, window, or the
 filesystem at runtime, it stays in the host. If it is pure state + parsing +
@@ -63,10 +71,11 @@ validation + JSON, it belongs in core.
 
 ## Agent properties
 
-Twenty phases of hardening (see the Phase log further below) have converged
-on a specific, opinionated shape for what kind of agent droidcli is. Anyone
-extending it should build *with* these properties, not around them - each
-one exists because a real observed failure, not a hypothetical, motivated it.
+Forty-two phases of hardening (see the Phase log further below) have
+converged on a specific, opinionated shape for what kind of agent droidcli
+is. Anyone extending it should build *with* these properties, not around
+them - each one exists because a real observed failure, not a hypothetical,
+motivated it.
 
 1. **A personal desktop assistant, not a dev/build tool.** droidcli controls
    the machine it runs on for a human sitting at it - opening apps, finding
@@ -134,6 +143,30 @@ one exists because a real observed failure, not a hypothetical, motivated it.
    small local model retry or self-nudge indefinitely measurably degrades
    its own output rather than converging on a fix - every self-correction
    path terminates in an honest report to the user, never silent looping.
+10. **Never propose or execute an unverified process launch.** The Windows
+    execution ruleset (see its own section below) resolves every
+    `open_application` call against a fixed trust order - an explicit path,
+    the App Paths registry, the installed-apps index, droidcli's own curated
+    Windows-locations table, then a *verified* PATH search as a last resort
+    - and refuses outright if nothing resolves, rather than letting the OS's
+    own blind bare-name search gamble on a coincidental match (Phase 41).
+    This resolution now runs *before* a gated call is ever shown to a human
+    as a yes/no, not just before it executes (Phase 42) - an approved
+    `open_application` call is guaranteed to reference something real.
+11. **Multi-provider by construction, not Ollama-locked.** `ai::ModelProvider`
+    (Phase 1) is the interface `agent_turn` is coded against; `OllamaProvider`
+    and `AnthropicProvider` (Phase 32) are both adapters over it, selected at
+    runtime via `HostConfig::ai_provider` - adding a third provider means
+    implementing the interface, not touching the agent-turn loop itself.
+12. **Configuration and secrets outlive the process, and the process itself
+    can outlive a reboot.** Runtime settings (model, provider, port) persist
+    to a JSON file across restarts, not just for the lifetime of one run
+    (Phase 33), update immediately when changed at runtime rather than only
+    at the next startup (Phase 36), and secrets in that file (the bearer
+    token, an API key) are encrypted at rest via Windows DPAPI, never
+    plaintext (Phase 33). A real Windows Service entry point (`--service`,
+    `--install-service`) means droidcli no longer has to be a foreground
+    process a human is watching to keep running (Phase 34).
 
 ---
 
@@ -151,7 +184,7 @@ metaagent/                        (repository directory name unchanged)
 │   ├── notify/                    Notify body parsing
 │   ├── session/                   RuntimeSession + status strings
 │   ├── app/                       tasks (persistent task queue)
-│   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime + ModelProvider interface
+│   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageRuntime + ModelProvider interface
 │   ├── intent/                    Deterministic "open X" phrase recognizer (no LLM, no I/O)
 │   └── reliability/               Fabrication/path/command guards used by cli/host.cpp (Phase 26/27, no LLM, no I/O)
 ├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, MemoryStore (SQLite), HTTP route mount, entrypoint
@@ -171,61 +204,96 @@ Public entry point: `#include "droidcli_core.h"`.
 
 ## Modules
 
-| Module                    | Role                                                                  |
-| ------------------------- | --------------------------------------------------------------------- |
-| `core/types` + `math`     | `String`, `Array`, `Vec3`, color types, math helpers                  |
-| `core/spawn`              | **Spawn attribution**: `spawn(name, fn, sink)` - named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." via an optional `ThreadEventSink`, no logging mechanism of its own. `cli/tui.cpp`'s background threads wire the sink to `DroidHost::log_thread_event` |
-| `media/decode` + `probe`  | FFmpeg-backed decode + probe (host stages the DLLs)                   |
-| `net/router` + `handlers` | `/health`, `/echo`, `/notify`, `/ai/chat`                             |
-| `net/connector`           | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
-| `net/json`                | Escape/build/extract JSON fields (no external JSON dependency)        |
-| `notify/parse`            | Notify body parsing (JSON or text)                                    |
-| `session/types` + `status`| `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
-| `app/tasks`               | **Persistent task queue**: `Task` (incl. `result_json`), `TaskQueue` (enqueue/claim_next/complete/fail/find/list), JSON build/parse |
-| `ai/ollama_client`        | Ollama request/response shaping, incl. **tool-calling**: `ToolDefinition`/`ToolCall`, `"tools"` request field, `message.tool_calls` response parsing, `ChatRole::Tool` |
-| `ai/language_runtime`     | Transcript + turn state for **Ollama text-gen** (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. Separate from any connector-registered inference peer. Single-shot (no tool-calling) - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
-| `ai/model_provider`       | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`) + `OllamaProvider` adapter over `ai/ollama_client`. `DroidHost::agent_turn` is coded against the interface - see "Phase 1" in the Chronological hardening log below |
-| `intent/open_intent`      | Deterministic "open X" phrase recognizer (pure string scanning, no LLM, no I/O) - backs `POST /api/apps/quick_open`, see "Quick-open" below |
+Grouped by the `droidcli-xyz` module boundary each belongs to - the same
+vocabulary "Comparison to ZeroClaw's crate architecture" below uses (see
+that section's tier diagram for how these connect to each other). This is a
+conceptual grouping, not a separate CMake target or library - droidcli stays
+one static library (`src/`) plus one executable (`cli/`).
 
-The droidcli host (`cli/`) additionally owns: the config store, the
-`ConnectorRegistry` + `TaskQueue` instances and their dispatch (`call_connector`
-for `http_peer`, `launch_connector`/`stop_connector` for `launched_process`,
-`tick_tasks()` draining the queue, including a `"run"` command dispatched to
-`command_runner`), the **ProcessManager** (Job Object/process-group launch of
-any `launched_process` connector with PID tracking), **`command_runner`**
-(one-shot, synchronous, timeout-bounded shell command execution with captured
-stdout/stderr - `POST /api/run` and the `"run"` task command - plus
-`launch_application`, a detached fire-and-forget GUI-app launch with no wait
-and no output capture, distinct from the blocking `run_command_once` -
-resolves a bare app name against the Windows App Paths registry first (how
-most GUI installers register themselves, e.g. `chrome` even though it's
-never added to PATH), then PATH, then falls back to the **`app_index`**
-installed-apps index if both fail - `POST /api/open`), **`app_index`**
-(`scan_installed_applications()`, Windows' Add/Remove Programs/Uninstall
-registry entries under HKLM native + WOW6432Node + HKCU, resolving each
-entry's `DisplayIcon` or a shallow `InstallLocation` scan to an actual
-`.exe`; scanned once at `DroidHost::initialize()` and cached, not re-scanned
-per lookup - covers apps that never registered on PATH or in App Paths at
-all, e.g. Blender or KiCad - `POST /api/apps/find`), **`window_list`**
-(`list_open_windows()`, `EnumWindows` filtered to visible/titled top-level
-windows with owning process name + PID via `QueryFullProcessImageNameA` -
-the same set Alt+Tab shows; a live, uncached snapshot re-enumerated every
-call, unlike `app_index`'s scan-once - `GET /api/apps/open`),
-**`filesystem_tools`**
-(`read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/
-`which_executable`, `std::filesystem`-backed, no external dependency - `POST
-/api/fs/*`), **`memory_store`** (`MemoryStore`, SQLite-backed persistent
-agent-turn history keyed by session id - see "Persistent memory" below -
-`GET /api/agent/history`, `GET /api/agent/sessions`), and
-**`DroidHost::agent_turn`** (a bounded tool-calling loop, against a
-`ai::ModelProvider` - Ollama today - over a fixed tool set - connectors,
-tasks, shell commands, app launches, open-window queries, and filesystem
-primitives - each tool implemented by calling back into `DroidHost`'s own
-methods, self-contained rather than delegating to another process or MCP
-server; every hop (user message, tool call + result, final reply, and
-failure paths) is logged via `append_app_log()` under the `chat` channel and
-persisted via `record_agent_message()` to `memory_store` - `POST
-/api/agent/turn`).
+### Foundations (shared low-level utilities, no `droidcli-xyz` equivalent)
+
+| Module | Role |
+| --- | --- |
+| `core/types` + `math` | `String`, `Array`, `Vec3`, color types, math helpers |
+| `net/json` | Escape/build/extract JSON fields (no external JSON dependency) |
+| `notify/parse` | Notify body parsing (JSON or text) |
+| `session/types` + `status` | `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
+| `media/decode` + `probe` | FFmpeg-backed decode + probe (host stages the DLLs) |
+| `reliability/*` | `path_guards`/`claim_guards`/`command_guards` - the fabrication/placeholder-path/destructive-command heuristics behind the agent-turn reliability layer (see "Algorithms reference" below) |
+| `intent/*` | `open_intent` (deterministic "open X" recognizer) and `pending_command` (deterministic "yes" confirms a just-proposed command) - pure string scanning, no LLM, no I/O |
+
+### `droidcli-runtime` — agent loop, connectors, tasks, spawn attribution
+
+| Module | Role |
+| --- | --- |
+| `net/connector` | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
+| `app/tasks` | **Persistent task queue**: `Task` (incl. `result_json`, one-shot delay, cron-style `recurrence_ms`), `TaskQueue` (enqueue/claim_next/complete/fail/find/list) |
+| `core/spawn` | **Spawn attribution**: `spawn(name, fn, sink)` - named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." via an optional `ThreadEventSink`. `cli/tui.cpp`'s background threads wire the sink to `DroidHost::log_thread_event` |
+| `DroidHost::agent_turn`/`run_agent_tool_loop` (`cli/host.cpp`) | The bounded tool-calling loop itself, against an `ai::ModelProvider`, over a fixed tool set - connectors, tasks, shell commands, app launches, open-window queries, and filesystem primitives - each tool implemented by calling back into `DroidHost`'s own methods, self-contained rather than delegating to another process or MCP server. Every hop is logged (`append_app_log`, `"chat"` channel) and persisted (`record_agent_message`) to `droidcli-memory` |
+
+### `droidcli-providers` — LLM backends
+
+| Module | Role |
+| --- | --- |
+| `ai/model_provider` | **Provider abstraction**: `ModelProvider` interface (`build_request`/`parse_response`), adapted by `OllamaProvider` and `AnthropicProvider`. `DroidHost::agent_turn` is coded against the interface, selecting a concrete provider at runtime via `HostConfig::ai_provider` |
+| `ai/ollama_client` | Ollama request/response shaping, incl. **tool-calling** (`ToolDefinition`/`ToolCall`, `"tools"` request field, `message.tool_calls` response parsing) and per-call telemetry (`num_ctx`, token counts, timing) |
+| `ai/anthropic_client` | Anthropic Messages API request/response shaping - the same free-function, no-I/O shape as `ai/ollama_client`, including its own tool-calling (`tool_use` content blocks) and telemetry (`usage.input_tokens`/`output_tokens`) |
+| `ai/language_runtime` | Transcript + turn state for the legacy single-shot **Ollama text-gen** endpoint (`/ai/chat`); POST via `LanguageAiTransportCallbacks`. No tool-calling - the multi-hop agent loop lives in `DroidHost::agent_turn` instead |
+
+### `droidcli-memory`
+
+| Module | Role |
+| --- | --- |
+| `memory_store` | `MemoryStore` (SQLite-backed): session transcripts (`memory_entries`, resumable across restarts, `GET /api/agent/history`), command lessons (`command_lessons`, "this broke, this fixed it," searched before a similar attempt), and known locations (`known_locations`, a name → real path mapping) |
+
+### `droidcli-config`
+
+| Module | Role |
+| --- | --- |
+| `settings_store` (`cli/settings_store.{hpp,cpp}`) | JSON settings file (port, Ollama/Anthropic config, provider selection) with secrets (bearer token, API key) DPAPI-encrypted at rest on Windows - loaded at startup and re-saved on every runtime change, not just at process start |
+| `HostConfig` (`cli/host.hpp`) | In-memory config struct `DroidHost` actually runs against - populated from CLI flags, the settings file, or a runtime `POST /api/config`/`POST /api/ollama/config` update |
+
+### `droidcli-tools` — callable tool implementations
+
+| Module | Role |
+| --- | --- |
+| `filesystem_tools` | `read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/`which_executable`, `std::filesystem`-backed, no external dependency |
+| `command_runner` | One-shot, synchronous, timeout-bounded shell command execution (`run_command_once`, captured stdout/stderr) plus `launch_application` (detached, fire-and-forget GUI-app launch) - see "Windows execution ruleset" below for the trust-ordered resolution both go through |
+| `app_index` | `scan_installed_applications()` - Windows' Add/Remove Programs/Uninstall registry entries (HKLM native + WOW6432Node + HKCU), scanned once at `DroidHost::initialize()` and cached |
+| `window_list` | `list_open_windows()` - `EnumWindows` filtered to visible/titled top-level windows, a live uncached snapshot re-enumerated every call, unlike `app_index`'s scan-once |
+| `ffmpeg_tool` | Resolves and invokes the ffmpeg binary for transcode/convert/clip/extract/thumbnail work, `via_shell=false` (see "Windows execution ruleset") |
+| `system_info` | Environment grounding - OS, architecture, real Desktop path via the Windows Known Folder API, the current date/time (freshly read every call, not cached) |
+| `hardware_info` | Opt-in (`--enable-hardware-scan`), read-only local CPU/GPU/RAM/disk inventory |
+| `windows_service` (`cli/windows_service.{hpp,cpp}`) | Windows Service lifecycle (`ServiceMain`/`RegisterServiceCtrlHandler`) and install/uninstall via the Service Control Manager |
+
+### `droidcli-gateway`
+
+| Module | Role |
+| --- | --- |
+| `net/router` + `net/handlers` | Portable route table + handlers: `/health`, `/echo`, `/notify`, `/ai/chat` |
+| `tools/mini_http_server` | Raw-socket HTTP server, bearer-token gate (`request_requires_auth`/`is_authorized`), custom-route fallback hook |
+| `http_mount` (`cli/http_mount.cpp`) | Mounts every `droidcli`-specific `/api/*` route onto the router via `CustomRouteFn` |
+| `tools/sync_http_client` | Outbound HTTP/HTTPS (WinHTTP for `https://`, raw sockets for local `http://` peers) - what `ai/model_provider`'s providers actually POST through |
+
+### `droidcli-infra`
+
+| Module | Role |
+| --- | --- |
+| `process_manager` | Job Object (Windows) / process-group (POSIX) tracking for any `launched_process` connector, so `stop()` kills the whole tree it spawned |
+| `db/droidcli_state.json`, `db/droidcli_settings.json` | Flat-file persistence (connector state, host settings) alongside `memory_store`'s SQLite backend |
+
+### `droidcli-log`
+
+| Module | Role |
+| --- | --- |
+| `core/log_sink` | The `LogSink` interface core logs through - host-injected, no direct stdout/file dependency in `src/` |
+| `DroidHost::append_app_log` (`cli/host.cpp`) | Structured JSONL (`logs/log.jsonl`), one object per line, `session_id` attribution on `"chat"`-channel entries |
+
+### `droidcli-tui`
+
+| Module | Role |
+| --- | --- |
+| `cli/tui.cpp` | FTXUI-based terminal dashboard - chat pane, connector list, app log, session/model status line |
 
 ---
 
@@ -298,7 +366,7 @@ over HTTP, so it never needs the token.
 | `GET` | `/health` | Liveness + session snapshot (portable handler, no auth) |
 | `GET` / `POST` | `/echo` | Echo query/body (no auth) |
 | `POST` | `/notify` | Ingest notify event (no auth) |
-| `POST` | `/ai/chat` `[auth]` | Ollama text-gen chat via `LanguageAiRuntime` |
+| `POST` | `/ai/chat` `[auth]` | Ollama text-gen chat via `LanguageRuntime` |
 | `GET` | `/api/status` `[auth]` | Host status: AI-enabled flag, connector/task counts |
 | `GET` | `/api/network/status` `[auth]` | Networking flag + connector count |
 | `GET` | `/api/config` `[auth]` | Effective host configuration (Ollama) |
@@ -732,7 +800,7 @@ flowchart LR
         RUNTIME["droidcli-runtime\nDroidHost::agent_turn loop · tool dispatch ·\nConnectorRegistry · TaskQueue"]
         MEMORY["droidcli-memory\nMemoryStore (SQLite) ·\nsessions, history, resume-after-restart ·\ncommand_lessons (procedural memory)"]
         CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · db/droidcli_state.json"]
-        PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOllamaProvider (today; a second\nprovider implements the same interface)"]
+        PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOllamaProvider + AnthropicProvider\n(a third implements the same interface)"]
         TOOLS["droidcli-tools\nfilesystem_tools · command_runner ·\napp_index · window_list · intent ·\nffmpeg_tool · system_info"]
         RUNTIME --> MEMORY
         RUNTIME --> CONFIG
@@ -765,10 +833,10 @@ vocabulary, not a claim that droidcli is secretly an 18-target build.
 
 | ZeroClaw crate | droidcli module | Role | droidcli equivalent | Status |
 | --- | --- | --- | --- | --- |
-| `zeroclaw-runtime` | `droidcli-runtime` | Agent loop, security policy, SOP engine, cron, SubAgents, RPC | `DroidHost::agent_turn`/`run_agent_tool_loop` (`cli/host.cpp`) — one bounded tool-calling loop | **Partial** — real security-policy layer beyond the bearer token: side-effecting tools require human approval before executing (Phase 6, done, `POST /api/agent/tool_decision`); `TaskQueue` now has one-shot delayed scheduling (`Task::scheduled_for_ms`, Phase 9, "in N minutes") but no *recurring* cron and no SOP engine/SubAgents/RPC |
-| `zeroclaw-config` | `droidcli-config` | TOML schema, secrets encryption, autonomy levels, workspace resolution | `HostConfig` (`cli/host.hpp`) + CLI flags + `connectors.json` | **Partial** — flat JSON/CLI flags not TOML, token is plaintext (env var or CLI arg, never echoed back — see `CLAUDE.md`), no autonomy levels, no workspace concept |
+| `zeroclaw-runtime` | `droidcli-runtime` | Agent loop, security policy, SOP engine, cron, SubAgents, RPC | `DroidHost::agent_turn`/`run_agent_tool_loop` (`cli/host.cpp`) — one bounded tool-calling loop | **Partial** — real security-policy layer beyond the bearer token: side-effecting tools require human approval before executing, now pre-verified before that approval prompt is even shown for `open_application` (Phase 6, 42); `TaskQueue` has both one-shot delayed scheduling (`Task::scheduled_for_ms`, Phase 9) *and* cron/SOP-style recurrence (`Task::recurrence_ms`, `cancel_task`, Phase 28) - no SubAgents/RPC |
+| `zeroclaw-config` | `droidcli-config` | TOML schema, secrets encryption, autonomy levels, workspace resolution | `HostConfig` (`cli/host.hpp`) + `settings_store` (`cli/settings_store.{hpp,cpp}`) + CLI flags + `connectors.json` | **Partial** — flat JSON, not TOML, but secrets *are* now encrypted at rest (the bearer token/API key, DPAPI on Windows, Phase 33) when persisted to `db/droidcli_settings.json`, and a runtime config change is saved immediately, not just at startup (Phase 36); still no autonomy levels, no workspace concept |
 | `zeroclaw-api` | `droidcli-api` *(interface only, cross-cutting — not its own .cpp module)* | Public traits: `ModelProvider`, `Channel`, `Tool`, `Memory`, `Observer`, `RuntimeAdapter`, `Peripheral` (kernel ABI) | `ai::ModelProvider` (`src/ai/model_provider.hpp`) is the `ModelProvider` equivalent; `net::Connector` is the closest thing to a `Channel`/`Peripheral` abstraction; `ai::ToolDefinition`/`ToolCall` is the Tool ABI | **Partial** — `ModelProvider` now exists as a real interface (Phase 1, done); `Connector` still covers what ZeroClaw splits into `Channel`+`Peripheral`; no `Memory`/`Observer` trait abstractions (though `MemoryStore` now exists as a concrete class, see `zeroclaw-memory` below) |
-| `zeroclaw-providers` | `droidcli-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai::ModelProvider` interface + `ai::OllamaProvider` (`src/ai/model_provider.{hpp,cpp}`, adapting the tested `ai/ollama_client.cpp`) | **Have the abstraction, one implementation** — `agent_turn` (`cli/host.cpp`) is coded against `ai::ModelProvider`, not Ollama directly (Phase 1, done); adding Anthropic/OpenAI means implementing the interface, no router/retry wrapper yet since there's nothing to route between |
+| `zeroclaw-providers` | `droidcli-providers` | LLM client impls (Anthropic/OpenAI/Ollama/…) + hint router + retry | `ai::ModelProvider` interface + `ai::OllamaProvider`/`ai::AnthropicProvider` (`src/ai/model_provider.{hpp,cpp}`, adapting the tested `ai/ollama_client.cpp`/`ai/anthropic_client.cpp`) | **Have the abstraction, two implementations** — `agent_turn` (`cli/host.cpp`) is coded against `ai::ModelProvider`, not Ollama directly (Phase 1); Anthropic added as a second concrete provider, selected at runtime via `--provider` (Phase 32); still no router/retry-across-providers wrapper, since `agent_turn` always runs against exactly one configured provider per instance, not a pool to route between |
 | `zeroclaw-channels` | `droidcli-channels` *(planned, Phase 4 - not started)* | 30+ messaging integrations (Discord, Slack, Telegram, …) | None | **Missing entirely** — `Connector` generalizes the concept but nothing implements a messaging-channel connector yet |
 | `zeroclaw-gateway` | `droidcli-gateway` | HTTP/WebSocket gateway, web dashboard, webhook ingress | `tools::MiniHttpServer` + `cli/http_mount.cpp` | **Partial** — REST exists; no WebSocket, no dashboard UI, webhook auth is the same bearer-token gate as everything else |
 | `zeroclaw-tools` | `droidcli-tools` | Callable tool implementations (browser, HTTP, PDF, hardware probes) | `filesystem_tools.cpp`, `command_runner.cpp`, `window_list.cpp`, `app_index.cpp`, `intent/open_intent.cpp`, `ffmpeg_tool.cpp`, `system_info.cpp` | **Have**, functionally — not split into a separate module boundary, all linked straight into `cli/`/`src/`. `system_info.cpp` is droidcli's environment-grounding tool (OS, architecture, real Desktop path via the Windows Known Folder API - Phase 7, done) - the ZeroClaw comparison doesn't have a named equivalent for "know what machine you're actually on," but it's the same self-contained-capability shape as every other tool here |
@@ -776,7 +844,7 @@ vocabulary, not a claim that droidcli is secretly an 18-target build.
 | `zeroclaw-memory` | `droidcli-memory` | Conversation memory, embeddings, vector retrieval | `MemoryStore` (`cli/memory_store.{hpp,cpp}`, SQLite-backed) + `agent_transcript_` (in-process working copy) | **Have durability/queryability + procedural memory, no semantic recall** — every message is persisted per-session and survives a restart (Phase 2, done, verified: kill/restart droidcli, `GET /api/agent/history?session_id=...` still returns the prior turn); the same database also now holds `command_lessons` - model-recorded "this broke, this fixed it" pairs the agent can search before repeating a past mistake (Phase 8, done) - a form of procedural/lessons-learned memory, distinct from conversation history but living in the same store; still no embeddings, no vector retrieval - deliberately out of scope, see "Chronological hardening log" below |
 | `zeroclaw-plugins` | — | Dynamic plugin loading | None | **Missing** — deliberately: `AGENTS.md` keeps capabilities as native `DroidHost` methods rather than a loadable-plugin surface |
 | `zeroclaw-hardware`, `aardvark-sys`, `robot-kit` | `droidcli-hardware` *(proposed — see "Hardware awareness" below, not yet built)* | GPIO/I2C/SPI/USB, specialized hardware | None | **Under discussion, scoped narrower than the ZeroClaw crate** — read-only local hardware/environment enumeration (what's plugged in, where this machine is), explicitly not GPIO/robotics control; see the new section below for why the original "not planned" verdict is being revisited for a narrower slice |
-| `zeroclaw-infra` | `droidcli-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `db/droidcli_state.json` (flat file, connector persistence), `logs/log.txt` | **Partial** — SQLite session backend now exists (Phase 2, done); a throttled watchdog now exists too (`DroidHost::tick_watchdog()`, Phase 9 - folded into the existing poll loop rather than a separate debouncer/thread abstraction) |
+| `zeroclaw-infra` | `droidcli-infra` | SQLite session backend, debouncers, stall watchdog | `MemoryStore` (SQLite, see `zeroclaw-memory`), `db/droidcli_state.json`/`db/droidcli_settings.json` (flat files, connector/settings persistence), `logs/log.jsonl`, `windows_service` | **Partial** — SQLite session backend (Phase 2); a throttled watchdog (`DroidHost::tick_watchdog()`, Phase 9 - folded into the existing poll loop rather than a separate debouncer/thread abstraction); a real Windows Service entry point so the process itself can survive a reboot/logoff (Phase 34) |
 | `zeroclaw-log` | `droidcli-log` | Structured JSONL logging, attribution, `record!`/`scope!` macros, Observer bridge | `DroidHost::append_app_log()` + `logs/log.jsonl` | **Have JSONL + partial attribution** — one JSON object per line, `session_id` attribution on `"chat"`-channel entries (Phase 3, done); no `record!`/`scope!`-equivalent macros (C++ has no direct analog), no Observer bridge |
 | `zeroclaw-spawn` | `droidcli-spawn` | Sanctioned `tokio::spawn` wrapper with attribution propagation | `core::spawn()` (`src/core/spawn.hpp`/`.cpp`) + `DroidHost::log_thread_event` | **Have** (Phase 5, done) — named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." into `logs/log.jsonl` under the `"thread"` channel; used by `cli/tui.cpp`'s `poller` and `chat_worker`. Not a thread pool/scheduler, same one-thread-in-one-thread-out semantics as a bare `std::thread` |
 | `zeroclaw-macros` | — | Derive macros for config/tool registration | N/A | **N/A** — different language; C++ has no derive-macro equivalent, tool registration is the manual `agent_tool_definitions()` list instead |
@@ -3221,6 +3289,224 @@ exactly as given (not path-ified), and a relative `"tools\notepad.exe"`
 correctly expanded to a full absolute path - confirming the narrower
 `open_application` branch's "only rewrite when it's actually a path"
 condition works as intended.
+
+### Phase 41 — The Windows execution ruleset: trust-ordered resolution, verified before every launch ✅ implemented
+
+**Goal:** Phase 40 added transparency (`resolved_path`, `resolution_source`)
+but didn't fix the actual resolution *order* bug it had just diagnosed.
+`DroidHost::open_application` called `launch_application(path_or_name, ...)`
+- App Paths registry lookup, then a **blind** CreateProcess bare-name
+attempt (letting the OS search its own directory, cwd, system directories,
+PATH with zero verification) - as its *first* step. If that blind search
+coincidentally matched *anything*, `launched:true` came back before the
+installed-apps index or droidcli's own curated Windows-locations table (both
+strictly more trustworthy) ever got a chance to run. This is exactly how
+`open_application("Memory")` reported success while giving no way to
+confirm what had actually launched. Explicit ask: formalize a Windows
+execution ruleset - resolve to a real, verified, full path before ever
+calling `CreateProcess`, in a fixed trust order, and make that ruleset
+something this codebase treats as a stable contract, not code that
+casually changes shape.
+
+**What shipped:**
+
+- **`DroidHost::open_application`'s resolution is now a single, explicit,
+  trust-ordered pipeline** (`cli/host.cpp`), replacing the old
+  "call `launch_application`, catch what its own internal blind search
+  happens to find, then try two more trustworthy sources only if that
+  failed" shape:
+  1. `given_path` - the caller already supplied a path (`looks_like_path`);
+     honored exactly as given, no re-resolution.
+  2. `app_paths_registry` - `resolve_app_paths_registry` (now exported from
+     `command_runner.hpp`, was previously local to `launch_application`).
+  3. `installed_apps_index` - `find_installed_app_match` against the
+     startup-scanned Add/Remove Programs index.
+  4. `windows_known_location` - `find_well_known_windows_target` (Phase 21/38),
+     further resolved to a full absolute path via `which_executable` rather
+     than left as a bare name like `"taskmgr.exe"`.
+  5. `path_search` - **last resort only**: a *verified* PATH search
+     (`which_executable`, which checks the candidate file actually exists)
+     rather than a blind, unverified `CreateProcess` bare-name gamble.
+  6. **Nothing resolved → outright rejection**, before `CreateProcess` is
+     ever called - `resolution_source` stays empty, `launched` stays
+     `false`, and the error explicitly tells the caller to ask the user for
+     the exact name/path rather than guessing again. No tier below "verified
+     to exist" is ever attempted.
+- **`resolution_source` in the response** names exactly which tier matched -
+  the same "report what really happened" discipline as `resolved_path`
+  (Phase 40), now covering *how* something was found, not just *what* was
+  launched.
+- **The `open_application` tool description** was rewritten to state the
+  trust order explicitly and tell the model an unresolved name is rejected
+  outright, not attempted blindly - reinforcing the same discipline at the
+  model-facing layer, not just the implementation.
+- See the new **"Windows execution ruleset"** section immediately below -
+  this phase's actual deliverable is that section being a real, standing
+  contract this repository treats as stable, not just a phase-log entry
+  describing a one-off fix.
+
+**Verified:** `ctest` 14/14 (host-tier resolution logic, no `src/` module
+touched). Live-probed the exact incident end-to-end against a running
+instance: `POST /api/open {"path_or_name":"Memory"}` now returns
+`"resolution_source":"windows_known_location"`,
+`"resolved_path":"C:\\Windows\\System32\\Taskmgr.exe"` - the real Task
+Manager, not an unverifiable guess. Also probed a legitimate installed app
+by bare name (`"notepad"` → `resolution_source":"app_paths_registry"`,
+resolved to the Windows Store package path) and a genuinely nonexistent name
+(`"totally made up nonsense xyz123"` → clean `"ok":false` rejection with no
+process spawned at all, confirmed via the error message and no PID).
+
+### Phase 42 — Never propose an unresolvable action ✅ implemented
+
+**Goal:** Phase 41 made execution-time resolution trust-ordered and
+verified, but resolution still only ran *after* a human approved the call -
+`DroidHost::open_application` (the resolver) is only ever reached once
+`agent_tool_decision` executes an approved `open_application` call.
+`run_agent_tool_loop`'s approval gate (`tool_call_requires_approval`) shows
+the model's raw, unverified `path_or_name` in the yes/no prompt and only
+finds out whether it actually resolves to anything real *after* the human
+says yes. Explicit ask: the proposal itself should never reference something
+that doesn't exist, and an approved call should never fail.
+
+**What shipped:**
+
+- **`DroidHost::resolve_open_application_target`** - Phase 41's resolution
+  logic extracted out of `open_application()` into its own method, returning
+  a `ResolvedLaunchTarget` (`resolved`, `target`, `effective_args`, `source`,
+  `error_message`). One implementation, shared by two call sites (below) -
+  they can never resolve the same input differently.
+- **`DroidHost::precheck_and_resolve_gated_call`** runs at *both* points
+  `run_agent_tool_loop` checks `tool_call_requires_approval` (the
+  `resume_calls` resumption path and the fresh-hop path), strictly *before*
+  a gated call is ever turned into a `pending_tool_call_`/shown to the
+  human. For `open_application` specifically:
+  - **Resolves successfully** → rewrites the call's `arguments_json` in
+    place to the fully-resolved, already-verified-to-exist target before
+    the approval prompt is built. What the human approves and what actually
+    executes are now the exact same, pre-verified string - approving it
+    cannot fail for a resolution reason (it can still fail for something
+    outside droidcli's control - the app crashing on launch, a permissions
+    issue - but never for "this name didn't resolve to anything").
+  - **Resolves to nothing** → the approval prompt is never shown at all.
+    The call is recorded as an immediately-failed action (same JSON shape
+    `open_application()` itself would have returned) and the loop
+    continues - the model sees the failure and, since `open_application`
+    was added to `kRetriableTools` in this same phase, gets the same "you
+    have enough information, retry now" push `run_command`/the filesystem
+    tools already get (Phase 12/23), pointed at `list_windows_locations`/
+    `find_application` by the error message itself. A doomed guess never
+    reaches the human as a decision to make.
+  - Every other tool is a no-op passthrough - this precheck is
+    `open_application`-specific by design, not a generic gate.
+
+**Verified:** `ctest` 14/14 (no `src/` module touched). Live-probed
+end-to-end against a running instance with a real local Ollama model: asked
+it to call `open_application` with `path_or_name:"Memory"` - the resulting
+approval prompt already showed the fully-resolved
+`"C:\\Windows\\system32\\taskmgr.exe"`, not the bare guess; approving it
+launched the real Task Manager (PID confirmed, `resolution_source:"given_path"`
+on the now-pre-resolved rewrite). Separately asked it to open
+`"xyzNonexistentApp123"` - confirmed **no `pending_tool_call` ever appeared
+in the response at all**: the call failed immediately with
+`resolution_source:""` and the real "could not be resolved" error, and the
+turn continued without ever asking a human to approve something guaranteed
+to fail.
+
+---
+
+## Windows execution ruleset
+
+**This section is the canonical contract for how droidcli launches anything
+on Windows - a GUI application, a built-in Windows panel/Settings page, or a
+shell command. Treat it as stable: a change here should be rare, deliberate,
+and update this section in the same commit, not just the code.** The
+concrete failure mode every rule below exists to prevent is droidcli
+launching something other than what the user actually asked for while still
+reporting success - see Phase 40/41 above for the incident that forced this
+to be written down explicitly rather than left as implicit behavior spread
+across `cli/command_runner.cpp` and `cli/host.cpp`.
+
+### The rules
+
+1. **Never call `CreateProcess` (or any process-spawning API) with an
+   unresolved bare name.** Every launch target must first be resolved to a
+   real, verified path - "verified" meaning either the resolution source
+   itself is inherently trustworthy (the caller gave an explicit path, the
+   Windows App Paths registry, droidcli's own startup-scanned installed-apps
+   index) or the candidate's existence was actually checked on disk
+   (`which_executable`'s PATH search, `fs::exists`). The OS's own implicit
+   bare-name search (calling process's directory → cwd → system
+   directories → PATH, all unverified by droidcli) is never allowed to run
+   *first* - see rule 2.
+2. **Resolution is trust-ordered, not first-match.** The order, from most to
+   least trustworthy, is: an explicit path the caller already gave → the
+   Windows App Paths registry → droidcli's own installed-apps index →
+   droidcli's own curated built-in-Windows-locations table
+   (`list_windows_locations`) → a verified PATH search, as an explicit last
+   resort. A more specific, more curated source always gets first refusal
+   over a more generic one - a coincidental PATH match must never pre-empt a
+   real installed app or a known Windows panel. See
+   `DroidHost::open_application` (`cli/host.cpp`) for the implementation of
+   this exact order.
+3. **If nothing resolves, fail outright - never guess.** An unresolved bare
+   name is a clean, explicit error (`resolution_source` empty, `launched:false`,
+   a message telling the caller to ask the user for the exact name or full
+   path), not an attempt with the OS's own unverified search as a hope-it-works
+   fallback. A false negative here (refusing something that might have
+   worked) is always safe; a false positive (launching the wrong thing while
+   reporting success) is the actual failure mode this rule exists to prevent.
+4. **Every successful launch reports what actually happened, not what was
+   guessed.** `resolved_path` (Phase 40, `QueryFullProcessImageNameA` queried
+   back from the live process handle) and `resolution_source` (Phase 41) are
+   both present on every success - a caller (human or model) should never
+   have to trust an echo of its own input as proof of what ran.
+5. **A real path (relative or absolute, given directly) is honored exactly
+   as given, not re-resolved against the trust chain above.** The caller
+   already specified where - matches the same "any directory information at
+   all is left untouched" discipline the filesystem tools use (Phase 20).
+6. **A command needing real shell features (pipes, redirects, env var
+   expansion) goes through `run_command`'s `via_shell=true` (the default,
+   routing through `cmd.exe /c`); a command that's just "run this program
+   with these arguments" and needs no shell features uses `via_shell=false`
+   (`CreateProcess`'s own argv-style parsing) instead** - see Phase 7's
+   incident (a `cmd.exe`-mangled ffmpeg filter expression containing nested
+   quotes) for why routing a quote-sensitive command through `cmd.exe`'s own
+   re-tokenizing grammar is a real, observed corruption risk, not a
+   theoretical one. `run_ffmpeg` is the existing precedent
+   (`cli/ffmpeg_tool.cpp`); apply the same judgment to any new command-shaped
+   tool rather than defaulting to shell execution out of habit.
+7. **Filesystem mutations (`write_file`, `copy_file`, `move_path`,
+   `delete_file`, `create_directory`) never go through the command line at
+   all** - they call `std::filesystem`/Win32 file APIs directly
+   (`cli/filesystem_tools.cpp`), so there is no shell-quoting surface for
+   this category of operation to begin with. This ruleset's trust-ordering
+   concerns (rules 1-3) are specific to *process launches* (`open_application`,
+   `run_command`, `run_ffmpeg`); they don't apply to file I/O, which has its
+   own, separate guard layer (`src/reliability/path_guards.hpp` - placeholder-path
+   rejection, invented-Desktop-path rejection, ground-truth post-write
+   verification - see the "Agent-turn reliability" table in "Algorithms
+   reference" below).
+
+### Where this is enforced (defense in depth, not one checkpoint)
+
+| Layer | What it does | Where |
+|---|---|---|
+| Deterministic recognition | A high-confidence request shape ("open the memory panel") resolves to a real Windows target *before the model is ever asked to decide* - no LLM guess enters the picture at all for the shapes this covers. | `src/intent/open_intent.cpp`, `find_well_known_windows_target` (`cli/host.cpp`) |
+| Pre-approval resolution (Phase 42) | Runs the full trust-ordered resolution *before* a gated call is ever shown to a human as a yes/no - rewrites the proposal to the already-verified target on success, or fails immediately (no prompt at all) if nothing resolves. The human never approves a proposal that references something that doesn't exist. | `DroidHost::precheck_and_resolve_gated_call` (`cli/host.cpp`) |
+| Resolution (this ruleset) | Rules 1-3 above - trust-ordered, verified-or-refused, never a blind guess. Shared by the pre-approval precheck and execution itself, so they can't resolve the same input differently. | `DroidHost::resolve_open_application_target` (`cli/host.cpp`) |
+| Tool-facing documentation | The `open_application`/`run_command`/`run_ffmpeg` tool descriptions state the trust order and the "ask, don't guess" rule explicitly, so a model that *isn't* caught by the deterministic layer is still told the same discipline. | `agent_tool_definitions()` (`cli/host.cpp`) |
+| Human-facing transparency | The approval prompt shows a full, resolved path when one was given (Phase 35/40), not a bare guess a human can't verify at a glance. | `display_arguments_with_full_paths` (`cli/host.cpp`) |
+| Post-execution truth | `resolved_path`/`resolution_source` report what actually ran, independent of what was asked for - the last line of defense if every earlier layer still let something surprising through. | `LaunchAppResult` (`cli/command_runner.hpp`), `DroidHost::open_application` |
+| Self-correction on failure | An `open_application` failure (including a pre-approval resolution failure, Phase 42) is a retriable-tool failure - the model gets pushed to retry with a corrected, real name instead of stalling or asking the user again. | `kRetriableTools` (`cli/host.cpp`) |
+| Regression coverage | `tests/intent_test.cpp`/`tests/path_guards_test.cpp` lock in the pure-logic pieces (courtesy-phrase stripping, path-guard heuristics) `ctest` still be run after any change touching this area. | `tests/` |
+
+None of these layers alone would have caught the `"Memory"` incident - the
+deterministic layer didn't recognize that exact phrasing (fixed separately
+in Phase 40), and there was no resolution-order enforcement at all before
+this phase. That's the actual argument for keeping all of them, not
+collapsing to "just fix the resolver": a future gap in one layer (a phrasing
+the deterministic recognizer misses, a tool description a smaller model
+doesn't follow) is still caught by the layers below it.
 
 ---
 

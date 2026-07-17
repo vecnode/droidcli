@@ -52,7 +52,7 @@ private:
 	int socket_handle_ = -1;
 	MiniHttpServerOptions options_;
 	droidcli::net::RouteTable routes_;
-	droidcli::ai::LanguageAiRuntime language_ai_;
+	droidcli::ai::LanguageRuntime language_ai_;
 	droidcli::ai::LanguageAiTransportCallbacks language_ai_transport_;
 };
 

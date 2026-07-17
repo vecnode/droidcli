@@ -66,6 +66,17 @@ inline bool command_succeeded(const CommandRunResult& result)
 // heuristic.
 bool looks_like_path(const core::String& value);
 
+// Windows' "App Paths" registry mechanism (HKCU/HKLM
+// SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<name>.exe) - the same
+// one Explorer/Win+R use to resolve a bare name like "chrome" to its actual
+// install location even when the app was never added to PATH. Returns an
+// empty string if no match is found in either hive. Exported (was previously
+// local to launch_application's own resolution) so DroidHost::open_application
+// can call it as a standalone, ordered step in the Windows execution ruleset
+// - see "Windows execution ruleset" in ARCHITECTURE.md. A no-op returning
+// empty on a non-Windows build.
+core::String resolve_app_paths_registry(const core::String& name);
+
 struct LaunchAppResult {
 	bool launched = false;
 	int64_t pid = 0;

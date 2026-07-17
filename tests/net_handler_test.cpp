@@ -40,7 +40,7 @@ int main()
 		droidcli::notify::parse_notify_body("{\"message\":\"from_core\"}");
 	assert(parsed.message.text == "from_core");
 
-	droidcli::ai::LanguageAiRuntime runtime;
+	droidcli::ai::LanguageRuntime runtime;
 	runtime.set_system_prompt("test");
 	droidcli::ai::LanguageAiTransportCallbacks transport;
 	transport.post_json = [](const std::string&, const std::string&, const droidcli::core::Array<std::string>&, int32_t& status_code_out, std::string& response_body_out) {

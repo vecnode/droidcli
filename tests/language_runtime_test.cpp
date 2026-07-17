@@ -7,7 +7,7 @@ int main()
 	using namespace droidcli::ai;
 	using droidcli::core::String;
 
-	LanguageAiRuntime runtime;
+	LanguageRuntime runtime;
 	runtime.set_system_prompt("You are a concise assistant.");
 
 	assert(runtime.submit_user_message("What is 2+2?"));

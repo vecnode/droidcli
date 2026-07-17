@@ -56,7 +56,7 @@ connector can be queued as a `Task` (`src/app/tasks.hpp`,
 `app::TaskQueue`) and droidcli's daemon loop drains it via
 `DroidHost::tick_tasks()`.
 
-> **Ollama stays separate.** `ai::LanguageAiRuntime` / `/ai/chat` is an
+> **Ollama stays separate.** `ai::LanguageRuntime` / `/ai/chat` is an
 > ancillary general **text-generation** endpoint (`--ollama-url`, default
 > `:11434`) — it is not a connector, it's built into the core AI seam. Any
 > purpose-trained inference service (the old LoRA adapter, or anything else)
@@ -90,7 +90,7 @@ src/
   notify/      Notify body parsing
   session/     RuntimeSession + status strings
   app/         tasks (persistent task queue)
-  ai/          Ollama text-gen client (incl. tool-calling) + LanguageAiRuntime
+  ai/          Ollama text-gen client (incl. tool-calling) + LanguageRuntime
 cli/           droidcli host: DroidHost (config store, ConnectorRegistry +
                TaskQueue with one-shot scheduling, Ollama wiring, the
                agent_turn tool-calling/reliability loop - see "The agent
@@ -334,6 +334,19 @@ in one change so the core/host/test trio stays in sync:
   If MCP support is ever added, it's droidcli exposing *itself* as an MCP
   server (so external MCP clients can drive it), not the other way around —
   don't add an MCP client dependency chain.
+- **Don't launch a process from an unresolved bare name.** Every process
+  launch (`open_application`, `run_command`, `run_ffmpeg`) must resolve to a
+  real, verified path through the fixed trust order in "Windows execution
+  ruleset" (`ARCHITECTURE.md`) before `CreateProcess` is ever called — never
+  let the OS's own unverified bare-name search (cwd/system dirs/PATH) run
+  before droidcli's own curated sources (App Paths registry, the
+  installed-apps index, `list_windows_locations`) get a chance. If nothing
+  in that order resolves, fail outright with a clear error — never fall
+  through to a blind, unverified attempt in the hope something coincidental
+  on PATH happens to match. This section is meant to be a stable contract:
+  a change to the resolution order is rare and deliberate, and updates
+  `ARCHITECTURE.md`'s "Windows execution ruleset" section in the same
+  commit, not code that drifts out of sync with it.
 
 ## Host configuration
 
