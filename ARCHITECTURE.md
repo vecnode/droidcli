@@ -103,10 +103,14 @@ MCP client. Extend it *with* these properties, not around them:
    unsolved problem (e.g. verifying a model's claim about tool *content*,
    not just whether a tool ran) is recorded as open rather than papered over
    with a narrow regex that wouldn't generalize.
-9. Self-correction is bounded, not unbounded: `run_agent_tool_loop`'s
-   hop/nudge/retry budgets (`kMaxHops`, `kMaxUnverifiedClaimNudges`,
-   `kMaxCommandRetryNudges`, `kMaxEmptyRetries`) all terminate in an honest
-   report, never silent looping.
+9. The model decides at most one action per turn, never both decides and
+   narrates the outcome: `classify_turn()` picks a deterministic match or
+   makes exactly one LLM classification call; execution is always
+   deterministic code, never the model's own say-so; the reply is either a
+   zero-LLM-call template or a second, narrowly-grounded phrasing call shown
+   only the actual result. A failed, retriable action gets exactly one
+   bounded auto-retry (`finish_turn_after_execution()`), never a nudge loop -
+   see "The agent turn" below.
 10. Every process launch resolves through the Windows execution ruleset's
     trust order before it runs, and before a gated call is even shown to a
     human for approval — never an unverified guess (see "Windows execution
@@ -137,8 +141,9 @@ metaagent/                        (repository directory name unchanged)
 │   ├── session/                   RuntimeSession + status strings
 │   ├── app/                       tasks (persistent task queue)
 │   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageRuntime + ModelProvider interface
-│   ├── intent/                    Deterministic "open X" phrase recognizer (no LLM, no I/O)
-│   └── reliability/               Fabrication/path/command guards used by cli/host.cpp (no LLM, no I/O)
+│   ├── intent/                    Deterministic "open X"/pending-command phrase recognizers (no LLM, no I/O)
+│   ├── classify/                  TurnDecision + try_deterministic_classify/try_template_reply (Classify -> Execute -> Phrase, no LLM, no I/O)
+│   └── reliability/               Path/destructive-command guards used by cli/host.cpp (no LLM, no I/O)
 ├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, MemoryStore (SQLite), HTTP route mount, entrypoint
 ├── tools/                         mini_http_server + sync_http_client (raw-socket HTTP, WinHTTP for https://)
 ├── tests/                         One *_test.cpp per core module
@@ -169,7 +174,7 @@ flowchart TB
     end
 
     subgraph L4["Agent"]
-        RUNTIME["droidcli-runtime\nagent_turn / run_agent_tool_loop ·\nConnectorRegistry · TaskQueue"]
+        RUNTIME["droidcli-runtime\nagent_turn: classify_turn ·\nexecute_decision_or_pause · phrase_result ·\nConnectorRegistry · TaskQueue"]
         MEMORY["droidcli-memory\nMemoryStore (SQLite)"]
         CONFIG["droidcli-config\nHostConfig · settings_store"]
         RUNTIME --> MEMORY
@@ -257,8 +262,9 @@ rather than being conflated with process/state management.
 | `notify/parse` | Notify body parsing (JSON or text) |
 | `session/types` + `status` | `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
 | `media/decode` + `probe` | FFmpeg-backed decode + probe (host stages the DLLs) |
-| `reliability/*` | `path_guards`/`claim_guards`/`command_guards` - the fabrication/placeholder-path/destructive-command heuristics behind the agent-turn reliability layer (see "Algorithms reference" below) |
+| `reliability/*` | `path_guards`/`command_guards` - the placeholder-path/destructive-command heuristics that validate an already-decided action or path (see "Algorithms reference" below) |
 | `intent/*` | `open_intent` (deterministic "open X" recognizer) and `pending_command` (deterministic "yes" confirms a just-proposed command) - pure string scanning, no LLM, no I/O |
+| `classify/*` | `turn_decision` (`TurnDecision`/`try_deterministic_classify`, composing the two `intent/*` recognizers) and `response_templates` (`try_template_reply`) - the portable half of Classify -> Execute -> Phrase, see "The agent turn" below |
 
 ### `droidcli-runtime` — agent loop, connectors, tasks, spawn attribution
 
@@ -267,7 +273,8 @@ rather than being conflated with process/state management.
 | `net/connector` | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
 | `app/tasks` | **Persistent task queue**: `Task` (incl. `result_json`, one-shot delay, cron-style `recurrence_ms`), `TaskQueue` (enqueue/claim_next/complete/fail/find/list) |
 | `core/spawn` | **Spawn attribution**: `spawn(name, fn, sink)` - named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." via an optional `ThreadEventSink`. `cli/tui.cpp`'s background threads wire the sink to `DroidHost::log_thread_event` |
-| `DroidHost::agent_turn`/`run_agent_tool_loop` (`cli/host.cpp`) | The bounded tool-calling loop itself, against an `ai::ModelProvider`, over a fixed tool set - connectors, tasks, shell commands, app launches, open-window queries, and filesystem primitives - each tool implemented by calling back into `DroidHost`'s own methods, self-contained rather than delegating to another process or MCP server. Every hop is logged (`append_app_log`, `"chat"` channel) and persisted (`record_agent_message`) to `droidcli-memory` |
+| `classify/turn_decision`, `classify/response_templates` | **Classify -> Execute -> Phrase**: `classify::TurnDecision`/`try_deterministic_classify` (wraps `intent::parse_open_intent`/`extract_proposed_command`, pure/portable) and `classify::try_template_reply` (zero-LLM-call phrasing for the common tool results) - see "The agent turn" below |
+| `DroidHost::classify_turn`/`classify_via_llm`/`execute_decision_or_pause`/`finish_turn_after_execution`/`phrase_result`/`phrase_via_llm` (`cli/host.cpp`) | The host-side driver: decide at most one action (a deterministic match, or one `ai::ModelProvider` classification call), run it through the unchanged gate/execution pipeline, one bounded auto-retry on a retriable failure, then phrase the result - never a multi-hop loop where the model both decides and narrates. Every step is logged (`append_app_log`, `"chat"` channel) and persisted (`record_agent_message`) to `droidcli-memory` |
 
 ### `droidcli-providers` — LLM backends
 
@@ -545,83 +552,87 @@ Deliberately minimal: no embeddings, no vector retrieval, no eviction
 policy. Durability (survives a restart) and queryability (`GET
 /api/agent/history`, `GET /api/agent/sessions`) are the whole scope.
 
-### The agent turn (`POST /api/agent/turn`)
+### The agent turn (`POST /api/agent/turn`) — Classify -> Execute -> Phrase
 
-Drives a bounded (`kMaxHops = 9`, `cli/host.cpp`) tool-calling loop against a
-`ai::ModelProvider` (Ollama or Anthropic, selected via
-`HostConfig::ai_provider`): the model sees a fixed tool set and can call any
-of them against this `DroidHost` instance before replying in natural
-language. The tool set is defined once, in
-`DroidHost::agent_tool_definitions()` (`cli/host.cpp`) - `GET
-/api/agent/tools` is its live source of truth (also rendered as the TUI's
-"Agent Tools" panel). Every message added to the transcript is also
-persisted via `MemoryStore` (see "Persistent memory" above).
+The model is never allowed to both *decide an action* and *narrate what
+happened* in the same breath - almost every guard the old multi-hop design
+needed existed to catch it doing exactly that. Instead, each turn is at most
+three steps: **classify** one action (or none), **execute** it through the
+unchanged, fully deterministic gate/resolution pipeline, then **phrase** a
+reply from the actual result - never from the model's own unverified say-so.
 
-Side-effecting tools (anything that writes to disk, runs a shell command, or
-touches a connector/process/task) don't execute the instant the model
-requests them - the loop pauses for human approval first, and every tool
-result carries a uniform `"ok"` contract the model can trust.
+**Classify** (`DroidHost::classify_turn`, `cli/host.cpp`): tries
+`classify::try_deterministic_classify` first (`src/classify/turn_decision.cpp`,
+wraps `intent::parse_open_intent`/`extract_proposed_command`+
+`is_bare_affirmative` - pure string scanning, no LLM call at all). If neither
+recognizer matches, exactly **one** `ai::ModelProvider` call is made
+(`classify_via_llm`) with the full tool set - the model's response is
+reduced to a single decision no matter what it actually returns: the first
+`tool_calls` entry only (any extras are logged and discarded - a structural
+cap, not a request the model has to reliably follow), or a plain-text reply
+if it returned no tool call. The model's own `assistant_message` accompanying
+a tool call is never persisted or shown - there is nothing left for a
+fabricated "I did X" to attach to.
+
+**Execute** (`DroidHost::execute_decision_or_pause`): the decided
+`{tool_name, arguments_json}` goes through the exact same pipeline every
+tool call always has - `tool_call_requires_approval()`'s gate,
+`precheck_and_resolve_gated_call()`/the Windows execution ruleset, then
+`execute_agent_tool()`. A `pending_command` bare-"yes" match skips the gate
+(the user's "yes" to the assistant's own just-proposed command already IS
+the approval); every other decision, deterministic or model-classified,
+pauses for human approval exactly like today if it names a gated tool.
+
+If a retriable tool's execution genuinely fails (`ok:false` on one of
+`kRetriableTools` - `run_command`, `run_ffmpeg`, the filesystem tools,
+`open_application`), `DroidHost::finish_turn_after_execution` makes **one**
+bounded auto-retry: the real error is appended to the transcript and
+`classify_via_llm` is called again (never the deterministic recognizers -
+they'd just recognize the identical shape and fail identically), then
+whatever it decides executes once more, then phrasing happens regardless of
+outcome. A user's explicit *decline* of a gated call never triggers this -
+that's a veto, not a technical failure to correct.
+
+**Phrase** (`DroidHost::phrase_result`): `classify::try_template_reply`
+(`src/classify/response_templates.cpp`) first - a fully deterministic,
+zero-LLM-call sentence built only from the actual result JSON, covering the
+common cases (`open_application`, the file-mutation tools, `write_clipboard`,
+`run_command`/`run_ffmpeg`). If no template matches, `phrase_via_llm` makes a
+second, distinct provider call with **no tools attached** (so it cannot
+decide a new action) and only the ground-truth `result_json` in view, with
+an explicit instruction to state only what that JSON says. Its own
+transport/HTTP failure falls back to a hard-coded generic sentence
+(`generic_result_sentence`) rather than ever dropping the reply.
 
 ```mermaid
 flowchart TD
     Start(["POST /api/agent/turn\nnew user message"]) --> Pending{"Pending gated\ntool call for this\nsession?"}
     Pending -- yes --> Abandon["Abandon it - record a\nsystem note in the transcript"]
-    Abandon --> Deterministic
-    Pending -- no --> Deterministic{"Previous assistant message\nproposed a command AND\nthis message is a bare\n'yes'?"}
+    Abandon --> Classify
+    Pending -- no --> Classify{"classify::try_deterministic_classify\n(open_intent / pending_command)?"}
 
-    Deterministic -- yes --> RunSeeded["Execute the proposed command\ndirectly - bypasses the approval\ngate, the user's 'yes' to the\nassistant's own offer already IS it"]
-    RunSeeded --> HopLoop
+    Classify -- matched --> Decision["TurnDecision"]
+    Classify -- "no match" --> LlmCall["One classify_via_llm call\n(full tool set)"]
+    LlmCall --> LlmResult{"tool_calls\nnon-empty?"}
+    LlmResult -- "yes (take first,\ndiscard rest + prose)" --> Decision
+    LlmResult -- no --> PlainReply["PlainReply -\nassistant_message shown as-is\n(no tool ran, nothing to phrase)"]
 
-    Deterministic -- no --> HopLoop["Hop loop (hop = 0..kMaxHops-1)"]
+    Decision --> Gate{"tool_call_requires_approval?\n(skipped if already_approved -\npending_command's bare 'yes')"}
+    Gate -- yes --> Pause["Pause - return\npending_tool_call\n(POST /api/agent/tool_decision\nresolves it)"]
+    Gate -- no --> Execute["execute_agent_tool()\nrecord result"]
 
-    HopLoop --> Ask["provider.build_request(transcript, tools)\n→ Ollama/Anthropic"]
-    Ask --> Empty{"Empty response?\n(no text, no tool_calls)"}
-    Empty -- "yes, budget left" --> Retry["Retry same hop\n(kMaxEmptyRetries = 2)"]
-    Retry --> Ask
-    Empty -- "yes, exhausted" --> EmptyFinal["ok:true, placeholder text -\nnever surfaced as silence"]
+    Execute --> Failed{"Result ok:false AND\ntool is retriable AND\nnot a user decline?"}
+    Failed -- yes --> RetryClassify["One classify_via_llm retry\n(real error appended to transcript)"]
+    RetryClassify --> RetryResult{"tool_calls\nnon-empty?"}
+    RetryResult -- yes --> RetryExecute["Execute once more -\nno further retries either way"]
+    RetryResult -- no --> RetryPlain["PlainReply from the retry call"]
+    RetryExecute --> Phrase
+    RetryPlain --> Final
+    Failed -- no --> Phrase["phrase_result():\ntry_template_reply,\nelse phrase_via_llm\n(no tools attached)"]
 
-    Empty -- no --> HasTools{"Response has\ntool_calls?"}
-
-    HasTools -- yes --> Gated{"tool_call_requires_approval?\n(run_command, run_ffmpeg,\nwrite_file, open_application,\nlaunch/stop_connector, enqueue_task)"}
-    Gated -- yes --> Pause["Pause - return\npending_tool_call\n(POST /api/agent/tool_decision\nresolves it)"]
-    Gated -- no --> Execute["execute_agent_tool()\nrecord result in transcript"]
-    Execute --> NextHop["hop += 1"]
-    NextHop --> HopLoop
-
-    HasTools -- no --> Fabricated{"Fabrication checks"}
-    Fabricated -- "unverified action claim\n(claim + no successful\ntool call this turn)" --> NudgeClaim["Nudge once\n(kMaxUnverifiedClaimNudges = 1)"]
-    Fabricated -- "leaked role token\n('assistant\\n\\n...')" --> NudgeClaim
-    Fabricated -- "capability denial\n('I can only assist',\n'one command at a time')" --> NudgeDenial["Nudge\n(shares kMaxCommandRetryNudges\nbudget = 3)"]
-    Fabricated -- "last action this turn was\na failed run_command/\nrun_ffmpeg" --> NudgeRetry["Inject the real failure_reason,\ndemand a corrected retry\n(kMaxCommandRetryNudges = 3)"]
-
-    NudgeClaim -- "budget left" --> HopLoop
-    NudgeDenial -- "budget left" --> HopLoop
-    NudgeRetry -- "budget left" --> HopLoop
-
-    NudgeClaim -- exhausted --> Honest["Override with an honest\nrefusal/last-real-error -\nnever pass the fabrication\nor the exhausted retry through"]
-    NudgeDenial -- exhausted --> Honest
-    NudgeRetry -- exhausted --> Honest
-
-    Fabricated -- none matched --> Final["Final assistant text,\nok:true, actions[] logged"]
-    Honest --> Final
-    EmptyFinal --> Final
+    Phrase --> Final["Final assistant text,\nok:true, actions[] logged"]
+    PlainReply --> Final
 ```
-
-The loop is deliberately linear and single-threaded per turn - no
-speculative parallel tool calls, no background continuation after the HTTP
-response returns (a model claiming otherwise is always wrong). Every arrow
-that isn't a straight hop-to-hop transition exists to guard against a
-specific, observed local-model failure mode - see "Algorithms reference"
-below for what each guard actually checks.
-
-**The "Fabrication checks" diamond above only works if every tool's JSON
-carries `"ok"`.** `a_tool_call_already_succeeded_this_turn` (the check that
-protects a truthful "I did it" from being second-guessed) works by scanning
-each action's `result_json` for `"ok":true` - a tool missing that field is
-invisible to it, and a genuinely successful call can get overridden with a
-false "I wasn't able to complete this" as a result. Any new agent tool must
-return `"ok"` as its first field or it silently weakens every guard in this
-diagram, not just its own correctness.
 
 ```sh
 curl -X POST http://127.0.0.1:30080/api/agent/turn \
@@ -643,18 +654,19 @@ Response shape:
 }
 ```
 
-If the provider is disabled or unreachable, or the transcript budget (9
-hops) runs out before a final natural-language reply, the response is still
-valid JSON (`ok:false` with an `error`, or `ok:true` with
-`budget_exhausted:true` and the last assistant text) rather than a crash.
-The model also never gets a blank `"assistant"` field - a genuinely empty
-model response is replaced with a visible placeholder rather than surfaced
-as silence. An `ok:false` response from a failed provider call still
-includes `"session_id"` - the user's message was persisted before the call
-was attempted, so a caller can find it via `GET /api/agent/history` even
-though the turn itself failed. (The two earliest failure paths - missing
-`"message"`, AI disabled entirely - return before any session is touched,
-so they have no `session_id` to report.)
+If the provider is disabled, unreachable, or the classification/retry call
+itself fails at the transport level, the response is still valid JSON
+(`ok:false` with an `error`) rather than a crash - there is no
+`budget_exhausted` field anymore, since there is no hop budget left to
+exhaust (one classification, one execution, at most one retry). The model
+also never gets a blank `"assistant"` field - a genuinely empty
+classification response is replaced with a visible placeholder rather than
+surfaced as silence. An `ok:false` response from a failed provider call
+still includes `"session_id"` - the user's message was persisted before the
+call was attempted, so a caller can find it via `GET /api/agent/history`
+even though the turn itself failed. (The two earliest failure paths -
+missing `"message"`, AI disabled entirely - return before any session is
+touched, so they have no `session_id` to report.)
 
 ### One-shot commands (`POST /api/run`)
 
@@ -914,20 +926,26 @@ Every non-obvious algorithm/heuristic in the codebase, in one place, for
 findability. File/function names are given instead of line numbers, which
 drift too fast in an actively-changing file to stay trustworthy.
 
-### Agent-turn reliability (`cli/host.cpp`, `src/reliability/`)
+### Agent-turn reliability (`cli/host.cpp`, `src/classify/`, `src/reliability/`)
 
-Exists because the local models droidcli runs against are small,
-tool-calling-tuned, and unreliable in specific, reproducible ways. See "The
-agent turn" diagram earlier in this document for how these compose inside
-`DroidHost::run_agent_tool_loop`.
+The old design's guards mostly existed to police the model's own free-form
+narration across an open-ended multi-hop loop - fabricated success claims,
+false capability denial, leaked role tokens. Classify -> Execute -> Phrase
+removes that surface structurally (the model's own prose accompanying a
+tool call is never persisted or shown - see "The agent turn" above) rather
+than detecting it after the fact, so those narration-specific guards
+(`looks_like_unverified_action_claim`, `looks_like_degenerate_role_leak`,
+`looks_like_capability_denial`, `a_tool_call_already_succeeded_this_turn`,
+and the hop/nudge budgets that used to bound retrying them) are gone
+entirely, not just relocated. What's below is what's actually load-bearing
+under the new design.
 
 | Algorithm | Location | What it does |
 |---|---|---|
-| `looks_like_unverified_action_claim` | `claim_guards.cpp` | A claim phrase ("i've ", "successfully", ...) *plus* an action verb, both required - ordinary narration alone doesn't match. |
-| `looks_like_degenerate_role_leak` | `claim_guards.cpp` | Catches a reply that opens with a bare chat-role label ("assistant") standing alone - malformed output, not a claim. |
-| `looks_like_capability_denial` | `claim_guards.cpp` | Matches fixed phrases where the model falsely claims it can't do something it demonstrably can. |
-| `a_tool_call_already_succeeded_this_turn` | `run_agent_tool_loop` (`host.cpp`) | Before trusting a completion claim, requires a *mutating* tool's `ok:true` this turn - a read-only success is never evidence for a completion claim. |
-| Hop/nudge/retry budgets | `run_agent_tool_loop` (`host.cpp`) | `kMaxHops`, `kMaxEmptyRetries`, `kMaxUnverifiedClaimNudges`, `kMaxCommandRetryNudges` - every self-correction path is bounded and terminates in an honest report, never silent looping. |
+| `try_deterministic_classify` | `classify/turn_decision.cpp` | Tries `open_intent`/`pending_command` and maps a match directly to a resolved `{tool_name, arguments_json}` - see "Deterministic bypasses" below. |
+| `classify_via_llm` | `host.cpp` | The one LLM call a turn (or its single retry) ever makes - takes the response's first `tool_calls` entry only, discards any extras and the accompanying `assistant_message` outright. |
+| `try_template_reply` | `classify/response_templates.cpp` | Zero-LLM-call phrasing for the common tool results, built only from the actual `result_json` fields - never invents anything beyond them. |
+| `phrase_via_llm` | `host.cpp` | The phrasing fallback when no template matches - no tools attached (so it can't decide a new action), given only the ground-truth result and told to state only what it says. |
 | `tool_call_requires_approval` | `host.cpp` | The fixed list of side-effecting tools gated behind human approval; read-only tools are excluded. |
 | `substitute_bare_desktop_token` | `path_guards.cpp` | Rewrites a bare `desktop/...` token to the real, OS-resolved Desktop path - position-aware, doesn't touch `"Desktop"` mid-path. |
 | `looks_like_placeholder_path` | `path_guards.cpp` | Rejects a documentation-style invented path (`path/to/`, `username`, `example.txt`) before a filesystem tool touches disk. |
@@ -937,12 +955,15 @@ agent turn" diagram earlier in this document for how these compose inside
 | Post-action ground-truth verification | every mutating tool (`host.cpp`) | An independent re-check via the same OS API confirms a claimed effect actually happened, before the result reaches the model. |
 | `remember_location_json` pre-store check | `host.cpp` | A name → path mapping is only persisted if a live `stat_path()` confirms it's real right now. |
 
-### Deterministic bypasses (`src/intent/`, portable core, no LLM call)
+### Deterministic bypasses (`src/intent/`, `src/classify/`, portable core, no LLM call)
 
 A narrow, high-confidence request shape is recognized by pure string
 scanning instead of trusting the local model's own tool-calling judgment.
-A false negative (falling through to the normal loop) is always safe, so
-recognition stays deliberately narrow.
+A false negative (falling through to a real classification call) is always
+safe, so recognition stays deliberately narrow. Both recognizers below are
+reached through one unified entry point now, `classify::try_deterministic_classify`
+(`classify/turn_decision.cpp`), rather than two separate call sites in
+`host.cpp` the way they used to be.
 
 | Algorithm | Location | What it does |
 |---|---|---|
@@ -989,7 +1010,7 @@ flowchart TB
         direction TB
         DUser["User (TUI or HTTP client)"]
         DHost["DroidHost::agent_turn"]
-        DLoop["run_agent_tool_loop\n(fixed kMaxHops=9,\nfabrication/placeholder/\ndesktop-path guards)"]
+        DLoop["classify_turn -> execute -> phrase\n(one decision per turn,\nplaceholder/desktop-path guards)"]
         DOllama["ai::OllamaProvider\n(chat + tool-calling)"]
         DTools["execute_agent_tool\n(native DroidHost methods -\nfiles, apps, clipboard, connectors)"]
         DVerify["Post-action ground-truth\nverification (stat_path/\nclipboard read-back)"]
@@ -1031,10 +1052,10 @@ flowchart TB
 Candidates worth a deliberate yes/no decision as this diagram keeps
 developing:
 
-1. Make `kMaxHops` a configurable value (per session or per connector),
-   rather than a single hardcoded constant, mirroring the *idea* of
-   OpenClaude's per-agent `maxSteps` without adopting sub-agent routing
-   itself. Not decided yet.
+1. ~~Make `kMaxHops` a configurable value~~ - moot: Classify -> Execute ->
+   Phrase replaced the hop budget entirely with one classification, one
+   execution, and at most one bounded auto-retry per turn - there's no
+   longer a multi-hop budget to make configurable.
 2. A conversation-branch operation on top of the existing `MemoryStore`
    session model (mirroring `--fork-session`'s conversation-only branching,
    not filesystem isolation) - low-risk, additive, no schema change beyond a

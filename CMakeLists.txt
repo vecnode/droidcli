@@ -94,9 +94,13 @@ add_executable(droidcli_pending_command_test tests/pending_command_test.cpp)
 target_link_libraries(droidcli_pending_command_test PRIVATE droidcli_core)
 add_test(NAME pending_command_test COMMAND droidcli_pending_command_test)
 
-add_executable(droidcli_claim_guards_test tests/claim_guards_test.cpp)
-target_link_libraries(droidcli_claim_guards_test PRIVATE droidcli_core)
-add_test(NAME claim_guards_test COMMAND droidcli_claim_guards_test)
+add_executable(droidcli_turn_decision_test tests/turn_decision_test.cpp)
+target_link_libraries(droidcli_turn_decision_test PRIVATE droidcli_core)
+add_test(NAME turn_decision_test COMMAND droidcli_turn_decision_test)
+
+add_executable(droidcli_response_templates_test tests/response_templates_test.cpp)
+target_link_libraries(droidcli_response_templates_test PRIVATE droidcli_core)
+add_test(NAME response_templates_test COMMAND droidcli_response_templates_test)
 
 add_executable(droidcli_path_guards_test tests/path_guards_test.cpp)
 target_link_libraries(droidcli_path_guards_test PRIVATE droidcli_core)

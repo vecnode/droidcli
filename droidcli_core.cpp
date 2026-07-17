@@ -26,8 +26,9 @@
 #include "session/status.cpp"
 #include "intent/open_intent.cpp"
 #include "intent/pending_command.cpp"
-#include "reliability/claim_guards.cpp"
 #include "reliability/command_guards.cpp"
 #include "reliability/path_guards.cpp"
+#include "classify/turn_decision.cpp"
+#include "classify/response_templates.cpp"
 
 #include "initialize.cpp"

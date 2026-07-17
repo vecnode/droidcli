@@ -1,6 +1,7 @@
 #pragma once
 
 #include "droidcli_core.h"
+#include "classify/turn_decision.hpp"
 #include "net/connector.hpp"
 #include "app/tasks.hpp"
 #include "process_manager.hpp"
@@ -166,8 +167,8 @@ public:
 
 	// The model name actually in use right now - config_.ollama_model or
 	// config_.anthropic_model, whichever config_.ai_provider selects (same
-	// logic already used for Phase 30's per-hop telemetry logging in
-	// run_agent_tool_loop). Reflects whatever the settings file resolved to
+	// logic already used for classify_via_llm's per-classification-call
+	// telemetry logging). Reflects whatever the settings file resolved to
 	// at startup (Phase 33) or has been changed to at runtime since (Phase
 	// 36) - "last session's model" and "the current model" are the same
 	// value by construction, not two things to reconcile. Empty only if
@@ -467,8 +468,9 @@ public:
 	// through agent_turn()/agent_tool_decision() - approval-prompt replies,
 	// "Approved."/"Declined."/"Cancelled." banners, clipboard-copy feedback,
 	// new-session/resume banners, and caught-exception messages. Those calls
-	// already log themselves (every "chat" channel entry from run_agent_tool_loop
-	// goes through append_app_log); this covers everything the TUI itself
+	// already log themselves (every "chat" channel entry from classify_turn/
+	// execute_decision_or_pause/finish_turn_after_execution goes through
+	// append_app_log); this covers everything the TUI itself
 	// prints into the chat pane without going through DroidHost first, so the
 	// durable log (logs/log.jsonl, git-ignored - see logs/README.md) and
 	// db/droidcli_memory.sqlite3's history are a complete record of what
@@ -543,20 +545,18 @@ private:
 		core::String result_json;
 	};
 
-	// The single tool call agent_turn()'s loop is currently paused on,
-	// awaiting a decision via agent_tool_decision() - see run_agent_tool_loop.
+	// The single tool call agent_turn()'s classify->execute->phrase pipeline
+	// is currently paused on, awaiting a decision via agent_tool_decision().
 	// Single-slot (not a per-session map) because only one agent_turn/
 	// agent_tool_decision call is ever in flight at a time in this process,
-	// same assumption current_session_id_ already makes.
+	// same assumption current_session_id_ already makes. One decision per
+	// turn now (see classify::TurnDecision), so this is a single ToolCall,
+	// not an array + an index into it the way it was when a hop could
+	// contain several calls.
 	struct PendingAgentToolCall {
 		bool active = false;
 		core::String session_id;
-		int hop = 0;
-		// The full tool_calls list the model returned for `hop`; call_index
-		// is the offset of the call awaiting a decision - everything before
-		// it in this list already executed and is in `actions`.
-		core::Array<ai::ToolCall> tool_calls;
-		size_t call_index = 0;
+		ai::ToolCall decided_call;
 		core::Array<PendingToolActionRecord> actions;
 	};
 
@@ -589,21 +589,104 @@ private:
 	// I/O, no further locking of its own.
 	void persist_current_settings_locked() const;
 
-	// Shared tail of agent_turn() and agent_tool_decision(): drives the
-	// bounded (kMaxHops) tool-calling loop against `provider`/`tools`,
-	// starting at `hop`. resume_calls/resume_call_index/actions let a caller
-	// resume mid-hop after a decision was just made - pass an empty
-	// resume_calls (the default for a fresh agent_turn()) to start hop 0
-	// clean. Pauses and populates pending_tool_call_ instead of executing
-	// the moment it hits a call tool_call_requires_approval() gates.
-	core::String run_agent_tool_loop(
+	// "Classify -> Execute -> Phrase" (see ARCHITECTURE.md's "The agent
+	// turn"): agent_turn()'s actual driver. classify_turn() decides at most
+	// one action for this turn - a
+	// deterministic recognizer match, or exactly one LLM classification call
+	// (classify_via_llm) if neither recognizer fires. execute_decision_or_pause()
+	// runs that decision through the unchanged tool_call_requires_approval/
+	// precheck_and_resolve_gated_call gate. finish_turn_after_execution()
+	// is the shared tail of agent_turn() and agent_tool_decision() once a
+	// decision has actually executed: one bounded auto-retry (via
+	// classify_via_llm, never by re-running the deterministic recognizers)
+	// if the result failed and the tool is retriable, then phrase_result().
+	classify::TurnDecision classify_turn(
+		const core::String& session_id,
+		const core::String& user_message,
+		const core::String& previous_assistant_text,
+		const core::Array<ai::ToolDefinition>& tools,
+		const ai::ModelProvider& provider);
+
+	// The one-LLM-call classification step itself - deterministic recognizers
+	// are not tried here (classify_turn already did, or a retry deliberately
+	// skips them - see finish_turn_after_execution). Takes the response's
+	// first tool_call only if it returned any (discarding the rest, and the
+	// accompanying assistant_message - never shown to the user, this is what
+	// removes the fabrication surface), else a PlainReply from
+	// assistant_message. Never persists its own assistant_message into
+	// agent_transcript_ - the caller records exactly one Assistant message
+	// per turn, whatever text actually ends up shown.
+	classify::TurnDecision classify_via_llm(
 		const core::String& session_id,
 		const core::Array<ai::ToolDefinition>& tools,
+		const ai::ModelProvider& provider);
+
+	// Runs one decided {tool_name, arguments_json} through the exact same
+	// gate every LLM-decided call already goes through. Returns true and
+	// sets out_tool_result if execution completed (appending to `actions`);
+	// returns false and sets out_pending_response if it paused for human
+	// approval instead (pending_tool_call_ already set) - the caller must
+	// return out_pending_response immediately without touching `actions`
+	// further. `already_approved` (true only for a pending_command bare-"yes"
+	// match) skips the gate entirely, exactly like today's behavior.
+	bool execute_decision_or_pause(
+		const core::String& session_id,
+		const core::String& tool_name,
+		const core::String& arguments_json,
+		core::Array<PendingToolActionRecord>& actions,
+		bool already_approved,
+		core::String& out_tool_result,
+		core::String& out_pending_response);
+
+	// Shared tail of agent_turn() and agent_tool_decision() once a decision
+	// has executed: one bounded auto-retry on a retriable tool's failure,
+	// then phrase_result() and the final response JSON.
+	// `allow_retry=false` for a user-declined gated call (agent_tool_decision
+	// with approved=false): a decline is an explicit human veto, not a
+	// technical failure the model has anything to correct - auto-retrying
+	// that would mean asking the model to "fix and try again" something the
+	// user just said no to.
+	core::String finish_turn_after_execution(
+		const core::String& session_id,
+		const core::String& executed_tool_name,
+		const core::String& executed_arguments_json,
+		const core::String& executed_result_json,
+		core::Array<PendingToolActionRecord> actions,
+		const core::Array<ai::ToolDefinition>& tools,
 		const ai::ModelProvider& provider,
-		int hop,
-		core::Array<ai::ToolCall> resume_calls,
-		size_t resume_call_index,
-		core::Array<PendingToolActionRecord> actions);
+		bool allow_retry = true);
+
+	// The "Phrase" step: classify::try_template_reply first (zero LLM calls,
+	// zero fabrication risk for the common cases), else phrase_via_llm.
+	core::String phrase_result(
+		const core::String& tool_name,
+		const core::String& arguments_json,
+		const core::String& result_json,
+		const ai::ModelProvider& provider);
+
+	// A second, distinct ai::ModelProvider call with no tools attached (so
+	// parse_response's tool_calls is guaranteed empty) - given only the
+	// ground-truth result_json and a fixed instruction to phrase it without
+	// claiming anything beyond it. Falls back to generic_result_sentence() on
+	// any transport/HTTP failure rather than ever dropping the reply.
+	core::String phrase_via_llm(
+		const ai::ModelProvider& provider,
+		const core::String& tool_name,
+		const core::String& result_json) const;
+
+	// The generic, zero-LLM-call fallback sentence phrase_via_llm() itself
+	// falls back to if its own call fails - built only from result_json's
+	// "ok"/"error" fields, never a guess.
+	core::String generic_result_sentence(const core::String& result_json) const;
+
+	// Builds the same {"ok":true,"assistant":...,"session_id":...,
+	// "actions":[...]} shape agent_turn()/agent_tool_decision() have always
+	// returned on a completed (non-paused) turn - no "budget_exhausted"
+	// field anymore, since there's no hop budget left to exhaust.
+	core::String build_final_agent_response(
+		const core::String& session_id,
+		const core::String& assistant_text,
+		const core::Array<PendingToolActionRecord>& actions) const;
 
 	// Builds the same-shaped response agent_turn()/agent_tool_decision()
 	// return once they hit a gated call: "ok":true (nothing has failed - the
@@ -724,7 +807,7 @@ private:
 	core::Array<ai::ChatMessage> agent_transcript_;
 
 	// Set only while a gated tool call is awaiting the user's decision - see
-	// PendingAgentToolCall and run_agent_tool_loop.
+	// PendingAgentToolCall and execute_decision_or_pause.
 	PendingAgentToolCall pending_tool_call_;
 
 	// Watchdog state (see tick_watchdog()) - optimistic defaults so a host
