@@ -37,6 +37,15 @@ core::String reply_for_open_application(const core::String& arguments_json, cons
 {
 	if (ok_field(result_json))
 	{
+		// Prefer the friendly Windows-location name ("Display Settings")
+		// over the raw exe+args path when this resolved through that tier -
+		// makes it visible in the reply itself whether this was an app
+		// launch or a Windows panel, not just in the logged result_json.
+		const core::String display_name = field(result_json, "resolved_display_name");
+		if (!display_name.empty())
+		{
+			return "Opened " + display_name + ".";
+		}
 		core::String resolved = field(result_json, "resolved_path");
 		if (resolved.empty())
 		{

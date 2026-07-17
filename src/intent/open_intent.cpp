@@ -1,98 +1,17 @@
 #include "intent/open_intent.hpp"
 
-#include <algorithm>
-#include <cctype>
+#include "intent/phrase_strip.hpp"
 
 namespace droidcli::intent {
 namespace {
-
-core::String to_lower_ascii(const core::String& value)
-{
-	core::String result = value;
-	std::transform(result.begin(), result.end(), result.begin(),
-		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	return result;
-}
-
-core::String trim_ascii(const core::String& value)
-{
-	size_t start = 0;
-	size_t end = value.size();
-	while (start < end && std::isspace(static_cast<unsigned char>(value[start])))
-	{
-		++start;
-	}
-	while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])))
-	{
-		--end;
-	}
-	return value.substr(start, end - start);
-}
-
-bool is_word_char(char c)
-{
-	return std::isalnum(static_cast<unsigned char>(c)) != 0;
-}
-
-// Strips leading courtesy phrasing ("can you ", "please ", "hey ", ...) so
-// the verb check below lines up on the actual request - "can you open
-// notepad" and "open notepad" should be recognized identically.
-core::String strip_leading_courtesy(core::String message)
-{
-	bool stripped = true;
-	while (stripped)
-	{
-		stripped = false;
-		message = trim_ascii(message);
-		const core::String lower_message = to_lower_ascii(message);
-		static const char* kCourtesyPrefixes[] = {
-			"could you please ", "can you please ", "would you please ",
-			"could you ", "can you ", "would you ", "please ", "hey ",
-			// Real-world lead-ins observed in practice - "Ok I want you to
-			// open Blender" should recognize the same intent as "open
-			// Blender" once these are peeled off one at a time (the outer
-			// while loop above re-runs this whole list after each strip, so
-			// "ok " then "i want you to " both fire in turn).
-			"i want you to ", "i would like you to ", "i'd like you to ",
-			"i want to ", "i would like to ", "i'd like to ",
-			// "Ok I basically want you to open X" fell through to the LLM
-			// path the same way the "great "/"now " gap above once did - "i "
-			// alone isn't a prefix (see the multi-word entries above), so an
-			// adverb wedged between "i" and "want" broke the match entirely
-			// rather than just needing one more strip-pass.
-			"i basically want you to ", "i basically want to ",
-			"i really want you to ", "i really want to ",
-			"i just want you to ", "i just want to ",
-			"so, ", "so ", "okay, ", "okay ", "ok, ", "ok ", "well, ", "well ",
-			// Acknowledgement/filler words observed sitting between a courtesy
-			// prefix and the verb in a real transcript - "Ok great can you now
-			// open Blender?" fell through to the (unreliable) LLM path because
-			// neither "great " nor "now " was stripped, leaving "great can you
-			// now open blender?" with no verb at position 0 after the loop gave
-			// up. The outer while loop already re-runs this whole list after
-			// each strip, so "ok " -> "great " -> "can you " -> "now " all peel
-			// off in turn the same way "ok "/"i want you to " already did.
-			"great ", "cool ", "nice ", "awesome ", "sure ", "alright ",
-			"yes ", "yeah ", "now ", "just ", "quickly ", "really "};
-		for (const char* prefix : kCourtesyPrefixes)
-		{
-			const core::String prefix_str(prefix);
-			if (lower_message.rfind(prefix_str, 0) == 0)
-			{
-				message = message.substr(prefix_str.size());
-				stripped = true;
-				break;
-			}
-		}
-	}
-	return message;
-}
 
 // Strips one leading filler word ("the", "a", "an", "up", "this", as in
 // "open up notepad" or "open this thing"), repeated until none match. A
 // filler word with nothing after it ("open the" with no content following
 // "the") clears the target entirely rather than leaving the bare filler
-// behind as a fake app name.
+// behind as a fake app name. App-name-specific, not shared with other
+// recognizers (create_file_intent/create_image_intent have no equivalent
+// need for it).
 core::String strip_leading_filler(core::String target)
 {
 	bool stripped = true;
@@ -112,49 +31,6 @@ core::String strip_leading_filler(core::String target)
 			if (lower_target.rfind(filler_prefix, 0) == 0)
 			{
 				target = trim_ascii(target.substr(filler_prefix.size()));
-				stripped = true;
-				break;
-			}
-		}
-	}
-	return target;
-}
-
-// Strips trailing punctuation and trailing filler phrases ("please",
-// "for me", "now", "right now"), repeated until none match.
-core::String strip_trailing_filler(core::String target)
-{
-	bool stripped = true;
-	while (stripped)
-	{
-		stripped = false;
-		target = trim_ascii(target);
-		while (!target.empty()
-			&& (target.back() == '?' || target.back() == '!' || target.back() == '.' || target.back() == ','))
-		{
-			target.pop_back();
-			stripped = true;
-		}
-		target = trim_ascii(target);
-
-		const core::String lower_target = to_lower_ascii(target);
-		static const char* kTrailingFillers[] = {"please", "for me", "right now", "now"};
-		for (const char* filler : kTrailingFillers)
-		{
-			const core::String filler_str(filler);
-			if (lower_target.size() < filler_str.size())
-			{
-				continue;
-			}
-			const size_t tail_start = lower_target.size() - filler_str.size();
-			if (lower_target.compare(tail_start, filler_str.size(), filler_str) != 0)
-			{
-				continue;
-			}
-			const bool left_ok = tail_start == 0 || !is_word_char(lower_target[tail_start - 1]);
-			if (left_ok)
-			{
-				target = trim_ascii(target.substr(0, tail_start));
 				stripped = true;
 				break;
 			}
