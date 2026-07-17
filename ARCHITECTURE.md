@@ -181,14 +181,16 @@ flowchart TB
         PROVIDERS["droidcli-providers"]
     end
 
-    subgraph L2["Cross-cutting infra"]
+    subgraph LOGL["Log"]
         LOGM["droidcli-log"]
-        INFRA["droidcli-infra"]
     end
 
-    subgraph L1["Foundations"]
-        FOUND["core/types+math · net/json ·\nreliability/* · intent/* ·\nsession/types+status · media/decode+probe"]
+    subgraph L1["Foundations — the OS boundary"]
+        FOUND["core/types+math · net/json ·\nreliability/* · intent/* ·\nsession/types+status · media/decode+probe\n(pure, no real I/O)"]
+        INFRA["droidcli-infra\nProcessManager (Job Object / process group) ·\ndb/*.json flat-file persistence\n(the part that actually touches the OS)"]
     end
+
+    OS[("Operating System\nfilesystem · processes · sockets · registry")]
 
     GATEWAY --> RUNTIME
     TUI --> RUNTIME
@@ -201,6 +203,7 @@ flowchart TB
     RUNTIME -.-> LOGM
     RUNTIME -.-> INFRA
     GATEWAY -.-> LOGM
+    INFRA --> OS
 ```
 
 `droidcli-tui` and `droidcli-gateway` are drawn side by side, not stacked -
@@ -210,10 +213,20 @@ in `Core` alongside `droidcli-runtime`, not in `Services` below it - both
 are state `agent_turn` owns and reads/writes directly (session transcripts,
 command lessons, known locations; host settings and secrets), not a
 callable capability the runtime dispatches out to the way it does with
-`droidcli-tools`/`droidcli-providers`. The dotted edges into
-`droidcli-log`/`droidcli-infra` are deliberate: logging and infra are
-called from multiple layers, not just `Core`, so a single solid arrow would
-misstate it as layer-3-only.
+`droidcli-tools`/`droidcli-providers`.
+
+`droidcli-infra` moved down into `Foundations` rather than sitting alongside
+`droidcli-log`: `Foundations` is where droidcli's own division against the
+real Operating System actually sits, and `droidcli-infra` (Job Object/
+process-group tracking, flat-file state persistence) is the part of
+`Foundations` that crosses that line - everything else in `FOUND` is pure,
+no real socket/process/filesystem I/O (per the Golden rule in `AGENTS.md`),
+which is why only `INFRA` points down to the `Operating System` node.
+`droidcli-log` stays separate, in its own `Log` layer, rather than folded
+into `droidcli-infra` - it's not infrastructure the runtime depends on to
+function, it's a channel every other layer writes into (the dotted edges
+from `droidcli-runtime`/`droidcli-gateway` into it), so it gets its own box
+rather than being conflated with process/state management.
 
 ### Foundations (shared low-level utilities, no `droidcli-xyz` equivalent)
 
