@@ -22,7 +22,7 @@ in `AGENTS.md` — read it first.
   `droidcli_core` (the `droidcli` name is taken by the CLI executable
   target). The local repository directory (`metaagent/`) is unchanged; the
   GitHub repo itself has been renamed to `vecnode/droidcli`.
-- **Ollama stays separate from connectors.** `ai::LanguageAiRuntime`/`/ai/chat`
+- **Ollama stays separate from connectors.** `ai::LanguageRuntime`/`/ai/chat`
   (`--ollama-url`, default `:11434`) is the ancillary text-gen seam, built into
   core — it is not a connector. Any inference service (the old LoRA adapter
   included) is just an ordinary `http_peer` connector now, reached via

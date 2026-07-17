@@ -28,14 +28,11 @@ bool looks_like_path(const core::String& value)
 
 #ifdef _WIN32
 
-namespace {
-
 // Windows' "App Paths" registry mechanism - the same one Explorer/Win+R use
 // to resolve a bare name like "chrome" to its actual install location even
 // when the app was never added to PATH (most GUI app installers register
-// here instead of touching PATH). Checked before falling back to letting
-// CreateProcess do its own bare-name search. Returns an empty string if no
-// match is found in either hive.
+// here instead of touching PATH). Returns an empty string if no match is
+// found in either hive.
 core::String resolve_app_paths_registry(const core::String& name)
 {
 	core::String key_name = name;
@@ -68,8 +65,6 @@ core::String resolve_app_paths_registry(const core::String& name)
 
 	return {};
 }
-
-} // namespace
 
 CommandRunResult run_command_once(
 	const core::String& command,
@@ -295,6 +290,12 @@ LaunchAppResult launch_application(
 }
 
 #else // POSIX
+
+// No Windows App Paths registry equivalent - always empty on this platform.
+core::String resolve_app_paths_registry(const core::String&)
+{
+	return {};
+}
 
 namespace {
 

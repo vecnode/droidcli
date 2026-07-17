@@ -6,7 +6,7 @@
 #include "session/types.hpp"
 
 namespace droidcli::ai {
-class LanguageAiRuntime;
+class LanguageRuntime;
 struct LanguageAiTransportCallbacks;
 } // namespace droidcli::ai
 
@@ -14,7 +14,7 @@ namespace droidcli::net {
 
 struct HandlerContext {
 	session::RuntimeSession session;
-	ai::LanguageAiRuntime* language_ai = nullptr;
+	ai::LanguageRuntime* language_ai = nullptr;
 	const ai::LanguageAiTransportCallbacks* language_ai_transport = nullptr;
 };
 

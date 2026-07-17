@@ -20,6 +20,15 @@ Core capabilities:
 Full design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
  Working in the repo as an agent: [AGENTS.md](./AGENTS.md).
 
+## Philosophy
+
+- Human user ownership it is the foundational constraint.
+- Security-first, with escape hatches follows from local-first.
+- Minimal keeps binary size, dependencies, and surface area small.
+- Provider-agnostic keeps the agent pluggable.
+
+No telemetry. No cloud tenancy. No license server.
+
 ## Build
 
 Requires CMake 3.20+ and Git. [FFmpeg](https://www.ffmpeg.org/) is downloaded automatically on first configure.
@@ -36,4 +45,4 @@ Windows shortcut: `.\build_and_run.bat` (`Debug`/`Release`, `--configure`, `--cl
 
 # License
 
-Licensed under the [Apache 2.0](./LICENSE)  license.
+Licensed under the [Apache 2.0](./LICENSE) license.

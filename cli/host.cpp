@@ -1813,6 +1813,154 @@ core::String DroidHost::run_ffmpeg_json(const core::String& body)
 	return stream.str();
 }
 
+DroidHost::ResolvedLaunchTarget DroidHost::resolve_open_application_target(const core::String& path_or_name, const core::String& args) const
+{
+	// The Windows execution ruleset (see "Windows execution ruleset" in
+	// ARCHITECTURE.md): resolve a bare name against every source droidcli
+	// actually trusts, in trust order, BEFORE ever letting CreateProcess's
+	// own blind bare-name search (calling process's directory, cwd, system
+	// directories, PATH) get a chance to run. This was a real, confirmed
+	// incident: launch_application's OWN internal blind-search fallback
+	// used to be tried FIRST, so if it coincidentally matched *anything* on
+	// the search path, "success" was reported before the installed-apps
+	// index or droidcli's own curated Windows-locations table - both more
+	// specific, more trustworthy matches - ever got a chance to run. A
+	// request for "the Windows panel that shows memory usage" reported
+	// launching "Memory" successfully with no way to confirm what had
+	// actually opened.
+	//
+	// Shared by open_application() (resolves at execution time) and
+	// precheck_and_resolve_gated_call() (resolves BEFORE the approval
+	// prompt is ever shown, so an approved call is guaranteed to succeed) -
+	// one resolution implementation, not two that could drift apart.
+	ResolvedLaunchTarget result;
+	result.target = path_or_name;
+	result.effective_args = args;
+
+	if (looks_like_path(path_or_name))
+	{
+		// The caller already gave a path (relative or absolute) - honored
+		// exactly as given, same "the caller already specified where"
+		// discipline as the filesystem tools (Phase 20/40). Not re-resolved
+		// against any of the tiers below - those are only for bare names.
+		result.resolved = true;
+		result.source = "given_path";
+		return result;
+	}
+
+	const core::String registry_path = resolve_app_paths_registry(path_or_name);
+	if (!registry_path.empty())
+	{
+		result.resolved = true;
+		result.target = registry_path;
+		result.source = "app_paths_registry";
+		return result;
+	}
+
+	core::String indexed_path;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		indexed_path = find_installed_app_match(installed_apps_, path_or_name);
+	}
+	if (!indexed_path.empty())
+	{
+		result.resolved = true;
+		result.target = indexed_path;
+		result.source = "installed_apps_index";
+		return result;
+	}
+
+	WellKnownWindowsTarget windows_target;
+	if (find_well_known_windows_target(path_or_name, windows_target))
+	{
+		// Resolved further to a full absolute path (rather than left as
+		// e.g. "taskmgr.exe") so every successful resolution tier ends in a
+		// real, verified full path, not just the curated ones - "always
+		// launch with a full path", not merely "always launch something
+		// real".
+		const WhichResult which_result = which_executable(windows_target.path_or_name);
+		result.resolved = true;
+		result.target = which_result.ok ? which_result.resolved_path : windows_target.path_or_name;
+		result.source = "windows_known_location";
+		if (result.effective_args.empty())
+		{
+			result.effective_args = windows_target.args;
+		}
+		return result;
+	}
+
+	// Nothing curated matched. Last resort: a *verified* PATH search
+	// (which_executable checks the candidate file actually exists before
+	// returning it) rather than a blind CreateProcess bare-name call that
+	// offers no such check - strictly more verification than the old
+	// behavior, though still the lowest-trust tier, since anything
+	// coincidentally on PATH can still match.
+	const WhichResult which_result = which_executable(path_or_name);
+	if (which_result.ok)
+	{
+		result.resolved = true;
+		result.target = which_result.resolved_path;
+		result.source = "path_search";
+		return result;
+	}
+
+	// Nothing - not App Paths, not the installed-apps index, not droidcli's
+	// own knowledge of Windows, not even a raw PATH search - resolved this
+	// to anything real.
+	result.error_message = "'" + path_or_name + "' could not be resolved to a real, existing "
+		"executable via the Windows App Paths registry, the installed-apps index, droidcli's "
+		"built-in knowledge of Windows locations (call list_windows_locations to see what it "
+		"knows), or a PATH search. Ask the user for the exact executable name or full path "
+		"rather than guessing.";
+	return result;
+}
+
+bool DroidHost::precheck_and_resolve_gated_call(ai::ToolCall& call, core::String& out_result_json) const
+{
+	if (call.name != "open_application")
+	{
+		return true;
+	}
+
+	const core::String path_or_name = net::extract_json_string_field(call.arguments_json, "path_or_name");
+	const core::String args = net::extract_json_string_field(call.arguments_json, "args");
+	const core::String work_dir = net::extract_json_string_field(call.arguments_json, "work_dir");
+
+	if (path_or_name.empty())
+	{
+		// Let the normal execution path produce its existing
+		// "missing path_or_name" error - not this method's concern.
+		return true;
+	}
+
+	const ResolvedLaunchTarget resolved = resolve_open_application_target(path_or_name, args);
+	if (!resolved.resolved)
+	{
+		// Never propose a yes/no for something guaranteed to fail (see
+		// "Never propose an unresolvable action" in ARCHITECTURE.md) - build
+		// the exact same failure shape open_application() itself would
+		// return, so the fabrication guard/retry-nudge machinery downstream
+		// treats it identically to a real, executed failure.
+		out_result_json = "{" + net::json_bool_field("ok", false) + ","
+			+ net::json_bool_field("launched", false) + ","
+			+ "\"pid\":0,"
+			+ net::json_string_field("resolved_path", "") + ","
+			+ net::json_string_field("resolution_source", "") + ","
+			+ net::json_string_field("error", resolved.error_message)
+			+ "}";
+		return false;
+	}
+
+	// Rewrite in place - what the human approves and what actually executes
+	// are now guaranteed to be the exact same, already-verified target.
+	call.arguments_json = "{"
+		+ net::json_string_field("path_or_name", resolved.target) + ","
+		+ net::json_string_field("args", resolved.effective_args) + ","
+		+ net::json_string_field("work_dir", work_dir)
+		+ "}";
+	return true;
+}
+
 core::String DroidHost::open_application(const core::String& body)
 {
 	const core::String path_or_name = net::extract_json_string_field(body, "path_or_name");
@@ -1826,39 +1974,17 @@ core::String DroidHost::open_application(const core::String& body)
 			+ net::json_string_field("error", "missing path_or_name") + "}";
 	}
 
-	// App Paths registry / raw PATH search first (launch_application's own
-	// resolution) - if that fails, fall back to the installed-apps index
-	// (scanned once at startup from the Uninstall/Add-Remove-Programs
-	// registry), which covers apps that never registered themselves on
-	// PATH or in App Paths at all.
-	LaunchAppResult result = launch_application(path_or_name, args, work_dir);
-	if (!result.launched)
+	const ResolvedLaunchTarget resolved = resolve_open_application_target(path_or_name, args);
+	const core::String resolution_source = resolved.source;
+
+	LaunchAppResult result;
+	if (!resolved.resolved)
 	{
-		core::String indexed_path;
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			indexed_path = find_installed_app_match(installed_apps_, path_or_name);
-		}
-		if (!indexed_path.empty())
-		{
-			result = launch_application(indexed_path, args, work_dir);
-		}
+		result.error_message = resolved.error_message;
 	}
-	if (!result.launched)
+	else
 	{
-		// Neither a real installed app nor a raw PATH/App Paths executable -
-		// check droidcli's own built-in knowledge of Windows itself (Recycle
-		// Bin, Settings pages, Control Panel, ...) before giving up. Applies
-		// regardless of how this call arrived (the deterministic quick-open
-		// bypass, or the model calling open_application directly), since both
-		// funnel through this same method. An explicit args the caller
-		// already passed wins over the target table's own args.
-		WellKnownWindowsTarget windows_target;
-		if (find_well_known_windows_target(path_or_name, windows_target))
-		{
-			const core::String effective_args = args.empty() ? windows_target.args : args;
-			result = launch_application(windows_target.path_or_name, effective_args, work_dir);
-		}
+		result = launch_application(resolved.target, resolved.effective_args, work_dir);
 	}
 
 	append_app_log("open", "out", path_or_name, result.launched);
@@ -1880,6 +2006,11 @@ core::String DroidHost::open_application(const core::String& body)
 	// see "Windows app execution transparency" in ARCHITECTURE.md. Empty
 	// when unavailable (a failed launch, or the query itself failing).
 	stream << net::json_string_field("resolved_path", result.resolved_path) << ',';
+	// Which trust tier actually matched path_or_name - "given_path",
+	// "app_paths_registry", "installed_apps_index", "windows_known_location",
+	// "path_search", or empty on outright failure. See "Windows execution
+	// ruleset" in ARCHITECTURE.md.
+	stream << net::json_string_field("resolution_source", resolution_source) << ',';
 	stream << net::json_string_field("error", result.error_message);
 	stream << '}';
 	return stream.str();
@@ -2568,7 +2699,7 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 
 	tools.push_back(ai::ToolDefinition{
 		"open_application",
-		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) OR a built-in Windows location/Settings page (e.g. Recycle Bin, Sound Settings, Control Panel, Task Manager, Device Manager, This PC) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. path_or_name is resolved against the Windows App Paths registry, then PATH, then the installed-apps index (find_application's data source), then droidcli's own built-in knowledge of Windows itself for things that are not installed applications at all (no Add/Remove Programs entry, no discoverable .exe) - just pass the name naturally ('Recycle Bin', 'Sound Settings'), you do not need to know or construct the underlying ms-settings:/shell: target yourself. For a vague/descriptive request ('the panel that shows memory usage', 'the thing for managing disk partitions') call list_windows_locations first and pass back the real name it returns, rather than guessing a path_or_name yourself - a guessed bare word can coincidentally match an unrelated real executable and report success while opening the wrong thing. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches from find_application, or a prior call failed to resolve it), ask the user to confirm rather than guessing. A successful result's \"resolved_path\" is the real path the OS actually launched (not just an echo of path_or_name) - report that (or its filename) back to the user so they know exactly what opened, especially for a loosely-worded request.",
+		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) OR a built-in Windows location/Settings page (e.g. Recycle Bin, Sound Settings, Control Panel, Task Manager, Device Manager, This PC) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. A bare name is resolved in trust order - the Windows App Paths registry, then the installed-apps index (find_application's data source), then droidcli's own built-in knowledge of Windows itself (list_windows_locations) for things that are not installed applications at all, then, only as a last resort, a verified PATH search - just pass the name naturally ('Recycle Bin', 'Sound Settings'), you do not need to know or construct the underlying ms-settings:/shell: target yourself. For a vague/descriptive request ('the panel that shows memory usage', 'the thing for managing disk partitions') call list_windows_locations first and pass back the real name it returns, rather than guessing a path_or_name yourself. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches from find_application, or a prior call failed to resolve it), ask the user to confirm rather than guessing. A successful result's \"resolved_path\" is the real path the OS actually launched (not just an echo of path_or_name), and \"resolution_source\" says which of those tiers matched - report the resolved_path (or its filename) back to the user so they know exactly what opened, especially for a loosely-worded request. An unresolved bare name is rejected outright with a clear error rather than attempted blindly - if you see that error, ask the user for the exact name or full path instead of retrying the same guess.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"path_or_name\":{\"type\":\"string\",\"description\":\"executable name (e.g. 'chrome', 'notepad.exe') or a full path\"},"
 		"\"args\":{\"type\":\"string\",\"description\":\"optional command-line arguments\"},"
@@ -3380,9 +3511,25 @@ core::String DroidHost::run_agent_tool_loop(
 	{
 		for (size_t call_index = resume_call_index; call_index < resume_calls.size(); ++call_index)
 		{
-			const ai::ToolCall& call = resume_calls[call_index];
+			ai::ToolCall& call = resume_calls[call_index];
 			if (tool_call_requires_approval(call.name))
 			{
+				// Never propose a yes/no for an open_application call that's
+				// guaranteed to fail - resolve first (rewriting call in
+				// place on success), and if nothing resolves, skip the
+				// approval prompt entirely and record it as an immediately
+				// failed action instead. See "Never propose an unresolvable
+				// action" in ARCHITECTURE.md.
+				core::String precheck_failure_json;
+				if (!precheck_and_resolve_gated_call(call, precheck_failure_json))
+				{
+					append_app_log("chat", "out",
+						"tool " + call.name + "(" + call.arguments_json + ") -> " + precheck_failure_json, false, session_id);
+					record_agent_message(session_id, ai::ChatRole::Tool, precheck_failure_json);
+					actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, precheck_failure_json});
+					continue;
+				}
+
 				std::lock_guard<std::mutex> lock(mutex_);
 				pending_tool_call_ = PendingAgentToolCall{true, session_id, hop, resume_calls, call_index, actions};
 				return build_pending_tool_call_response(session_id, call, actions);
@@ -3617,7 +3764,15 @@ core::String DroidHost::run_agent_tool_loop(
 				const PendingToolActionRecord& last_action = actions.back();
 				static const char* const kRetriableTools[] = {
 					"run_command", "run_ffmpeg",
-					"read_file", "write_file", "copy_file", "move_path", "delete_file", "create_directory"
+					"read_file", "write_file", "copy_file", "move_path", "delete_file", "create_directory",
+					// Added alongside the pre-approval resolution precheck
+					// (Phase 42) - an unresolved open_application name is
+					// exactly the "model has enough information to fix
+					// itself" shape (the error names the exact tiers that
+					// were tried and points at list_windows_locations/
+					// find_application), the same reasoning that already
+					// applies to the filesystem tools.
+					"open_application"
 				};
 				bool is_retriable_tool = false;
 				for (const char* retriable_tool : kRetriableTools)
@@ -3712,9 +3867,25 @@ core::String DroidHost::run_agent_tool_loop(
 		size_t call_index = 0;
 		for (; call_index < response.tool_calls.size(); ++call_index)
 		{
-			const ai::ToolCall& call = response.tool_calls[call_index];
+			ai::ToolCall& call = response.tool_calls[call_index];
 			if (tool_call_requires_approval(call.name))
 			{
+				// Never propose a yes/no for an open_application call that's
+				// guaranteed to fail - resolve first (rewriting call in
+				// place on success), and if nothing resolves, skip the
+				// approval prompt entirely and record it as an immediately
+				// failed action instead. See "Never propose an unresolvable
+				// action" in ARCHITECTURE.md.
+				core::String precheck_failure_json;
+				if (!precheck_and_resolve_gated_call(call, precheck_failure_json))
+				{
+					append_app_log("chat", "out",
+						"tool " + call.name + "(" + call.arguments_json + ") -> " + precheck_failure_json, false, session_id);
+					record_agent_message(session_id, ai::ChatRole::Tool, precheck_failure_json);
+					actions.push_back(PendingToolActionRecord{call.name, call.arguments_json, precheck_failure_json});
+					continue;
+				}
+
 				std::lock_guard<std::mutex> lock(mutex_);
 				pending_tool_call_ = PendingAgentToolCall{true, session_id, hop, response.tool_calls, call_index, actions};
 				paused = true;

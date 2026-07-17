@@ -18,7 +18,7 @@ struct LanguageAiTransportCallbacks {
 		int32_t& status_code_out, core::String& response_body_out)> post_json;
 };
 
-class LanguageAiRuntime {
+class LanguageRuntime {
 public:
 	void set_ollama_config(const OllamaConfig& config);
 	const OllamaConfig& ollama_config() const { return ollama_config_; }
