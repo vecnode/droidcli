@@ -168,7 +168,7 @@ flowchart TB
         TUI["droidcli-tui\ncli/tui.cpp (FTXUI)"]
     end
 
-    subgraph L4["Core"]
+    subgraph L4["Agent"]
         RUNTIME["droidcli-runtime\nagent_turn / run_agent_tool_loop ·\nConnectorRegistry · TaskQueue"]
         MEMORY["droidcli-memory\nMemoryStore (SQLite)"]
         CONFIG["droidcli-config\nHostConfig · settings_store"]
@@ -186,8 +186,8 @@ flowchart TB
     end
 
     subgraph L1["Foundations — the OS boundary"]
-        FOUND["core/types+math · net/json ·\nreliability/* · intent/* ·\nsession/types+status · media/decode+probe\n(pure, no real I/O)"]
-        INFRA["droidcli-infra\nProcessManager (Job Object / process group) ·\ndb/*.json flat-file persistence\n(the part that actually touches the OS)"]
+        DCORE["droidcli-core\ncore/types+math · net/json ·\nreliability/* · intent/* ·\nsession/types+status · media/decode+probe\n(pure, no real I/O)"]
+        INFRA["droidcli-infra\nProcessManager (Job Object / process group) ·\ndb/*.json flat-file persistence ·\nexecutes every OS-specific command\n(Windows today) on the Agent's behalf"]
     end
 
     OS[("Operating System\nfilesystem · processes · sockets · registry")]
@@ -196,12 +196,12 @@ flowchart TB
     TUI --> RUNTIME
     RUNTIME --> TOOLS
     RUNTIME --> PROVIDERS
-    TOOLS --> FOUND
-    PROVIDERS --> FOUND
-    MEMORY --> FOUND
-    CONFIG --> FOUND
+    TOOLS --> DCORE
+    PROVIDERS --> DCORE
+    MEMORY --> DCORE
+    CONFIG --> DCORE
     RUNTIME -.-> LOGM
-    RUNTIME -.-> INFRA
+    RUNTIME <-.-> INFRA
     GATEWAY -.-> LOGM
     INFRA --> OS
 ```
@@ -209,26 +209,38 @@ flowchart TB
 `droidcli-tui` and `droidcli-gateway` are drawn side by side, not stacked -
 both call into `droidcli-runtime` directly as independent front doors,
 neither goes through the other. `droidcli-memory` and `droidcli-config` sit
-in `Core` alongside `droidcli-runtime`, not in `Services` below it - both
+in `Agent` alongside `droidcli-runtime`, not in `Services` below it - both
 are state `agent_turn` owns and reads/writes directly (session transcripts,
 command lessons, known locations; host settings and secrets), not a
 callable capability the runtime dispatches out to the way it does with
 `droidcli-tools`/`droidcli-providers`.
 
-`droidcli-infra` moved down into `Foundations` rather than sitting alongside
-`droidcli-log`: `Foundations` is where droidcli's own division against the
-real Operating System actually sits, and `droidcli-infra` (Job Object/
-process-group tracking, flat-file state persistence) is the part of
-`Foundations` that crosses that line - everything else in `FOUND` is pure,
-no real socket/process/filesystem I/O (per the Golden rule in `AGENTS.md`),
-which is why only `INFRA` points down to the `Operating System` node.
-`droidcli-log` stays separate, in its own `Log` layer, rather than folded
-into `droidcli-infra` - it's not infrastructure the runtime depends on to
-function, it's a channel every other layer writes into (the dotted edges
-from `droidcli-runtime`/`droidcli-gateway` into it), so it gets its own box
-rather than being conflated with process/state management.
+`Foundations` is where droidcli's own division against the real Operating
+System sits, split into its two halves: `droidcli-core` (the left box) is
+everything pure - no real socket/process/filesystem I/O (per the Golden
+rule in `AGENTS.md`) - while `droidcli-infra` (the right box) is the part
+that actually crosses into the OS. `droidcli-infra` is deliberately the
+*only* module that executes OS-specific commands (Job Object/process-group
+launch and tracking, flat-file state persistence) - currently implemented
+and tested against Windows - and it's a two-way connection to `Agent`, not
+one-way: `droidcli-runtime` tells it to launch/stop a process, and
+`droidcli-infra` reports PID/liveness back, which is why the edge is drawn
+`<-.->` rather than a single arrowhead. `droidcli-log` stays separate, in
+its own `Log` layer, rather than folded into `droidcli-infra` - it's not
+infrastructure the runtime depends on to function, it's a channel every
+other layer writes into (the dotted edges from `droidcli-runtime`/
+`droidcli-gateway` into it), so it gets its own box rather than being
+conflated with process/state management.
 
-### Foundations (shared low-level utilities, no `droidcli-xyz` equivalent)
+> **Naming note:** the `droidcli-core` module in this diagram is a
+> conceptual grouping label (like every other `droidcli-xyz` name on this
+> page), not the same thing as the `droidcli_core` CMake library target /
+> `droidcli_core.h`/`droidcli_core.cpp` umbrella translation unit, which
+> spans *all* of `src/` (see "Repository layout" above). The umbrella
+> library happens to share the name because it predates this module
+> breakdown; don't read `droidcli-core` here as "the whole static library."
+
+### `droidcli-core` — Foundations' pure, portable half
 
 | Module | Role |
 | --- | --- |
@@ -293,11 +305,18 @@ rather than being conflated with process/state management.
 | `http_mount` (`cli/http_mount.cpp`) | Mounts every `droidcli`-specific `/api/*` route onto the router via `CustomRouteFn` |
 | `tools/sync_http_client` | Outbound HTTP/HTTPS (WinHTTP for `https://`, raw sockets for local `http://` peers) - what `ai/model_provider`'s providers actually POST through |
 
-### `droidcli-infra`
+### `droidcli-infra` — the OS-interaction boundary
+
+The one module allowed to execute OS-specific commands - currently
+implemented and tested against Windows (Job Objects), with a POSIX
+process-group path present alongside it. `droidcli-runtime` calls into it
+to launch/stop a process and reads its liveness/PID back - a two-way
+connection, not a fire-and-forget call (see the `<-.->` edge in the
+Modules diagram above).
 
 | Module | Role |
 | --- | --- |
-| `process_manager` | Job Object (Windows) / process-group (POSIX) tracking for any `launched_process` connector, so `stop()` kills the whole tree it spawned |
+| `process_manager` | Job Object (Windows) / process-group (POSIX) tracking for any `launched_process` connector, so `stop()` kills the whole tree it spawned; reports PID + running state back to `DroidHost` via `/api/process/status` and `ConnectorRegistry` liveness checks |
 | `db/droidcli_state.json`, `db/droidcli_settings.json` | Flat-file persistence (connector state, host settings) alongside `memory_store`'s SQLite backend |
 
 ### `droidcli-log`
