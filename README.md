@@ -2,7 +2,7 @@
 
 ![C++](https://img.shields.io/badge/language-C%2B%2B17-00599C?logo=cplusplus&logoColor=white) ![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
-`droidcli` is a library to create agents that execute multimodal tasks, a headless CLI agent daemon.
+`droidcli` is a personal desktop assistant, a CLI and agent daemon.
 
 Core capabilities: 
 - Interactive terminal dashboard [FTXUI](https://github.com/ArthurSonzogni/FTXUI), default mode - chat panel plus live connector/task/log views
