@@ -2004,9 +2004,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		const std::string focus_hint = chat_input->Focused()
 			? "chat focused - Tab/Esc: to connectors   Enter: send   Ctrl+C: quit anytime"
 			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   j/k/arrows: move   y: copy chat   drag borders to resize";
-		const std::string session_line = current_session_id.empty()
+		const std::string active_model = host.active_model_name();
+		const std::string session_line = (current_session_id.empty()
 			? "session: (none yet - starts on your first message)"
-			: "session: " + current_session_id;
+			: "session: " + current_session_id)
+			+ " | model: " + (active_model.empty() ? "none" : active_model);
 		// Light-blue background/dark text on the top status line and bottom
 		// focus-hint line, matching panel_title() above - xflex (X-axis only)
 		// stretches the colored box across the full terminal width without

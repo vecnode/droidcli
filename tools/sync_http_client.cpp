@@ -107,7 +107,8 @@ bool https_request_winhttp(
 	const ParsedHttpUrl& parsed,
 	const core::String& body,
 	int32_t& status_code_out,
-	core::String& response_body_out)
+	core::String& response_body_out,
+	const core::Array<core::String>& extra_headers)
 {
 	bool ok = false;
 
@@ -148,13 +149,16 @@ bool https_request_winhttp(
 		return false;
 	}
 
-	const wchar_t* headers = nullptr;
-	std::wstring content_type_header;
+	std::wstring header_block;
 	if (method == "POST")
 	{
-		content_type_header = L"Content-Type: application/json\r\n";
-		headers = content_type_header.c_str();
+		header_block += L"Content-Type: application/json\r\n";
 	}
+	for (const core::String& extra_header : extra_headers)
+	{
+		header_block += widen_ascii(extra_header) + L"\r\n";
+	}
+	const wchar_t* headers = header_block.empty() ? nullptr : header_block.c_str();
 
 	const BOOL sent = WinHttpSendRequest(
 		request,
@@ -307,7 +311,8 @@ bool sync_http_request(
 	const core::String& url,
 	const core::String& body,
 	int32_t& status_code_out,
-	core::String& response_body_out)
+	core::String& response_body_out,
+	const core::Array<core::String>& extra_headers)
 {
 	status_code_out = 0;
 	response_body_out.clear();
@@ -321,7 +326,7 @@ bool sync_http_request(
 	if (parsed.is_https)
 	{
 #if defined(_WIN32)
-		return https_request_winhttp(method, parsed, body, status_code_out, response_body_out);
+		return https_request_winhttp(method, parsed, body, status_code_out, response_body_out, extra_headers);
 #else
 		// No TLS transport wired up on this platform yet - Ollama and every
 		// connector this codebase talks to today are plain HTTP on
@@ -374,6 +379,10 @@ bool sync_http_request(
 		request += "Content-Type: application/json\r\n";
 		request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
 	}
+	for (const core::String& extra_header : extra_headers)
+	{
+		request += extra_header + "\r\n";
+	}
 	request += "\r\n";
 	if (method == "POST")
 	{
@@ -403,9 +412,10 @@ bool sync_http_post_json(
 	const core::String& url,
 	const core::String& body,
 	int32_t& status_code_out,
-	core::String& response_body_out)
+	core::String& response_body_out,
+	const core::Array<core::String>& extra_headers)
 {
-	return sync_http_request("POST", url, body, status_code_out, response_body_out);
+	return sync_http_request("POST", url, body, status_code_out, response_body_out, extra_headers);
 }
 
 bool sync_http_get(
@@ -413,7 +423,7 @@ bool sync_http_get(
 	int32_t& status_code_out,
 	core::String& response_body_out)
 {
-	return sync_http_request("GET", url, {}, status_code_out, response_body_out);
+	return sync_http_request("GET", url, {}, status_code_out, response_body_out, {});
 }
 
 } // namespace droidcli::tools

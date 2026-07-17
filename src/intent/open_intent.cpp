@@ -55,6 +55,14 @@ core::String strip_leading_courtesy(core::String message)
 			// "ok " then "i want you to " both fire in turn).
 			"i want you to ", "i would like you to ", "i'd like you to ",
 			"i want to ", "i would like to ", "i'd like to ",
+			// "Ok I basically want you to open X" fell through to the LLM
+			// path the same way the "great "/"now " gap above once did - "i "
+			// alone isn't a prefix (see the multi-word entries above), so an
+			// adverb wedged between "i" and "want" broke the match entirely
+			// rather than just needing one more strip-pass.
+			"i basically want you to ", "i basically want to ",
+			"i really want you to ", "i really want to ",
+			"i just want you to ", "i just want to ",
 			"so, ", "so ", "okay, ", "okay ", "ok, ", "ok ", "well, ", "well ",
 			// Acknowledgement/filler words observed sitting between a courtesy
 			// prefix and the verb in a real transcript - "Ok great can you now

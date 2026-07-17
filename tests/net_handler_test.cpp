@@ -43,7 +43,7 @@ int main()
 	droidcli::ai::LanguageAiRuntime runtime;
 	runtime.set_system_prompt("test");
 	droidcli::ai::LanguageAiTransportCallbacks transport;
-	transport.post_json = [](const std::string&, const std::string&, int32_t& status_code_out, std::string& response_body_out) {
+	transport.post_json = [](const std::string&, const std::string&, const droidcli::core::Array<std::string>&, int32_t& status_code_out, std::string& response_body_out) {
 		status_code_out = 200;
 		response_body_out = R"({"message":{"role":"assistant","content":"Hi from Ollama."},"done":true})";
 		return true;

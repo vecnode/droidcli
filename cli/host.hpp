@@ -15,6 +15,7 @@
 
 #include <ctime>
 #include <fstream>
+#include <memory>
 #include <mutex>
 
 namespace droidcli::cli {
@@ -29,6 +30,31 @@ struct HostConfig {
 	bool enable_hardware_scan = false;
 	core::String ollama_url = "http://127.0.0.1:11434";
 	core::String ollama_model = "llama3.2";
+	// Requested on every Ollama chat call (ai::OllamaConfig::num_ctx) so a
+	// long agent-turn transcript can't be silently truncated by Ollama's own
+	// (often smaller) per-model default context window - matches
+	// OpenClaude's own 32768-token default. A knob, not a fixed constant -
+	// see --ollama-num-ctx in cli/droidcli.cpp and "Context window
+	// (num_ctx)" in ARCHITECTURE.md's OpenClaude comparison.
+	int32_t ollama_num_ctx = 32768;
+	// Second ai::ModelProvider (see "Second ModelProvider" in
+	// ARCHITECTURE.md) - "ollama" (default) or "anthropic". Selects which
+	// provider DroidHost::make_model_provider() constructs; the
+	// ollama_url/ollama_model fields above are simply ignored when this is
+	// "anthropic", same as anthropic_api_key/anthropic_model are ignored
+	// when this is "ollama".
+	core::String ai_provider = "ollama";
+	core::String anthropic_api_key;
+	core::String anthropic_model = "claude-3-5-haiku-latest";
+	// Config hardening (see "Config hardening" in ARCHITECTURE.md). Empty by
+	// default (no persistence - e.g. for a test harness that never calls
+	// configure() with a real path); cli/droidcli.cpp's main() sets this to
+	// its own resolved --settings path. When non-empty, DroidHost re-saves
+	// the model/provider fields it owns to this file every time they change
+	// at runtime (update_config/update_ollama_config), not just at process
+	// startup - see "Model/provider changes persist at runtime too" in
+	// ARCHITECTURE.md.
+	core::String settings_path;
 	core::String system_prompt =
 		"You are droidcli, an agent daemon with direct control of this Windows machine. "
 		"You are not a chat-only assistant describing what a user could do - you have tools "
@@ -41,7 +67,10 @@ struct HostConfig {
 		"you to open an app, call open_application with the app name directly; if you aren't "
 		"sure of the exact name first, call find_application to resolve it, then open it - do "
 		"not stop to ask permission for an action the user already requested, only ask when a "
-		"search returns multiple ambiguous matches. Use list_open_windows to check what's "
+		"search returns multiple ambiguous matches. If the user asks what Windows panels/settings/"
+		"locations you can open (or describes one loosely, e.g. 'the thing that shows memory "
+		"usage'), call list_windows_locations and answer from that real list - never guess or "
+		"invent a name. Use list_open_windows to check what's "
 		"already running, run_command for one-shot shell work, run_ffmpeg for media "
 		"transcode/convert/clip/extract/thumbnail work (it resolves the ffmpeg binary for "
 		"you - always pass -y since there's no interactive prompt to answer), and the "
@@ -134,6 +163,17 @@ public:
 	core::String build_network_status_json() const;
 	core::String build_config_json() const;
 	core::String update_config(const core::String& body);
+
+	// The model name actually in use right now - config_.ollama_model or
+	// config_.anthropic_model, whichever config_.ai_provider selects (same
+	// logic already used for Phase 30's per-hop telemetry logging in
+	// run_agent_tool_loop). Reflects whatever the settings file resolved to
+	// at startup (Phase 33) or has been changed to at runtime since (Phase
+	// 36) - "last session's model" and "the current model" are the same
+	// value by construction, not two things to reconcile. Empty only if
+	// config_ was somehow never configured at all (HostConfig's own default
+	// is a real model name, not empty) - the TUI shows "none" for that case.
+	core::String active_model_name() const;
 
 	void on_notify(const core::String& message);
 	core::String build_notify_log_json() const;
@@ -452,12 +492,22 @@ private:
 	// log line can be correlated with a MemoryStore session, but is not
 	// part of the in-memory app_log_/GET /api/app/log shape, which is
 	// unaffected by this parameter.
+	//
+	// extra_json_fields is optional, raw `"key":value` JSON field text (no
+	// leading/trailing comma, no wrapping braces - append_app_log adds the
+	// comma) appended into the same JSONL object. Lets a specific call site
+	// (e.g. the "ollama" channel's per-hop telemetry - see "Ollama
+	// telemetry" in ARCHITECTURE.md) carry structured fields beyond the
+	// fixed summary/success shape without widening that shape for every
+	// other channel. Never reaches the console line or the in-memory
+	// app_log_/GET /api/app/log entry, both of which stay summary-only.
 	void append_app_log(
 		const core::String& channel,
 		const core::String& direction,
 		const core::String& summary,
 		bool success,
-		const core::String& session_id = {});
+		const core::String& session_id = {},
+		const core::String& extra_json_fields = {});
 	static core::String make_log_timestamp();
 	// Full date+time (not just HH:MM:SS like make_log_timestamp) - the
 	// console/in-memory log only ever covers one running session, but
@@ -510,6 +560,35 @@ private:
 		core::Array<PendingToolActionRecord> actions;
 	};
 
+	// Constructs the active ai::ModelProvider from config_.ai_provider -
+	// "ollama" (default) or "anthropic" - so agent_turn()/
+	// agent_tool_decision() each need one call instead of duplicating the
+	// OllamaConfig-building block that used to live at both call sites. A
+	// unique_ptr (not a stack value bound to a reference, the pre-Phase-32
+	// pattern) because the concrete type is now a runtime choice, not fixed
+	// at compile time. See "Second ModelProvider" in ARCHITECTURE.md.
+	std::unique_ptr<ai::ModelProvider> make_model_provider() const;
+
+	// Re-saves the model/provider fields config_ owns (ollama_url,
+	// ollama_model, ai_provider, anthropic_model, anthropic_api_key,
+	// enable_ai, enable_hardware_scan) to config_.settings_path, so a
+	// runtime change (POST /api/config, POST /api/ollama/config, or the
+	// TUI's model picker - all of which call update_config()/
+	// update_ollama_config()) survives a restart the same way a --ollama-model
+	// CLI flag already does (Phase 33). A no-op if settings_path is empty.
+	//
+	// Loads the existing file first and only overlays the fields above -
+	// `port` and `api_token` are left exactly as already on disk, since
+	// DroidHost has no authoritative copy of either (see HostConfig; the
+	// bearer token deliberately never reaches DroidHost at all - only
+	// cli/droidcli.cpp and the HTTP server touch it). This must never
+	// silently blank out an already-persisted encrypted token.
+	//
+	// Must be called with mutex_ already held (matches this file's other
+	// _locked-by-caller helpers) - it only touches config_ and does file
+	// I/O, no further locking of its own.
+	void persist_current_settings_locked() const;
+
 	// Shared tail of agent_turn() and agent_tool_decision(): drives the
 	// bounded (kMaxHops) tool-calling loop against `provider`/`tools`,
 	// starting at `hop`. resume_calls/resume_call_index/actions let a caller
@@ -530,10 +609,29 @@ private:
 	// return once they hit a gated call: "ok":true (nothing has failed - the
 	// turn is just paused) plus "pending_tool_call" naming the call awaiting
 	// a decision, and any "actions" already executed earlier in this turn.
-	static core::String build_pending_tool_call_response(
+	// Not static (unlike before) - now calls display_arguments_with_full_paths,
+	// which needs system_info_.
+	core::String build_pending_tool_call_response(
 		const core::String& session_id,
 		const ai::ToolCall& call,
-		const core::Array<PendingToolActionRecord>& actions_so_far);
+		const core::Array<PendingToolActionRecord>& actions_so_far) const;
+
+	// Returns `arguments_json` with any well-known path field ("path", or
+	// "source_path"/"destination_path" for copy/move) rewritten to a full
+	// absolute path, for display in an approval prompt only - never used for
+	// the arguments a tool actually executes with, so this can't weaken any
+	// existing path-fabrication guard (looks_like_placeholder_path,
+	// looks_like_invented_desktop_path in src/reliability/path_guards.hpp),
+	// which still run unchanged, at execution time, against the original
+	// unmodified arguments_json. A path that already looks like a
+	// placeholder/invented one is deliberately left as-is rather than
+	// absolute-ified, so an obviously-fake path still reads as obviously
+	// fake to the human approving it, not laundered into something that
+	// merely looks more legitimate. run_command/run_ffmpeg (free-form
+	// shell/ffmpeg argument strings, not a single JSON path field) and every
+	// other tool are returned unchanged - see "Full paths in the approval
+	// prompt" in ARCHITECTURE.md.
+	core::String display_arguments_with_full_paths(const core::String& tool_name, const core::String& arguments_json) const;
 
 	// A short, sortable-enough id ("2026-07-15T12-30-00-4f2a") - readable in
 	// logs/history listings without needing a UUID library dependency.

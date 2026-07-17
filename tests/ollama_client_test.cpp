@@ -29,7 +29,19 @@ int main()
 	assert(request.body.find("\"role\":\"system\"") != String::npos);
 	assert(request.body.find("Say hello.") != String::npos);
 	assert(request.body.find("\"stream\":false") != String::npos);
+	assert(request.body.find("\"options\":{") != String::npos);
+	assert(request.body.find("\"num_ctx\":32768") != String::npos);
 	assert(request.body.find("\"temperature\":0.2") != String::npos);
+
+	// num_ctx is sent unconditionally, even with no explicit temperature
+	// (temperature stays opt-in via its -1.0f sentinel; num_ctx is not).
+	OllamaConfig no_temperature_config = config;
+	no_temperature_config.temperature = -1.0f;
+	no_temperature_config.num_ctx = 8192;
+	const OllamaOutboundRequest no_temperature_request = build_ollama_chat_request(no_temperature_config, messages);
+	assert(no_temperature_request.valid);
+	assert(no_temperature_request.body.find("\"num_ctx\":8192") != String::npos);
+	assert(no_temperature_request.body.find("\"temperature\"") == String::npos);
 
 	const OllamaChatResponse ok = parse_ollama_chat_response(
 		200,
@@ -78,6 +90,34 @@ int main()
 
 	// A response with no assistant text but a tool call is not an error.
 	assert(tool_call_response.error_message.empty());
+
+	// Telemetry: Ollama's own generation timing/token counts, parsed from the
+	// top-level fields it appends alongside "message"/"done".
+	const OllamaChatResponse telemetry_response = parse_ollama_chat_response(
+		200,
+		R"({"model":"llama3.2","message":{"role":"assistant","content":"Hi."},)"
+		R"("done":true,"done_reason":"stop","total_duration":1234000000,)"
+		R"("eval_duration":987000000,"prompt_eval_count":42,"eval_count":17})",
+		true);
+	assert(telemetry_response.http_success);
+	assert(telemetry_response.done_reason == "stop");
+	assert(telemetry_response.total_duration_ns == 1234000000);
+	assert(telemetry_response.eval_duration_ns == 987000000);
+	assert(telemetry_response.prompt_eval_count == 42);
+	assert(telemetry_response.eval_count == 17);
+
+	// A response with no telemetry fields at all (older Ollama, or a minimal
+	// mock) leaves them at their zero/empty defaults rather than erroring.
+	const OllamaChatResponse no_telemetry_response = parse_ollama_chat_response(
+		200,
+		R"({"model":"llama3.2","message":{"role":"assistant","content":"Hi."},"done":true})",
+		true);
+	assert(no_telemetry_response.http_success);
+	assert(no_telemetry_response.done_reason.empty());
+	assert(no_telemetry_response.total_duration_ns == 0);
+	assert(no_telemetry_response.eval_duration_ns == 0);
+	assert(no_telemetry_response.prompt_eval_count == 0);
+	assert(no_telemetry_response.eval_count == 0);
 
 	// Tool-role message round trip: build a follow-up request carrying a tool
 	// result message and confirm the wire format matches Ollama's convention.

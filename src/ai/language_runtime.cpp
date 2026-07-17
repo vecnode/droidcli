@@ -144,7 +144,7 @@ bool LanguageAiRuntime::complete_turn(const LanguageAiTransportCallbacks& transp
 
 	int32_t status_code = 0;
 	core::String response_body;
-	const bool transport_ok = transport.post_json(request.url, request.body, status_code, response_body);
+	const bool transport_ok = transport.post_json(request.url, request.body, {}, status_code, response_body);
 	return apply_chat_response(parse_ollama_chat_response(status_code, response_body, transport_ok));
 }
 

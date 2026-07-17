@@ -74,6 +74,17 @@ int main()
 		assert(intent.app_name == "Blender");
 	}
 
+	// Real-world phrasing observed in a third production incident: "Ok I
+	// basically want you to open the memory panel of Window" fell through to
+	// the LLM path because "i " alone isn't a courtesy prefix (only the
+	// multi-word "i want you to " etc. are) - "basically" wedged between "i"
+	// and "want" broke the match the same way "great "/"now " once did above.
+	{
+		const OpenIntent intent = parse_open_intent("Ok I basically want you to open the memory panel of Window");
+		assert(intent.matched);
+		assert(intent.app_name == "memory panel of Window");
+	}
+
 	// "so, open X" and "I'd like to open X" variants.
 	{
 		const OpenIntent intent = parse_open_intent("So, open Chrome");

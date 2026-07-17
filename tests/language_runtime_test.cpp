@@ -31,7 +31,7 @@ int main()
 	assert(runtime.transcript().size() == 3);
 
 	LanguageAiTransportCallbacks transport;
-	transport.post_json = [](const String&, const String&, int32_t& status_code_out, String& response_body_out) {
+	transport.post_json = [](const String&, const String&, const droidcli::core::Array<String>&, int32_t& status_code_out, String& response_body_out) {
 		status_code_out = 200;
 		response_body_out = R"({"message":{"role":"assistant","content":"Done."},"done":true})";
 		return true;

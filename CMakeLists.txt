@@ -70,6 +70,10 @@ add_executable(droidcli_ollama_client_test tests/ollama_client_test.cpp)
 target_link_libraries(droidcli_ollama_client_test PRIVATE droidcli_core)
 add_test(NAME ollama_client_test COMMAND droidcli_ollama_client_test)
 
+add_executable(droidcli_anthropic_client_test tests/anthropic_client_test.cpp)
+target_link_libraries(droidcli_anthropic_client_test PRIVATE droidcli_core)
+add_test(NAME anthropic_client_test COMMAND droidcli_anthropic_client_test)
+
 add_executable(droidcli_language_runtime_test tests/language_runtime_test.cpp)
 target_link_libraries(droidcli_language_runtime_test PRIVATE droidcli_core)
 add_test(NAME language_runtime_test COMMAND droidcli_language_runtime_test)
@@ -140,9 +144,11 @@ add_executable(droidcli
     cli/http_mount.cpp
     cli/memory_store.cpp
     cli/process_manager.cpp
+    cli/settings_store.cpp
     cli/system_info.cpp
     cli/tui.cpp
     cli/window_list.cpp
+    cli/windows_service.cpp
     tools/mini_http_server.cpp
     tools/sync_http_client.cpp
 )
@@ -153,7 +159,10 @@ target_include_directories(droidcli
 )
 target_link_libraries(droidcli PRIVATE droidcli_core droidcli_sqlite3 ftxui::ftxui)
 if(WIN32)
-    target_link_libraries(droidcli PRIVATE ws2_32 winhttp advapi32 ole32 shell32)
+    # advapi32: Service Control Manager (windows_service.cpp) - also the
+    # legacy CryptoAPI, but DPAPI itself (CryptProtectData/CryptUnprotectData,
+    # settings_store.cpp) lives in crypt32, added separately below.
+    target_link_libraries(droidcli PRIVATE ws2_32 winhttp advapi32 crypt32 ole32 shell32)
     target_compile_definitions(droidcli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 

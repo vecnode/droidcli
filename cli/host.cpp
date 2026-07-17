@@ -7,6 +7,7 @@
 #include "reliability/claim_guards.hpp"
 #include "reliability/command_guards.hpp"
 #include "reliability/path_guards.hpp"
+#include "settings_store.hpp"
 #include "tools/sync_http_client.hpp"
 
 #include <algorithm>
@@ -154,6 +155,75 @@ struct WellKnownWindowsTarget
 	core::String args;
 };
 
+struct WellKnownWindowsTargetEntry
+{
+	const char* alias;
+	const char* display_name;
+	const char* path_or_name;
+	const char* args;
+};
+
+// Deliberately widened past the original "one incident, one entry" rule
+// (see the comment above WellKnownWindowsTarget) by direct user request,
+// after a real transcript showed "the Windows panel that shows memory
+// usage" fail: Task Manager was already in this table, but only under the
+// single alias "task manager", and this matcher works by substring
+// containment (see find_well_known_windows_target below) - a description
+// that never contains that literal alias text can never match no matter how
+// obviously it refers to the same thing. The fix here is two-part: more
+// aliases per target (multiple rows sharing the same display_name/
+// path_or_name/args, since WellKnownWindowsTargetEntry only carries one
+// alias each), and more targets, covering the built-in Windows panels a
+// user is likely to ask for by description rather than by their exact
+// Microsoft-assigned name. Still every entry resolves to a real executable +
+// argument CreateProcess can actually launch - see that comment for why no
+// ShellExecute/CLSID machinery is needed. Also the backing data for
+// list_windows_locations (below) - the agent tool that lets the model
+// answer "what Windows panels can you open" from real data instead of
+// guessing, the other half of the same incident (see "Windows panel
+// awareness" in ARCHITECTURE.md).
+static const WellKnownWindowsTargetEntry kWellKnownWindowsTargets[] = {
+	{"recycle bin", "Recycle Bin", "explorer.exe", "shell:RecycleBinFolder"},
+	{"sound settings", "Sound Settings", "explorer.exe", "ms-settings:sound"},
+	{"display settings", "Display Settings", "explorer.exe", "ms-settings:display"},
+	{"network settings", "Network Settings", "explorer.exe", "ms-settings:network"},
+	{"bluetooth settings", "Bluetooth Settings", "explorer.exe", "ms-settings:bluetooth"},
+	{"windows update", "Windows Update", "explorer.exe", "ms-settings:windowsupdate"},
+	{"windows settings", "Windows Settings", "explorer.exe", "ms-settings:"},
+	{"control panel", "Control Panel", "control.exe", ""},
+	{"task manager", "Task Manager", "taskmgr.exe", ""},
+	{"process manager", "Task Manager", "taskmgr.exe", ""},
+	{"memory usage", "Task Manager", "taskmgr.exe", ""},
+	{"memory panel", "Task Manager", "taskmgr.exe", ""},
+	{"cpu usage", "Task Manager", "taskmgr.exe", ""},
+	{"running processes", "Task Manager", "taskmgr.exe", ""},
+	{"resource monitor", "Resource Monitor", "resmon.exe", ""},
+	{"performance monitor", "Performance Monitor", "perfmon.exe", ""},
+	{"device manager", "Device Manager", "mmc.exe", "devmgmt.msc"},
+	{"disk management", "Disk Management", "mmc.exe", "diskmgmt.msc"},
+	{"disk partition", "Disk Management", "mmc.exe", "diskmgmt.msc"},
+	{"partition manager", "Disk Management", "mmc.exe", "diskmgmt.msc"},
+	{"manage disks", "Disk Management", "mmc.exe", "diskmgmt.msc"},
+	{"services", "Services", "mmc.exe", "services.msc"},
+	{"event viewer", "Event Viewer", "eventvwr.exe", ""},
+	{"system information", "System Information", "msinfo32.exe", ""},
+	{"registry editor", "Registry Editor", "regedit.exe", ""},
+	{"system properties", "System Properties", "control.exe", "system"},
+	{"programs and features", "Programs and Features", "control.exe", "appwiz.cpl"},
+	{"network connections", "Network Connections", "control.exe", "ncpa.cpl"},
+	{"power options", "Power Options", "control.exe", "powercfg.cpl"},
+	{"date and time", "Date and Time", "control.exe", "timedate.cpl"},
+	{"storage settings", "Storage Settings", "explorer.exe", "ms-settings:storagesense"},
+	{"about this pc", "About", "explorer.exe", "ms-settings:about"},
+	{"apps and features", "Apps & Features", "explorer.exe", "ms-settings:appsfeatures"},
+	{"windows security", "Windows Security", "explorer.exe", "windowsdefender:"},
+	{"windows defender", "Windows Security", "explorer.exe", "windowsdefender:"},
+	{"printers and scanners", "Printers & Scanners", "explorer.exe", "ms-settings:printers"},
+	{"this pc", "This PC", "explorer.exe", "shell:MyComputerFolder"},
+	{"my computer", "This PC", "explorer.exe", "shell:MyComputerFolder"},
+	{"downloads folder", "Downloads", "explorer.exe", "shell:Downloads"},
+};
+
 bool find_well_known_windows_target(const core::String& query, WellKnownWindowsTarget& out)
 {
 	const core::String normalized_query = normalize_for_match(query);
@@ -162,31 +232,7 @@ bool find_well_known_windows_target(const core::String& query, WellKnownWindowsT
 		return false;
 	}
 
-	struct TargetEntry
-	{
-		const char* alias;
-		const char* display_name;
-		const char* path_or_name;
-		const char* args;
-	};
-	static const TargetEntry kTargets[] = {
-		{"recycle bin", "Recycle Bin", "explorer.exe", "shell:RecycleBinFolder"},
-		{"sound settings", "Sound Settings", "explorer.exe", "ms-settings:sound"},
-		{"display settings", "Display Settings", "explorer.exe", "ms-settings:display"},
-		{"network settings", "Network Settings", "explorer.exe", "ms-settings:network"},
-		{"bluetooth settings", "Bluetooth Settings", "explorer.exe", "ms-settings:bluetooth"},
-		{"windows update", "Windows Update", "explorer.exe", "ms-settings:windowsupdate"},
-		{"windows settings", "Windows Settings", "explorer.exe", "ms-settings:"},
-		{"control panel", "Control Panel", "control.exe", ""},
-		{"task manager", "Task Manager", "taskmgr.exe", ""},
-		{"device manager", "Device Manager", "mmc.exe", "devmgmt.msc"},
-		{"disk management", "Disk Management", "mmc.exe", "diskmgmt.msc"},
-		{"this pc", "This PC", "explorer.exe", "shell:MyComputerFolder"},
-		{"my computer", "This PC", "explorer.exe", "shell:MyComputerFolder"},
-		{"downloads folder", "Downloads", "explorer.exe", "shell:Downloads"},
-	};
-
-	for (const TargetEntry& target : kTargets)
+	for (const WellKnownWindowsTargetEntry& target : kWellKnownWindowsTargets)
 	{
 		const core::String normalized_alias = normalize_for_match(target.alias);
 		if (normalized_alias == normalized_query
@@ -200,6 +246,47 @@ bool find_well_known_windows_target(const core::String& query, WellKnownWindowsT
 		}
 	}
 	return false;
+}
+
+// Backs the list_windows_locations agent tool - every distinct display_name
+// in kWellKnownWindowsTargets, deduplicated (several rows above share one
+// display_name across multiple aliases, e.g. Task Manager). Gives the model
+// real data to answer "what Windows panels/settings can you open" instead
+// of fabricating an answer - see the incident note above
+// kWellKnownWindowsTargets.
+core::String list_well_known_windows_targets_json()
+{
+	core::Array<core::String> seen_names;
+	std::ostringstream stream;
+	stream << '{' << net::json_bool_field("ok", true) << ",\"locations\":[";
+	bool first = true;
+	for (const WellKnownWindowsTargetEntry& target : kWellKnownWindowsTargets)
+	{
+		const core::String display_name = target.display_name;
+		bool duplicate = false;
+		for (const core::String& existing : seen_names)
+		{
+			if (existing == display_name)
+			{
+				duplicate = true;
+				break;
+			}
+		}
+		if (duplicate)
+		{
+			continue;
+		}
+		seen_names.push_back(display_name);
+
+		if (!first)
+		{
+			stream << ',';
+		}
+		first = false;
+		stream << '"' << net::escape_json_string(display_name) << '"';
+	}
+	stream << "]}";
+	return stream.str();
 }
 
 core::Array<core::String> parse_ollama_model_names(const core::String& tags_json)
@@ -298,6 +385,52 @@ bool extract_json_int_field(const core::String& json, const core::String& field_
 	}
 	out_value = std::atoi(json.substr(start, cursor - start).c_str());
 	return true;
+}
+
+// Replaces the value of an existing top-level "field_name":"..." string
+// field in `json` with `new_value`, re-escaped - returns `json` unchanged if
+// the field isn't present or isn't a plain string value. Used to show a
+// resolved full path in an approval prompt without touching any other part
+// of the arguments JSON; see "Full paths in the approval prompt" in
+// ARCHITECTURE.md.
+core::String replace_json_string_field_value(const core::String& json, const core::String& field_name, const core::String& new_value)
+{
+	const core::String needle = "\"" + field_name + "\":";
+	const size_t field_index = json.find(needle);
+	if (field_index == core::String::npos)
+	{
+		return json;
+	}
+
+	size_t cursor = field_index + needle.size();
+	while (cursor < json.size() && (json[cursor] == ' ' || json[cursor] == '\t'))
+	{
+		++cursor;
+	}
+	if (cursor >= json.size() || json[cursor] != '"')
+	{
+		return json;
+	}
+
+	const size_t value_start = cursor;
+	++cursor;
+	while (cursor < json.size())
+	{
+		if (json[cursor] == '\\' && cursor + 1 < json.size())
+		{
+			cursor += 2;
+			continue;
+		}
+		if (json[cursor] == '"')
+		{
+			++cursor;
+			break;
+		}
+		++cursor;
+	}
+	const size_t value_end = cursor;
+
+	return json.substr(0, value_start) + "\"" + net::escape_json_string(new_value) + "\"" + json.substr(value_end);
 }
 
 // Whether the agent-turn loop must pause and get the user's explicit
@@ -469,10 +602,11 @@ void DroidHost::initialize()
 		language_ai_transport_.post_json = [](
 			const core::String& url,
 			const core::String& body,
+			const core::Array<core::String>& headers,
 			int32_t& status_code_out,
 			core::String& response_body_out)
 		{
-			return tools::sync_http_post_json(url, body, status_code_out, response_body_out);
+			return tools::sync_http_post_json(url, body, status_code_out, response_body_out, headers);
 		};
 
 		if (config_.enable_ai)
@@ -482,6 +616,7 @@ void DroidHost::initialize()
 			ollama_config.base_url = config_.ollama_url;
 			ollama_config.model = config_.ollama_model;
 			ollama_config.enabled = true;
+			ollama_config.num_ctx = config_.ollama_num_ctx;
 			language_ai_.set_ollama_config(ollama_config);
 			if (!config_.system_prompt.empty())
 			{
@@ -637,6 +772,12 @@ core::String DroidHost::build_config_json() const
 	return stream.str();
 }
 
+core::String DroidHost::active_model_name() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	return (config_.ai_provider == "anthropic") ? config_.anthropic_model : config_.ollama_model;
+}
+
 core::String DroidHost::update_config(const core::String& body)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
@@ -659,8 +800,10 @@ core::String DroidHost::update_config(const core::String& body)
 		ollama_config.base_url = config_.ollama_url;
 		ollama_config.model = config_.ollama_model;
 		ollama_config.enabled = true;
+		ollama_config.num_ctx = config_.ollama_num_ctx;
 		language_ai_.set_ollama_config(ollama_config);
 	}
+	persist_current_settings_locked();
 
 	std::ostringstream stream;
 	stream << '{';
@@ -677,7 +820,8 @@ void DroidHost::append_app_log(
 	const core::String& direction,
 	const core::String& summary,
 	const bool success,
-	const core::String& session_id)
+	const core::String& session_id,
+	const core::String& extra_json_fields)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	AppLogEntry entry;
@@ -720,6 +864,10 @@ void DroidHost::append_app_log(
 		if (!session_id.empty())
 		{
 			json_line += "," + net::json_string_field("session_id", session_id);
+		}
+		if (!extra_json_fields.empty())
+		{
+			json_line += "," + extra_json_fields;
 		}
 		json_line += "}";
 		log_file_ << json_line << std::endl;
@@ -945,8 +1093,10 @@ core::String DroidHost::update_ollama_config(const core::String& body)
 		ollama_config.base_url = config_.ollama_url;
 		ollama_config.model = config_.ollama_model;
 		ollama_config.enabled = true;
+		ollama_config.num_ctx = config_.ollama_num_ctx;
 		language_ai_.set_ollama_config(ollama_config);
 	}
+	persist_current_settings_locked();
 
 	return "{"
 		+ net::json_bool_field("success", true) + ","
@@ -1725,6 +1875,11 @@ core::String DroidHost::open_application(const core::String& body)
 	stream << net::json_bool_field("ok", result.launched) << ',';
 	stream << net::json_bool_field("launched", result.launched) << ',';
 	stream << "\"pid\":" << result.pid << ',';
+	// The real path the OS actually launched (queried back from the live
+	// process, cli/command_runner.cpp), not just an echo of path_or_name -
+	// see "Windows app execution transparency" in ARCHITECTURE.md. Empty
+	// when unavailable (a failed launch, or the query itself failing).
+	stream << net::json_string_field("resolved_path", result.resolved_path) << ',';
 	stream << net::json_string_field("error", result.error_message);
 	stream << '}';
 	return stream.str();
@@ -2407,8 +2562,13 @@ core::Array<ai::ToolDefinition> DroidHost::agent_tool_definitions() const
 		"{\"type\":\"object\",\"properties\":{}}"});
 
 	tools.push_back(ai::ToolDefinition{
+		"list_windows_locations",
+		"List every built-in Windows panel/location/Settings page droidcli knows how to open by name (Task Manager, Resource Monitor, Performance Monitor, Device Manager, Control Panel, Recycle Bin, Windows Security, etc.) - this is droidcli's own hand-maintained knowledge of Windows itself, separate from the installed-apps index (find_application). Call this when the user asks what you can open, what panels/settings are available, or similar - answer from this real list, never guess or invent one. Takes no arguments.",
+		"{\"type\":\"object\",\"properties\":{}}"});
+
+	tools.push_back(ai::ToolDefinition{
 		"open_application",
-		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) OR a built-in Windows location/Settings page (e.g. Recycle Bin, Sound Settings, Control Panel, Task Manager, Device Manager, This PC) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. path_or_name is resolved against the Windows App Paths registry, then PATH, then the installed-apps index (find_application's data source), then droidcli's own built-in knowledge of Windows itself for things that are not installed applications at all (no Add/Remove Programs entry, no discoverable .exe) - just pass the name naturally ('Recycle Bin', 'Sound Settings'), you do not need to know or construct the underlying ms-settings:/shell: target yourself. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches from find_application, or a prior call failed to resolve it), ask the user to confirm rather than guessing.",
+		"Open/launch a GUI application (e.g. Notepad, a browser, an image viewer) OR a built-in Windows location/Settings page (e.g. Recycle Bin, Sound Settings, Control Panel, Task Manager, Device Manager, This PC) so the user can see and use it. Detached - does not wait for it to close and does not capture output. Use this instead of run_command for opening apps, since run_command waits for the process to exit and GUI apps don't exit on their own. path_or_name is resolved against the Windows App Paths registry, then PATH, then the installed-apps index (find_application's data source), then droidcli's own built-in knowledge of Windows itself for things that are not installed applications at all (no Add/Remove Programs entry, no discoverable .exe) - just pass the name naturally ('Recycle Bin', 'Sound Settings'), you do not need to know or construct the underlying ms-settings:/shell: target yourself. For a vague/descriptive request ('the panel that shows memory usage', 'the thing for managing disk partitions') call list_windows_locations first and pass back the real name it returns, rather than guessing a path_or_name yourself - a guessed bare word can coincidentally match an unrelated real executable and report success while opening the wrong thing. If you're not confident which exact app/path the user means (ambiguous name, multiple plausible matches from find_application, or a prior call failed to resolve it), ask the user to confirm rather than guessing. A successful result's \"resolved_path\" is the real path the OS actually launched (not just an echo of path_or_name) - report that (or its filename) back to the user so they know exactly what opened, especially for a loosely-worded request.",
 		"{\"type\":\"object\",\"properties\":{"
 		"\"path_or_name\":{\"type\":\"string\",\"description\":\"executable name (e.g. 'chrome', 'notepad.exe') or a full path\"},"
 		"\"args\":{\"type\":\"string\",\"description\":\"optional command-line arguments\"},"
@@ -2607,6 +2767,10 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	if (tool_name == "list_open_windows")
 	{
 		return list_open_windows_json();
+	}
+	if (tool_name == "list_windows_locations")
+	{
+		return list_well_known_windows_targets_json();
 	}
 	if (tool_name == "open_application")
 	{
@@ -2877,6 +3041,52 @@ core::String DroidHost::list_known_locations_json() const
 	return stream.str();
 }
 
+std::unique_ptr<ai::ModelProvider> DroidHost::make_model_provider() const
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (config_.ai_provider == "anthropic")
+	{
+		ai::AnthropicConfig anthropic_config;
+		anthropic_config.api_key = config_.anthropic_api_key;
+		anthropic_config.model = config_.anthropic_model;
+		anthropic_config.enabled = true;
+		return std::make_unique<ai::AnthropicProvider>(anthropic_config);
+	}
+
+	ai::OllamaConfig ollama_config;
+	ollama_config.base_url = config_.ollama_url;
+	ollama_config.model = config_.ollama_model;
+	ollama_config.enabled = true;
+	ollama_config.num_ctx = config_.ollama_num_ctx;
+	return std::make_unique<ai::OllamaProvider>(ollama_config);
+}
+
+void DroidHost::persist_current_settings_locked() const
+{
+	if (config_.settings_path.empty())
+	{
+		return;
+	}
+
+	// Load first rather than building from scratch - `port` and `api_token`
+	// have no authoritative source in config_ (see this method's own
+	// declaration comment in host.hpp) and must be carried over exactly as
+	// already on disk, not blanked out.
+	HostSettings settings;
+	load_settings(config_.settings_path, settings);
+
+	settings.enable_ai = config_.enable_ai;
+	settings.enable_hardware_scan = config_.enable_hardware_scan;
+	settings.ollama_url = config_.ollama_url;
+	settings.ollama_model = config_.ollama_model;
+	settings.ollama_num_ctx = config_.ollama_num_ctx;
+	settings.ai_provider = config_.ai_provider;
+	settings.anthropic_model = config_.anthropic_model;
+	settings.anthropic_api_key = config_.anthropic_api_key;
+
+	save_settings(config_.settings_path, settings);
+}
+
 core::String DroidHost::agent_turn(const core::String& body)
 {
 	const core::String user_message = net::extract_json_string_field(body, "message");
@@ -2956,15 +3166,10 @@ core::String DroidHost::agent_turn(const core::String& body)
 			+ net::json_string_field("error", "AI is disabled (--no-ai)") + "}";
 	}
 
-	ai::OllamaConfig ollama_config;
 	bool seed_system_prompt = false;
 	core::String system_prompt_text;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		ollama_config.base_url = config_.ollama_url;
-		ollama_config.model = config_.ollama_model;
-		ollama_config.enabled = true;
-
 		if (agent_transcript_.empty() && !config_.system_prompt.empty())
 		{
 			// Appends the concrete count from the startup scan (see initialize())
@@ -3022,12 +3227,12 @@ core::String DroidHost::agent_turn(const core::String& body)
 
 	const core::Array<ai::ToolDefinition> tools = agent_tool_definitions();
 
-	// Coded against ai::ModelProvider, not ai::OllamaProvider directly, so a
-	// second provider only means constructing a different concrete type
-	// here - nothing below this line changes. See "Provider abstraction" in
-	// ARCHITECTURE.md's extension plan and src/ai/model_provider.hpp.
-	const ai::OllamaProvider ollama_provider(ollama_config);
-	const ai::ModelProvider& provider = ollama_provider;
+	// Coded against ai::ModelProvider, not any concrete provider type
+	// directly - make_model_provider() selects Ollama vs Anthropic from
+	// config_.ai_provider, nothing below this line changes either way. See
+	// "Second ModelProvider" in ARCHITECTURE.md and src/ai/model_provider.hpp.
+	const std::unique_ptr<ai::ModelProvider> provider_ptr = make_model_provider();
+	const ai::ModelProvider& provider = *provider_ptr;
 
 	// Deterministic command-confirmation shortcut (Phase 14, ARCHITECTURE.md):
 	// if the assistant's own last message proposed a concrete command and
@@ -3108,16 +3313,9 @@ core::String DroidHost::agent_tool_decision(const core::String& body)
 	record_agent_message(session_id, ai::ChatRole::Tool, tool_result);
 	actions.push_back(PendingToolActionRecord{decided_call.name, decided_call.arguments_json, tool_result});
 
-	ai::OllamaConfig ollama_config;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		ollama_config.base_url = config_.ollama_url;
-		ollama_config.model = config_.ollama_model;
-		ollama_config.enabled = true;
-	}
 	const core::Array<ai::ToolDefinition> tools = agent_tool_definitions();
-	const ai::OllamaProvider ollama_provider(ollama_config);
-	const ai::ModelProvider& provider = ollama_provider;
+	const std::unique_ptr<ai::ModelProvider> provider_ptr = make_model_provider();
+	const ai::ModelProvider& provider = *provider_ptr;
 
 	// resume_call_index is call_index + 1: the decision for tool_calls[call_index]
 	// is already resolved above (executed or declined, recorded, appended to
@@ -3235,12 +3433,15 @@ core::String DroidHost::run_agent_tool_loop(
 		constexpr int kMaxEmptyRetries = 2;
 		ai::ProviderResponse response;
 		core::String last_response_body;
+		const auto hop_wall_clock_start = std::chrono::steady_clock::now();
+		int attempts_used = 0;
 		for (int attempt = 0; ; ++attempt)
 		{
+			attempts_used = attempt + 1;
 			int32_t status_code = 0;
 			core::String response_body;
 			const bool transport_ok = language_ai_transport_.post_json
-				? language_ai_transport_.post_json(request.url, request.body, status_code, response_body)
+				? language_ai_transport_.post_json(request.url, request.body, request.headers, status_code, response_body)
 				: false;
 
 			response = provider.parse_response(status_code, response_body, transport_ok);
@@ -3270,6 +3471,33 @@ core::String DroidHost::run_agent_tool_loop(
 					+ std::to_string(attempt + 1) + "/" + std::to_string(kMaxEmptyRetries) + ")",
 				false, session_id);
 		}
+		const int64_t hop_wall_clock_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - hop_wall_clock_start).count();
+
+		// Structured telemetry for this hop, on a channel named after the
+		// active provider (config_.ai_provider - "ollama" or "anthropic")
+		// so it doesn't crowd the "chat" channel's human-summary lines above,
+		// and so switching providers (Phase 32) doesn't leave every log line
+		// mislabeled "ollama". Wall-clock latency (spans every retry this hop
+		// needed) plus, whenever the response actually carried it, the
+		// provider's own generation timing and token counts. See "Ollama
+		// telemetry"/"Second ModelProvider" in ARCHITECTURE.md.
+		const core::String active_model = active_model_name();
+		const core::String model_metrics_fields =
+			net::json_string_field("model", active_model) + ","
+			+ "\"hop\":" + std::to_string(hop) + ","
+			+ "\"attempts\":" + std::to_string(attempts_used) + ","
+			+ "\"wall_clock_ms\":" + std::to_string(hop_wall_clock_ms) + ","
+			+ "\"model_total_ms\":" + std::to_string(response.total_duration_ms) + ","
+			+ "\"model_eval_ms\":" + std::to_string(response.eval_duration_ms) + ","
+			+ "\"prompt_tokens\":" + std::to_string(response.prompt_tokens) + ","
+			+ "\"completion_tokens\":" + std::to_string(response.completion_tokens) + ","
+			+ net::json_string_field("done_reason", response.done_reason) + ","
+			+ "\"tool_calls\":" + std::to_string(response.tool_calls.size());
+		append_app_log(config_.ai_provider, "out",
+			"hop " + std::to_string(hop) + " (" + std::to_string(attempts_used) + " attempt(s), "
+				+ std::to_string(hop_wall_clock_ms) + "ms)",
+			response.transport_ok && response.http_success, session_id, model_metrics_fields);
 
 		if (!response.transport_ok || !response.http_success)
 		{
@@ -3563,10 +3791,71 @@ core::String DroidHost::run_agent_tool_loop(
 	return stream.str();
 }
 
+core::String DroidHost::display_arguments_with_full_paths(const core::String& tool_name, const core::String& arguments_json) const
+{
+	const auto resolve_field = [&](const core::String& json, const core::String& field_name) -> core::String
+	{
+		const core::String raw_path = net::extract_json_string_field(json, field_name);
+		if (raw_path.empty() || looks_like_placeholder_path(raw_path))
+		{
+			return json;
+		}
+
+		const core::String resolved = default_bare_filename_to_desktop(
+			substitute_bare_desktop_token(raw_path, system_info_.desktop_path), system_info_.desktop_path);
+		if (looks_like_invented_desktop_path(resolved, system_info_.desktop_path))
+		{
+			return json;
+		}
+
+		std::error_code error;
+		const core::String full_path = std::filesystem::absolute(std::filesystem::path(resolved), error).string();
+		if (error || full_path.empty())
+		{
+			return json;
+		}
+
+		return replace_json_string_field_value(json, field_name, full_path);
+	};
+
+	if (tool_name == "write_file" || tool_name == "delete_file" || tool_name == "create_directory")
+	{
+		return resolve_field(arguments_json, "path");
+	}
+	if (tool_name == "copy_file" || tool_name == "move_path")
+	{
+		return resolve_field(resolve_field(arguments_json, "source_path"), "destination_path");
+	}
+	if (tool_name == "open_application")
+	{
+		// Deliberately narrower than resolve_field above: open_application's
+		// "path_or_name" is very often a bare app name ("notepad", "Memory",
+		// "chrome") to be searched for, not a path at all - running that
+		// through default_bare_filename_to_desktop would wrongly treat it as
+		// a Desktop-relative filename. Only rewrite when the value already
+		// contains a path separator (looks_like_path, the same check
+		// launch_application itself uses to decide whether to skip App Paths
+		// registry lookup) - a bare name is shown exactly as given.
+		const core::String raw_value = net::extract_json_string_field(arguments_json, "path_or_name");
+		if (raw_value.empty() || !looks_like_path(raw_value))
+		{
+			return arguments_json;
+		}
+		std::error_code error;
+		const core::String full_path = std::filesystem::absolute(std::filesystem::path(raw_value), error).string();
+		if (error || full_path.empty())
+		{
+			return arguments_json;
+		}
+		return replace_json_string_field_value(arguments_json, "path_or_name", full_path);
+	}
+	return arguments_json;
+}
+
 core::String DroidHost::build_pending_tool_call_response(
 	const core::String& session_id,
 	const ai::ToolCall& call,
-	const core::Array<PendingToolActionRecord>& actions_so_far)
+	const core::Array<PendingToolActionRecord>& actions_so_far) const
 {
 	// Visibility aid, not a gate (tool_call_requires_approval is still the
 	// only real one): run_command/run_ffmpeg is the single largest blast-
@@ -3591,7 +3880,7 @@ core::String DroidHost::build_pending_tool_call_response(
 	stream << net::json_string_field("session_id", session_id) << ',';
 	stream << "\"pending_tool_call\":{";
 	stream << net::json_string_field("tool", call.name) << ',';
-	stream << net::json_string_field("arguments_json", call.arguments_json) << ',';
+	stream << net::json_string_field("arguments_json", display_arguments_with_full_paths(call.name, call.arguments_json)) << ',';
 	stream << net::json_bool_field("looks_destructive", looks_destructive);
 	stream << "},";
 	stream << "\"actions\":[";
@@ -3604,7 +3893,7 @@ core::String DroidHost::build_pending_tool_call_response(
 		const PendingToolActionRecord& action = actions_so_far[index];
 		stream << '{';
 		stream << net::json_string_field("tool", action.tool) << ',';
-		stream << net::json_string_field("arguments_json", action.arguments_json) << ',';
+		stream << net::json_string_field("arguments_json", display_arguments_with_full_paths(action.tool, action.arguments_json)) << ',';
 		stream << net::json_string_field("result_json", action.result_json);
 		stream << '}';
 	}

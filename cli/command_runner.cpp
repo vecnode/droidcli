@@ -21,14 +21,14 @@
 
 namespace droidcli::cli {
 
-#ifdef _WIN32
-
-namespace {
-
 bool looks_like_path(const core::String& value)
 {
 	return value.find('\\') != core::String::npos || value.find('/') != core::String::npos;
 }
+
+#ifdef _WIN32
+
+namespace {
 
 // Windows' "App Paths" registry mechanism - the same one Explorer/Win+R use
 // to resolve a bare name like "chrome" to its actual install location even
@@ -274,6 +274,21 @@ LaunchAppResult launch_application(
 
 	result.launched = true;
 	result.pid = static_cast<int64_t>(process.dwProcessId);
+
+	// Query the real path back from the live process handle rather than just
+	// echoing resolved_target - resolved_target is only ever our own best
+	// guess (the App Paths registry match, or the caller's original bare
+	// name if there wasn't one); this is what the OS actually launched. Any
+	// failure here (permissions, a process that has already exited by the
+	// time we ask) leaves resolved_path empty rather than falling back to a
+	// guess presented as fact.
+	char image_path_buffer[MAX_PATH] = {};
+	DWORD image_path_size = MAX_PATH;
+	if (QueryFullProcessImageNameA(process.hProcess, 0, image_path_buffer, &image_path_size))
+	{
+		result.resolved_path = core::String(image_path_buffer, image_path_size);
+	}
+
 	CloseHandle(process.hProcess);
 	CloseHandle(process.hThread);
 	return result;
