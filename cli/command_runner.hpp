@@ -6,6 +6,11 @@
 
 namespace droidcli::cli {
 
+// Part of droidcli-infra (ARCHITECTURE.md's Modules diagram), alongside
+// process_manager.hpp - both execute OS-specific commands directly
+// (CreateProcess, the App Paths/System32 resolution below), not
+// droidcli-tools.
+//
 // One-shot, synchronous, blocking command execution with captured
 // stdout/stderr - distinct from ProcessManager, which PID-tracks long-running
 // launched_process connectors. Used by DroidHost::run_command() (POST

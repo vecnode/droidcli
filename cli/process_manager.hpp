@@ -7,6 +7,10 @@
 
 namespace droidcli::cli {
 
+// droidcli-infra (ARCHITECTURE.md's Modules diagram) - the OS-execution
+// boundary droidcli-runtime launches/stops processes through and gets
+// PID/liveness back from.
+//
 // Tracks external processes launched for launched_process connectors. Each
 // process is keyed by a logical id (the connector id) so the host can launch,
 // query (PID + running state), and stop it. Centralised so droidcli always

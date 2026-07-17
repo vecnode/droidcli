@@ -4,6 +4,9 @@
 
 namespace droidcli::cli {
 
+// Part of droidcli-infra (ARCHITECTURE.md's Modules diagram) - queries the
+// OS directly (registry, Known Folder API), not droidcli-tools.
+//
 // Describes the machine droidcli is actually running on right now - gathered
 // once at startup (DroidHost::initialize()) via real OS queries, not
 // hardcoded or assumed. Distinct from RuntimeSession (droidcli's own

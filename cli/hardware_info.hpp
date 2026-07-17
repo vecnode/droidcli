@@ -4,6 +4,9 @@
 
 namespace droidcli::cli {
 
+// Part of droidcli-infra (ARCHITECTURE.md's Modules diagram) - queries the
+// OS directly (registry, display/disk enumeration), not droidcli-tools.
+//
 // One GPU/display adapter's name, as reported by the OS.
 struct GpuAdapter {
 	core::String name;

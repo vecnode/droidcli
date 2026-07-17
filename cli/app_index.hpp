@@ -11,6 +11,10 @@ struct InstalledApp {
 	core::String path;
 };
 
+// Part of droidcli-infra (ARCHITECTURE.md's Modules diagram) - one of the
+// modules that executes OS-specific commands directly (registry reads),
+// not droidcli-tools.
+//
 // Scans the machine for installed applications so open_application() can
 // resolve a name the user knows (e.g. "Blender", "KiCad") even when the app
 // never registered itself on PATH or in the App Paths registry key - most

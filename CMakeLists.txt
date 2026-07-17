@@ -143,6 +143,7 @@ add_executable(droidcli
     cli/host.cpp
     cli/http_mount.cpp
     cli/memory_store.cpp
+    cli/os_registry.cpp
     cli/process_manager.cpp
     cli/settings_store.cpp
     cli/system_info.cpp

@@ -5,6 +5,10 @@
 
 namespace droidcli::cli {
 
+// droidcli-tools (ARCHITECTURE.md's Modules diagram, Services layer) - it
+// resolves an argument list and delegates the actual OS process execution to
+// command_runner (droidcli-infra); it doesn't call CreateProcess itself.
+//
 // The ffmpeg actuator: lets the agent invoke the ffmpeg CLI (transcode,
 // clip, extract audio, thumbnail, etc.) the same way run_command lets it run
 // any shell command, but with the binary resolved for it instead of relying

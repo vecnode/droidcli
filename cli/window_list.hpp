@@ -6,6 +6,9 @@
 
 namespace droidcli::cli {
 
+// Part of droidcli-infra (ARCHITECTURE.md's Modules diagram) - executes an
+// OS-specific enumeration (EnumWindows) directly, not droidcli-tools.
+//
 // One currently-open, visible top-level window - "what's open right now",
 // distinct from app_index's "what's installed" (may not be running) and
 // ProcessManager's "what droidcli itself launched" (only covers

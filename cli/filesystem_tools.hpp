@@ -6,6 +6,11 @@
 
 namespace droidcli::cli {
 
+// droidcli-tools (ARCHITECTURE.md's Modules diagram, Services layer) - unlike
+// droidcli-infra's process/registry/window calls, these go through
+// std::filesystem rather than a raw OS handle API, which is why this stays
+// in Services rather than moving down to Foundations/droidcli-infra.
+//
 // Filesystem-aware primitives for the agent tool set (POST /api/agent/turn)
 // and matching /api/fs/* routes - lets the LLM know what's on disk and act
 // on it directly, no external process or MCP server involved. Self-contained

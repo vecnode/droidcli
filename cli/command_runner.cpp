@@ -1,5 +1,7 @@
 #include "command_runner.hpp"
 
+#include "os_registry.hpp"
+
 #include <filesystem>
 #include <thread>
 #include <vector>
@@ -33,7 +35,9 @@ bool looks_like_path(const core::String& value)
 // to resolve a bare name like "chrome" to its actual install location even
 // when the app was never added to PATH (most GUI app installers register
 // here instead of touching PATH). Returns an empty string if no match is
-// found in either hive.
+// found in either hive. The actual open/read/close is os_registry's shared
+// primitive (droidcli-infra) - not a private RegOpenKeyExA/RegQueryValueExA
+// pair, since system_info/hardware_info need the identical shape.
 core::String resolve_app_paths_registry(const core::String& name)
 {
 	core::String key_name = name;
@@ -43,24 +47,12 @@ core::String resolve_app_paths_registry(const core::String& name)
 	}
 	const core::String subkey = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + key_name;
 
-	for (const HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE})
+	for (const RegistryRoot root : {RegistryRoot::CurrentUser, RegistryRoot::LocalMachine})
 	{
-		HKEY key = nullptr;
-		if (RegOpenKeyExA(root, subkey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
+		core::String resolved = read_registry_string(root, subkey);
+		if (!resolved.empty())
 		{
-			continue;
-		}
-
-		char buffer[MAX_PATH] = {};
-		DWORD buffer_size = sizeof(buffer);
-		DWORD type = 0;
-		const LONG query_result = RegQueryValueExA(
-			key, nullptr, nullptr, &type, reinterpret_cast<LPBYTE>(buffer), &buffer_size);
-		RegCloseKey(key);
-
-		if (query_result == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && buffer_size > 0)
-		{
-			return core::String(buffer);
+			return resolved;
 		}
 	}
 

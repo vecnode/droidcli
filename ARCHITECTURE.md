@@ -177,7 +177,7 @@ flowchart TB
     end
 
     subgraph L3["Services"]
-        TOOLS["droidcli-tools"]
+        TOOLS["droidcli-tools\nfilesystem_tools · ffmpeg_tool\n(std::filesystem, or delegates\nexecution to droidcli-infra)"]
         PROVIDERS["droidcli-providers"]
     end
 
@@ -187,7 +187,7 @@ flowchart TB
 
     subgraph L1["Foundations — the OS boundary"]
         DCORE["droidcli-core\ncore/types+math · net/json ·\nreliability/* · intent/* ·\nsession/types+status · media/decode+probe\n(pure, no real I/O)"]
-        INFRA["droidcli-infra\nProcessManager (Job Object / process group) ·\ndb/*.json flat-file persistence ·\nexecutes every OS-specific command\n(Windows today) on the Agent's behalf"]
+        INFRA["droidcli-infra\nprocess_manager · command_runner ·\nos_registry · app_index · window_list ·\nsystem_info · hardware_info · windows_service ·\ndb/*.json flat-file persistence\n(every direct OS-specific call, Windows today)"]
     end
 
     OS[("Operating System\nfilesystem · processes · sockets · registry")]
@@ -196,12 +196,13 @@ flowchart TB
     TUI --> RUNTIME
     RUNTIME --> TOOLS
     RUNTIME --> PROVIDERS
+    RUNTIME <-.-> INFRA
+    TOOLS --> INFRA
     TOOLS --> DCORE
     PROVIDERS --> DCORE
     MEMORY --> DCORE
     CONFIG --> DCORE
     RUNTIME -.-> LOGM
-    RUNTIME <-.-> INFRA
     GATEWAY -.-> LOGM
     INFRA --> OS
 ```
@@ -220,17 +221,24 @@ System sits, split into its two halves: `droidcli-core` (the left box) is
 everything pure - no real socket/process/filesystem I/O (per the Golden
 rule in `AGENTS.md`) - while `droidcli-infra` (the right box) is the part
 that actually crosses into the OS. `droidcli-infra` is deliberately the
-*only* module that executes OS-specific commands (Job Object/process-group
-launch and tracking, flat-file state persistence) - currently implemented
-and tested against Windows - and it's a two-way connection to `Agent`, not
-one-way: `droidcli-runtime` tells it to launch/stop a process, and
-`droidcli-infra` reports PID/liveness back, which is why the edge is drawn
-`<-.->` rather than a single arrowhead. `droidcli-log` stays separate, in
-its own `Log` layer, rather than folded into `droidcli-infra` - it's not
-infrastructure the runtime depends on to function, it's a channel every
-other layer writes into (the dotted edges from `droidcli-runtime`/
-`droidcli-gateway` into it), so it gets its own box rather than being
-conflated with process/state management.
+*only* module that executes OS-specific commands directly - process
+launch/tracking (`process_manager`, `command_runner`), registry reads
+(`os_registry`, shared by `command_runner`/`system_info`/`hardware_info`),
+window enumeration (`window_list`), installed-app discovery (`app_index`),
+service control (`windows_service`), and flat-file state persistence -
+currently implemented and tested against Windows. It's a two-way connection
+to `Agent`, not one-way: `droidcli-runtime` tells it to launch/stop a
+process, and `droidcli-infra` reports PID/liveness back, which is why the
+edge is drawn `<-.->` rather than a single arrowhead. `droidcli-tools`
+depends on it too (`ffmpeg_tool` delegates its actual process execution to
+`command_runner` rather than calling `CreateProcess` itself), which is why
+`TOOLS --> INFRA` is a solid edge, not dotted - it's a real, direct
+dependency, not a cross-cutting notification the way logging is.
+`droidcli-log` stays separate, in its own `Log` layer, rather than folded
+into `droidcli-infra` - it's not infrastructure the runtime depends on to
+function, it's a channel every other layer writes into (the dotted edges
+from `droidcli-runtime`/`droidcli-gateway` into it), so it gets its own box
+rather than being conflated with process/state management.
 
 > **Naming note:** the `droidcli-core` module in this diagram is a
 > conceptual grouping label (like every other `droidcli-xyz` name on this
@@ -285,16 +293,16 @@ conflated with process/state management.
 
 ### `droidcli-tools` — callable tool implementations
 
+Deliberately narrow now: everything here goes through `std::filesystem` or
+delegates its actual OS execution elsewhere, rather than calling a raw
+process/registry/window API directly - that's the line that keeps a module
+in `droidcli-tools` instead of `droidcli-infra` (see "Genuine mismatch"
+note below).
+
 | Module | Role |
 | --- | --- |
 | `filesystem_tools` | `read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/`which_executable`, `std::filesystem`-backed, no external dependency |
-| `command_runner` | One-shot, synchronous, timeout-bounded shell command execution (`run_command_once`, captured stdout/stderr) plus `launch_application` (detached, fire-and-forget GUI-app launch) - see "Windows execution ruleset" below for the trust-ordered resolution both go through |
-| `app_index` | `scan_installed_applications()` - Windows' Add/Remove Programs/Uninstall registry entries (HKLM native + WOW6432Node + HKCU), scanned once at `DroidHost::initialize()` and cached |
-| `window_list` | `list_open_windows()` - `EnumWindows` filtered to visible/titled top-level windows, a live uncached snapshot re-enumerated every call, unlike `app_index`'s scan-once |
-| `ffmpeg_tool` | Resolves and invokes the ffmpeg binary for transcode/convert/clip/extract/thumbnail work, `via_shell=false` (see "Windows execution ruleset") |
-| `system_info` | Environment grounding - OS, architecture, real Desktop path via the Windows Known Folder API, the current date/time (freshly read every call, not cached) |
-| `hardware_info` | Opt-in (`--enable-hardware-scan`), read-only local CPU/GPU/RAM/disk inventory |
-| `windows_service` (`cli/windows_service.{hpp,cpp}`) | Windows Service lifecycle (`ServiceMain`/`RegisterServiceCtrlHandler`) and install/uninstall via the Service Control Manager |
+| `ffmpeg_tool` | Resolves the ffmpeg binary and builds its argument list for transcode/convert/clip/extract/thumbnail work - delegates the actual process execution to `droidcli-infra`'s `command_runner` (`via_shell=false`, see "Windows execution ruleset") rather than calling `CreateProcess` itself |
 
 ### `droidcli-gateway`
 
@@ -307,16 +315,39 @@ conflated with process/state management.
 
 ### `droidcli-infra` — the OS-interaction boundary
 
-The one module allowed to execute OS-specific commands - currently
-implemented and tested against Windows (Job Objects), with a POSIX
-process-group path present alongside it. `droidcli-runtime` calls into it
-to launch/stop a process and reads its liveness/PID back - a two-way
-connection, not a fire-and-forget call (see the `<-.->` edge in the
+The module(s) allowed to execute OS-specific commands directly - currently
+implemented and tested against Windows, with a POSIX process-group path
+present alongside `process_manager`'s job tracking. `droidcli-runtime`
+calls into it to launch/stop a process and reads its liveness/PID back - a
+two-way connection, not a fire-and-forget call (see the `<-.->` edge in the
 Modules diagram above).
+
+> **Genuine mismatch, fixed.** An earlier pass at this table only listed
+> `process_manager` and flat-file persistence here, while `command_runner`,
+> `app_index`, `window_list`, `system_info`, `hardware_info`, and
+> `windows_service` - all of which call a raw Win32 process/registry/window
+> API directly - stayed listed under `droidcli-tools`. That contradicted the
+> "droidcli-infra is the module that executes OS-specific commands" rule
+> stated above it, so those six modules moved here to match what the code
+> actually does. `filesystem_tools` and `ffmpeg_tool` stayed in
+> `droidcli-tools` - the former goes through `std::filesystem` rather than a
+> raw OS handle API, the latter delegates its actual process execution to
+> `command_runner` instead of calling `CreateProcess` itself. Separately,
+> `os_registry` was added as the one shared registry-read primitive
+> (`RegOpenKeyExA`/`RegQueryValueExA`/`RegCloseKey`) - `command_runner`,
+> `system_info`, and `hardware_info` used to each hand-roll their own copy
+> of that open/read/close sequence; they now call the same function.
 
 | Module | Role |
 | --- | --- |
 | `process_manager` | Job Object (Windows) / process-group (POSIX) tracking for any `launched_process` connector, so `stop()` kills the whole tree it spawned; reports PID + running state back to `DroidHost` via `/api/process/status` and `ConnectorRegistry` liveness checks |
+| `command_runner` | One-shot, synchronous, timeout-bounded shell command execution (`run_command_once`, captured stdout/stderr) plus `launch_application` (detached, fire-and-forget GUI-app launch) - see "Windows execution ruleset" below for the trust-ordered resolution both go through |
+| `os_registry` | The shared registry-read primitive (`read_registry_string`/`read_registry_dword`) - open a key under a root, read one value, close it. Used by `command_runner` (App Paths lookup), `system_info` (OS version), and `hardware_info` (CPU name) |
+| `app_index` | `scan_installed_applications()` - Windows' Add/Remove Programs/Uninstall registry entries (HKLM native + WOW6432Node + HKCU), scanned once at `DroidHost::initialize()` and cached |
+| `window_list` | `list_open_windows()` - `EnumWindows` filtered to visible/titled top-level windows, a live uncached snapshot re-enumerated every call, unlike `app_index`'s scan-once |
+| `system_info` | Environment grounding - OS, architecture, real Desktop path via the Windows Known Folder API, the current date/time (freshly read every call, not cached) |
+| `hardware_info` | Opt-in (`--enable-hardware-scan`), read-only local CPU/GPU/RAM/disk inventory |
+| `windows_service` (`cli/windows_service.{hpp,cpp}`) | Windows Service lifecycle (`ServiceMain`/`RegisterServiceCtrlHandler`) and install/uninstall via the Service Control Manager |
 | `db/droidcli_state.json`, `db/droidcli_settings.json` | Flat-file persistence (connector state, host settings) alongside `memory_store`'s SQLite backend |
 
 ### `droidcli-log`
@@ -693,11 +724,14 @@ flowchart LR
         MEMORY["droidcli-memory\nMemoryStore (SQLite) ·\nsessions, history, resume-after-restart ·\ncommand_lessons (procedural memory)"]
         CONFIG["droidcli-config\nHostConfig · CLI flags ·\nconnectors.json · db/droidcli_state.json"]
         PROVIDERS["droidcli-providers\nai::ModelProvider ·\nOllamaProvider + AnthropicProvider\n(a third implements the same interface)"]
-        TOOLS["droidcli-tools\nfilesystem_tools · command_runner ·\napp_index · window_list · intent ·\nffmpeg_tool · system_info"]
+        TOOLS["droidcli-tools\nfilesystem_tools · ffmpeg_tool\n(intent lives in droidcli-core, not here)"]
+        INFRA["droidcli-infra\nprocess_manager · command_runner ·\nos_registry · app_index · window_list ·\nsystem_info · hardware_info · windows_service"]
         RUNTIME --> MEMORY
         RUNTIME --> CONFIG
         RUNTIME --> PROVIDERS
         RUNTIME --> TOOLS
+        RUNTIME <--> INFRA
+        TOOLS --> INFRA
     end
 
     LLM["LLM providers\nOllama · Anthropic ·\nfuture: OpenAI / ..."]
@@ -708,7 +742,7 @@ flowchart LR
     GATEWAY <--> RUNTIME
     CHANNELS <-.-> RUNTIME
     PROVIDERS --> LLM
-    TOOLS --> OS
+    INFRA --> OS
 
     classDef planned stroke-dasharray: 5 5;
     class CHANNELS planned;

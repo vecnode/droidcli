@@ -54,11 +54,14 @@ struct ProviderResponse {
 // LanguageTransportCallbacks) - it only knows how to shape and interpret
 // its own wire format.
 //
-// This is droidcli's Core-tier "providers" role (see ARCHITECTURE.md's
-// crate comparison to ZeroClaw's zeroclaw-providers). Ollama is the only
-// implementation today (OllamaProvider, below). Adding a second provider
-// (Anthropic/OpenAI/...) means implementing this interface and having the
-// host select/construct an instance - not adding a second code path to
+// This is droidcli's "providers" role in the ZeroClaw crate comparison -
+// ZeroClaw calls this its Core tier (see ARCHITECTURE.md's crate comparison
+// to ZeroClaw's zeroclaw-providers); don't confuse that with droidcli's own
+// module-layer diagram, where droidcli-providers sits in the Services
+// layer, not Agent. Ollama and Anthropic are both concrete implementations
+// today (OllamaProvider/AnthropicProvider, below). Adding another provider
+// (OpenAI/...) means implementing this interface and having the host
+// select/construct an instance - not adding a second code path to
 // agent_turn.
 class ModelProvider {
 public:

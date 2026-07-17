@@ -4,8 +4,10 @@
 
 #include <functional>
 
-// Background service support (see "Real background service" in
-// ARCHITECTURE.md): the highest-ranked "still open" item on droidcli's own
+// Part of droidcli-infra (ARCHITECTURE.md's Modules diagram) - the Service
+// Control Manager is its own OS-specific surface, not droidcli-tools.
+//
+// Background service support: the highest-ranked "still open" item on droidcli's own
 // hardening priorities list before this phase - `--daemon` was a documented
 // no-op. `--headless` (skip the TUI, keep the HTTP loop) was already the
 // correct foundation; this is one more host entry point around the same
