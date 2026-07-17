@@ -89,7 +89,7 @@ core::String resolve_app_paths_registry(const core::String& name);
 // returning it. Deliberately independent of the PATH environment variable -
 // System32/the Windows root are always where these binaries live regardless
 // of how PATH is configured, so this is more reliable for droidcli's own
-// curated Windows-locations table (`kWellKnownWindowsTargets`, `cli/host.cpp`)
+// curated Windows-locations data (`scan_windows_locations`, `cli/windows_locations.cpp`)
 // than a PATH search would be. Returns an empty string if not found in
 // either location. A no-op returning empty on a non-Windows build.
 core::String resolve_system_executable(const core::String& name);

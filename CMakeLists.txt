@@ -161,6 +161,7 @@ add_executable(droidcli
     cli/system_info.cpp
     cli/tui.cpp
     cli/window_list.cpp
+    cli/windows_locations.cpp
     cli/windows_service.cpp
     tools/mini_http_server.cpp
     tools/sync_http_client.cpp
@@ -175,7 +176,9 @@ if(WIN32)
     # advapi32: Service Control Manager (windows_service.cpp) - also the
     # legacy CryptoAPI, but DPAPI itself (CryptProtectData/CryptUnprotectData,
     # settings_store.cpp) lives in crypt32, added separately below.
-    target_link_libraries(droidcli PRIVATE ws2_32 winhttp advapi32 crypt32 ole32 shell32)
+    # shlwapi: SHLoadIndirectString (windows_locations.cpp), resolving a
+    # known folder's resource-reference display name into real text.
+    target_link_libraries(droidcli PRIVATE ws2_32 winhttp advapi32 crypt32 ole32 shell32 shlwapi)
     target_compile_definitions(droidcli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
