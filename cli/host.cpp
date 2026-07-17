@@ -1,6 +1,7 @@
 ﻿#include "host.hpp"
 
 #include "app_index.hpp"
+#include "windows_locations.hpp"
 #include "command_runner.hpp"
 #include "intent/open_intent.hpp"
 #include "intent/pending_command.hpp"
@@ -155,21 +156,12 @@ core::Array<InstalledApp> collect_installed_app_matches(
 // find_installed_app_match/collect_installed_app_matches above will never
 // find them, and a literal CreateProcess("Sound Settings") or
 // CreateProcess("Recycle Bin") can never succeed no matter how it's spelled.
-// This is droidcli's explicit, hand-maintained knowledge of Windows *itself*
-// - built-in OS locations and Settings pages that exist on every Windows
-// install regardless of what the user has installed - checked in
-// try_quick_open_json only after the installed-apps index comes up empty,
-// so a real installed app of the same name (e.g. a third-party "Sound
-// Recorder") is never shadowed by this table.
-//
-// Every entry resolves to a real executable + a plain argument CreateProcess
-// can actually launch - no ShellExecute needed: explorer.exe accepts a
-// shell:/ms-settings: URI as an ordinary command-line argument and hands it
-// to the shell itself, and control.exe/taskmgr.exe/mmc.exe are ordinary
-// executables. Narrow and evidence-driven, not an attempt at an exhaustive
-// Windows settings/CLSID list - entries added here should trace back to an
-// observed "the model tried to open X and it failed" case, the same
-// discipline every other guard in this file follows.
+// Real Windows locations - known folders, Administrative Tools shortcuts,
+// plus a small hardcoded exception list for the two categories with no
+// discoverable API (see windows_locations.hpp for the full breakdown) -
+// checked in try_quick_open_json only after the installed-apps index comes
+// up empty, so a real installed app of the same name (e.g. a third-party
+// "Sound Recorder") is never shadowed by this data.
 struct WellKnownWindowsTarget
 {
 	core::String display_name;
@@ -177,81 +169,12 @@ struct WellKnownWindowsTarget
 	core::String args;
 };
 
-struct WellKnownWindowsTargetEntry
-{
-	const char* alias;
-	const char* display_name;
-	const char* path_or_name;
-	const char* args;
-};
-
-// Deliberately widened past the original "one incident, one entry" rule
-// (see the comment above WellKnownWindowsTarget) by direct user request,
-// after a real transcript showed "the Windows panel that shows memory
-// usage" fail: Task Manager was already in this table, but only under the
-// single alias "task manager", and this matcher works by substring
-// containment (see find_well_known_windows_target below) - a description
-// that never contains that literal alias text can never match no matter how
-// obviously it refers to the same thing. The fix here is two-part: more
-// aliases per target (multiple rows sharing the same display_name/
-// path_or_name/args, since WellKnownWindowsTargetEntry only carries one
-// alias each), and more targets, covering the built-in Windows panels a
-// user is likely to ask for by description rather than by their exact
-// Microsoft-assigned name. Still every entry resolves to a real executable +
-// argument CreateProcess can actually launch - see that comment for why no
-// ShellExecute/CLSID machinery is needed. Also the backing data for
-// list_windows_locations (below) - the agent tool that lets the model
-// answer "what Windows panels can you open" from real data instead of
-// guessing, the other half of the same incident (see "Windows panel
-// awareness" in ARCHITECTURE.md).
-static const WellKnownWindowsTargetEntry kWellKnownWindowsTargets[] = {
-	{"recycle bin", "Recycle Bin", "explorer.exe", "shell:RecycleBinFolder"},
-	{"sound settings", "Sound Settings", "explorer.exe", "ms-settings:sound"},
-	{"display settings", "Display Settings", "explorer.exe", "ms-settings:display"},
-	{"network settings", "Network Settings", "explorer.exe", "ms-settings:network"},
-	{"bluetooth settings", "Bluetooth Settings", "explorer.exe", "ms-settings:bluetooth"},
-	{"windows update", "Windows Update", "explorer.exe", "ms-settings:windowsupdate"},
-	{"windows settings", "Windows Settings", "explorer.exe", "ms-settings:"},
-	{"control panel", "Control Panel", "control.exe", ""},
-	{"task manager", "Task Manager", "taskmgr.exe", ""},
-	{"process manager", "Task Manager", "taskmgr.exe", ""},
-	{"memory usage", "Task Manager", "taskmgr.exe", ""},
-	{"memory panel", "Task Manager", "taskmgr.exe", ""},
-	{"cpu usage", "Task Manager", "taskmgr.exe", ""},
-	{"running processes", "Task Manager", "taskmgr.exe", ""},
-	{"resource monitor", "Resource Monitor", "resmon.exe", ""},
-	{"performance monitor", "Performance Monitor", "perfmon.exe", ""},
-	{"device manager", "Device Manager", "mmc.exe", "devmgmt.msc"},
-	{"disk management", "Disk Management", "mmc.exe", "diskmgmt.msc"},
-	{"disk partition", "Disk Management", "mmc.exe", "diskmgmt.msc"},
-	{"partition manager", "Disk Management", "mmc.exe", "diskmgmt.msc"},
-	{"manage disks", "Disk Management", "mmc.exe", "diskmgmt.msc"},
-	{"services", "Services", "mmc.exe", "services.msc"},
-	{"event viewer", "Event Viewer", "eventvwr.exe", ""},
-	{"system information", "System Information", "msinfo32.exe", ""},
-	{"registry editor", "Registry Editor", "regedit.exe", ""},
-	{"system properties", "System Properties", "control.exe", "system"},
-	{"programs and features", "Programs and Features", "control.exe", "appwiz.cpl"},
-	{"network connections", "Network Connections", "control.exe", "ncpa.cpl"},
-	{"power options", "Power Options", "control.exe", "powercfg.cpl"},
-	{"date and time", "Date and Time", "control.exe", "timedate.cpl"},
-	{"storage settings", "Storage Settings", "explorer.exe", "ms-settings:storagesense"},
-	{"about this pc", "About", "explorer.exe", "ms-settings:about"},
-	{"apps and features", "Apps & Features", "explorer.exe", "ms-settings:appsfeatures"},
-	{"windows security", "Windows Security", "explorer.exe", "windowsdefender:"},
-	{"windows defender", "Windows Security", "explorer.exe", "windowsdefender:"},
-	{"printers and scanners", "Printers & Scanners", "explorer.exe", "ms-settings:printers"},
-	{"this pc", "This PC", "explorer.exe", "shell:MyComputerFolder"},
-	{"my computer", "This PC", "explorer.exe", "shell:MyComputerFolder"},
-	{"downloads folder", "Downloads", "explorer.exe", "shell:Downloads"},
-};
-
 // Splits `value` into lowercase, alnum-only words (any run of non-alnum
 // characters is a separator) - unlike normalize_for_match, which collapses
 // everything into one run-together token, this preserves word boundaries so
 // two phrasings using the same words in a different order ("partition
 // disk" vs. an alias written "disk partition") can still be recognized as
-// equivalent. See find_well_known_windows_target's fallback tier below.
+// equivalent. See find_known_windows_target's fallback tier below.
 core::Array<core::String> split_words_for_match(const core::String& value)
 {
 	core::Array<core::String> words;
@@ -304,7 +227,8 @@ bool words_all_present(const core::Array<core::String>& query_words, const core:
 	return true;
 }
 
-bool find_well_known_windows_target(const core::String& query, WellKnownWindowsTarget& out)
+bool find_known_windows_target(
+	const core::String& query, const core::Array<WindowsLocationEntry>& targets, WellKnownWindowsTarget& out)
 {
 	const core::String normalized_query = normalize_for_match(query);
 	if (normalized_query.empty())
@@ -312,7 +236,7 @@ bool find_well_known_windows_target(const core::String& query, WellKnownWindowsT
 		return false;
 	}
 
-	for (const WellKnownWindowsTargetEntry& target : kWellKnownWindowsTargets)
+	for (const WindowsLocationEntry& target : targets)
 	{
 		const core::String normalized_alias = normalize_for_match(target.alias);
 		if (normalized_alias == normalized_query
@@ -332,7 +256,7 @@ bool find_well_known_windows_target(const core::String& query, WellKnownWindowsT
 	// the exact/substring check above (correctly) never matches reversed
 	// word order. See "Search before giving up" in ARCHITECTURE.md.
 	const core::Array<core::String> query_words = split_words_for_match(query);
-	for (const WellKnownWindowsTargetEntry& target : kWellKnownWindowsTargets)
+	for (const WindowsLocationEntry& target : targets)
 	{
 		const core::Array<core::String> alias_words = split_words_for_match(target.alias);
 		if (words_all_present(query_words, alias_words))
@@ -348,18 +272,17 @@ bool find_well_known_windows_target(const core::String& query, WellKnownWindowsT
 }
 
 // Backs the list_windows_locations agent tool - every distinct display_name
-// in kWellKnownWindowsTargets, deduplicated (several rows above share one
-// display_name across multiple aliases, e.g. Task Manager). Gives the model
-// real data to answer "what Windows panels/settings can you open" instead
-// of fabricating an answer - see the incident note above
-// kWellKnownWindowsTargets.
-core::String list_well_known_windows_targets_json()
+// in `targets` (windows_locations_ - see windows_locations.hpp), deduplicated
+// (several entries share one display_name across multiple aliases, e.g. all
+// six Task Manager aliases). Gives the model real data to answer "what
+// Windows panels/settings can you open" instead of fabricating an answer.
+core::String list_well_known_windows_targets_json(const core::Array<WindowsLocationEntry>& targets)
 {
 	core::Array<core::String> seen_names;
 	std::ostringstream stream;
 	stream << '{' << net::json_bool_field("ok", true) << ",\"locations\":[";
 	bool first = true;
-	for (const WellKnownWindowsTargetEntry& target : kWellKnownWindowsTargets)
+	for (const WindowsLocationEntry& target : targets)
 	{
 		const core::String display_name = target.display_name;
 		bool duplicate = false;
@@ -734,6 +657,12 @@ void DroidHost::initialize()
 		// registry key - most installers only ever register an Add/Remove
 		// Programs entry.
 		installed_apps_ = scan_installed_applications();
+
+		// Real, discoverable Windows locations (known folders, Administrative
+		// Tools shortcuts) plus the small hardcoded exception list for the
+		// two categories with no discoverable API - see windows_locations.hpp.
+		// Same scan-once-at-startup lifecycle as installed_apps_ above.
+		windows_locations_ = scan_windows_locations();
 
 		// Persistent agent-turn memory (see "Persistent memory" in
 		// ARCHITECTURE.md's extension plan) - a fresh session id every
@@ -1999,8 +1928,13 @@ DroidHost::ResolvedLaunchTarget DroidHost::resolve_open_application_target(const
 		return result;
 	}
 
+	core::Array<WindowsLocationEntry> windows_locations_snapshot;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		windows_locations_snapshot = windows_locations_;
+	}
 	WellKnownWindowsTarget windows_target;
-	if (find_well_known_windows_target(path_or_name, windows_target))
+	if (find_known_windows_target(path_or_name, windows_locations_snapshot, windows_target))
 	{
 		// Resolved deterministically against the real Windows System/Windows
 		// root directories (resolve_system_executable, cli/command_runner.cpp)
@@ -2312,8 +2246,13 @@ core::String DroidHost::try_quick_open_json(const core::String& body) const
 	// priority over droidcli's own built-in Windows knowledge.
 	if (candidates.empty())
 	{
+		core::Array<WindowsLocationEntry> windows_locations_snapshot;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			windows_locations_snapshot = windows_locations_;
+		}
 		WellKnownWindowsTarget windows_target;
-		if (find_well_known_windows_target(parsed.app_name, windows_target))
+		if (find_known_windows_target(parsed.app_name, windows_locations_snapshot, windows_target))
 		{
 			stream << ',' << net::json_bool_field("resolved_windows_target", true);
 			stream << ',' << net::json_string_field("windows_target_display_name", windows_target.display_name);
@@ -3125,7 +3064,12 @@ core::String DroidHost::execute_agent_tool(const core::String& tool_name, const 
 	}
 	if (tool_name == "list_windows_locations")
 	{
-		return list_well_known_windows_targets_json();
+		core::Array<WindowsLocationEntry> windows_locations_snapshot;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			windows_locations_snapshot = windows_locations_;
+		}
+		return list_well_known_windows_targets_json(windows_locations_snapshot);
 	}
 	if (tool_name == "open_application")
 	{

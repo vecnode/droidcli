@@ -8,6 +8,7 @@
 #include "filesystem_tools.hpp"
 #include "clipboard.hpp"
 #include "app_index.hpp"
+#include "windows_locations.hpp"
 #include "memory_store.hpp"
 #include "window_list.hpp"
 #include "system_info.hpp"
@@ -709,7 +710,7 @@ private:
 		core::String target;         // full path to hand to launch_application
 		core::String effective_args; // args, filled in from a matched well-known target if the caller gave none
 		core::String source;         // "given_path" | "app_paths_registry" | "installed_apps_index" | "windows_known_location" | "path_search"
-		// The friendly name from WellKnownWindowsTargetEntry (e.g. "Display
+		// The friendly name from WindowsLocationEntry (e.g. "Display
 		// Settings") - set only when source is "windows_known_location",
 		// empty otherwise. Lets the phrased response say "Opened Display
 		// Settings." instead of a raw exe+args string, so a Windows-location
@@ -785,6 +786,11 @@ private:
 	net::ConnectorRegistry connectors_;
 	app::TaskQueue tasks_;
 	core::Array<InstalledApp> installed_apps_;
+	// Real, discoverable Windows locations (known folders, Administrative
+	// Tools shortcuts) plus the small hardcoded exception list - see
+	// windows_locations.hpp. Same scan-once-at-startup lifecycle as
+	// installed_apps_ above.
+	core::Array<WindowsLocationEntry> windows_locations_;
 
 	// The host machine's OS/hostname/architecture, queried once in
 	// initialize() (see system_info.hpp) - not meant to change during a run.

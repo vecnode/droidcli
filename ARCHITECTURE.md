@@ -351,6 +351,7 @@ Modules diagram above).
 | `command_runner` | One-shot, synchronous, timeout-bounded shell command execution (`run_command_once`, captured stdout/stderr) plus `launch_application` (detached, fire-and-forget GUI-app launch) - see "Windows execution ruleset" below for the trust-ordered resolution both go through |
 | `os_registry` | The shared registry-read primitive (`read_registry_string`/`read_registry_dword`) - open a key under a root, read one value, close it. Used by `command_runner` (App Paths lookup), `system_info` (OS version), and `hardware_info` (CPU name) |
 | `app_index` | `scan_installed_applications()` - Windows' Add/Remove Programs/Uninstall registry entries (HKLM native + WOW6432Node + HKCU), scanned once at `DroidHost::initialize()` and cached |
+| `windows_locations` | `scan_windows_locations()` - known folders (`IKnownFolderManager`, a fixed `KNOWNFOLDERID` allowlist) and Administrative Tools `.lnk` shortcuts (`IShellLink`/`IPersistFile`, each target verified to exist), plus a small hardcoded exception list for `ms-settings:` deep links and a handful of not-yet-automated entries - scanned once at `DroidHost::initialize()` and cached in `windows_locations_`, same lifecycle as `app_index` above. See "Windows execution ruleset" below |
 | `window_list` | `list_open_windows()` - `EnumWindows` filtered to visible/titled top-level windows, a live uncached snapshot re-enumerated every call, unlike `app_index`'s scan-once |
 | `system_info` | Environment grounding - OS, architecture, real Desktop path via the Windows Known Folder API, the current date/time (freshly read every call, not cached) |
 | `hardware_info` | Opt-in (`--enable-hardware-scan`), read-only local CPU/GPU/RAM/disk inventory |
@@ -844,16 +845,47 @@ reporting success.
    variable being configured a particular way.** The order, from most to
    least trustworthy: an explicit path the caller gave (verified via
    `fs::exists`) → the Windows App Paths registry → droidcli's own
-   installed-apps index → droidcli's own curated built-in-Windows-locations
-   table (`list_windows_locations`), resolved against the real Windows
-   System/Windows-root directories via `resolve_system_executable`
-   (`GetSystemDirectoryA`/`GetWindowsDirectoryA` - *not* a PATH search, since
-   every curated target genuinely lives in one of those two places
-   regardless of PATH) → a verified PATH search (`which_executable`), as an
-   explicit last resort only. A more specific, more curated source always
-   gets first refusal over a more generic one. See
-   `DroidHost::resolve_open_application_target` (`cli/host.cpp`) for the
-   implementation of this exact order.
+   installed-apps index → droidcli's Windows-locations data
+   (`list_windows_locations`, backed by `scan_windows_locations()` -
+   `cli/windows_locations.cpp`, see "Windows-locations data source" below) →
+   a verified PATH search (`which_executable`), as an explicit last resort
+   only. A more specific, more curated source always gets first refusal over
+   a more generic one. See `DroidHost::resolve_open_application_target`
+   (`cli/host.cpp`) for the implementation of this exact order.
+
+   This tier's entries are resolved via `resolve_system_executable`
+   (`GetSystemDirectoryA`/`GetWindowsDirectoryA`, *not* a PATH search) for
+   bare names (`taskmgr.exe`, `eventvwr.exe`, ...); a discovered
+   Administrative Tools entry already carries a full, `.lnk`-resolved
+   absolute path, and `std::filesystem::path`'s own `operator/` semantics
+   mean joining an absolute path onto either directory candidate simply
+   yields that same absolute path back - `resolve_system_executable`
+   verifies it exists without needing a separate code path for "already
+   absolute." Not a coincidence to leave undocumented: this is why an
+   Admin-Tools-discovered target (which can live anywhere, not just
+   System32/the Windows root) still resolves correctly through this tier.
+
+   **Windows-locations data source.** Not a single hand-typed table anymore
+   - `scan_windows_locations()` combines real OS enumeration (known folders
+   via `IKnownFolderManager`, queried against a small fixed allowlist of
+   `KNOWNFOLDERID`s - which folders are worth exposing is curated, but each
+   one's current real display name/shell path is asked of Windows, not
+   hand-typed; Administrative Tools shortcuts via `.lnk` enumeration -
+   `IShellLink`/`IPersistFile`, each target verified to exist before being
+   accepted) with a small, explicitly-justified hardcoded exception list for
+   the two categories with no discoverable API at all (`ms-settings:` deep
+   links - Microsoft exposes no list of valid sub-pages) or not yet
+   automated (5 deferred Control Panel applets - genuinely enumerable via
+   Shell PIDL/`IEnumIDList`, meaningfully fiddlier COM code, a candidate for
+   a focused follow-up; 4 stable admin one-liners - Task Manager, Device
+   Manager, Disk Management, Control Panel itself - not confidently
+   guaranteed to appear as standalone Admin Tools shortcuts on every Windows
+   install). Scanned once at startup (`DroidHost::initialize()`, mirroring
+   `scan_installed_applications()`) and cached in `windows_locations_`, not
+   re-scanned per lookup. `find_known_windows_target`'s matching
+   algorithm itself (exact/substring, then word-order-independent
+   `words_all_present`) is completely unchanged - only where the data comes
+   from changed.
 3. **If nothing resolves, fail outright - never guess.** An unresolved bare
    name (or a given path that doesn't actually exist) is a clean, explicit
    error (`resolution_source` empty, `launched:false`, a message telling the
@@ -891,7 +923,7 @@ reporting success.
    verification - see the "Agent-turn reliability" table in "Algorithms
    reference" below).
 7. **Search before giving up, and never let deterministic recognition trap a
-   request it can't actually resolve.** `find_well_known_windows_target` has
+   request it can't actually resolve.** `find_known_windows_target` has
    a word-order-independent fallback tier - "partition disk" still finds
    the "disk partition" alias even though neither phrase contains the
    other. But no matcher covers every phrasing, so recognizing *that* a
@@ -908,7 +940,7 @@ reporting success.
 
 | Layer | What it does | Where |
 |---|---|---|
-| Deterministic recognition | A high-confidence request shape ("open the memory panel") resolves to a real Windows target *before the model is ever asked to decide* - no LLM guess enters the picture at all for the shapes this covers. Word-order-independent, and never commits to a doomed confirmation when nothing actually resolves - falls through to the agent loop instead. | `src/intent/open_intent.cpp`, `find_well_known_windows_target` (`cli/host.cpp`), the quick-open handler (`cli/tui.cpp`) |
+| Deterministic recognition | A high-confidence request shape ("open the memory panel") resolves to a real Windows target *before the model is ever asked to decide* - no LLM guess enters the picture at all for the shapes this covers. Word-order-independent, and never commits to a doomed confirmation when nothing actually resolves - falls through to the agent loop instead. | `src/intent/open_intent.cpp`, `find_known_windows_target` (`cli/host.cpp`), the quick-open handler (`cli/tui.cpp`) |
 | Pre-approval resolution | Runs the full trust-ordered resolution *before* a gated call is ever shown to a human as a yes/no - rewrites the proposal to the already-verified target on success, or fails immediately (no prompt at all) if nothing resolves. The human never approves a proposal that references something that doesn't exist. | `DroidHost::precheck_and_resolve_gated_call` (`cli/host.cpp`) |
 | Resolution (this ruleset) | Rules 1-3 above - trust-ordered, verified-or-refused, never a blind guess. Shared by the pre-approval precheck and execution itself, so they can't resolve the same input differently. | `DroidHost::resolve_open_application_target` (`cli/host.cpp`) |
 | Execution-layer enforcement | The last line of defense against a resolution bug: even if a caller somehow got this wrong, `launch_application` itself refuses to run an unresolved bare name rather than falling back to its own blind search. | `launch_application` (`cli/command_runner.cpp`) |
