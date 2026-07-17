@@ -141,7 +141,7 @@ metaagent/                        (repository directory name unchanged)
 │   ├── session/                   RuntimeSession + status strings
 │   ├── app/                       tasks (persistent task queue)
 │   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageRuntime + ModelProvider interface
-│   ├── intent/                    Deterministic "open X"/pending-command phrase recognizers (no LLM, no I/O)
+│   ├── intent/                    Deterministic open/create-file/create-image/pending-command phrase recognizers + shared phrase_strip helpers (no LLM, no I/O)
 │   ├── classify/                  TurnDecision + try_deterministic_classify/try_template_reply (Classify -> Execute -> Phrase, no LLM, no I/O)
 │   └── reliability/               Path/destructive-command guards used by cli/host.cpp (no LLM, no I/O)
 ├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, MemoryStore (SQLite), HTTP route mount, entrypoint
@@ -263,7 +263,7 @@ rather than being conflated with process/state management.
 | `session/types` + `status` | `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
 | `media/decode` + `probe` | FFmpeg-backed decode + probe (host stages the DLLs) |
 | `reliability/*` | `path_guards`/`command_guards` - the placeholder-path/destructive-command heuristics that validate an already-decided action or path (see "Algorithms reference" below) |
-| `intent/*` | `open_intent` (deterministic "open X" recognizer) and `pending_command` (deterministic "yes" confirms a just-proposed command) - pure string scanning, no LLM, no I/O |
+| `intent/*` | `open_intent`, `create_file_intent`, `create_image_intent` (deterministic "open X"/"create a file"/"create an image" recognizers), `pending_command` (deterministic "yes" confirms a just-proposed command), and `phrase_strip` (shared courtesy/filler-stripping helpers all four use) - pure string scanning, no LLM, no I/O |
 | `classify/*` | `turn_decision` (`TurnDecision`/`try_deterministic_classify`, composing the two `intent/*` recognizers) and `response_templates` (`try_template_reply`) - the portable half of Classify -> Execute -> Phrase, see "The agent turn" below |
 
 ### `droidcli-runtime` — agent loop, connectors, tasks, spawn attribution
@@ -593,6 +593,17 @@ placeholder-looking, or invented-desktop `work_dir` to the real Desktop
 same resolution again at execution time, and a placeholder embedded
 *inside* the command/args text itself (not a separate field - a second
 observed shape) fails outright at both layers rather than being guessed at.
+
+**App vs. Windows-location is now visible in the reply, not just the log.**
+`open_application` already transparently resolves both installed apps and
+known Windows locations (Settings pages, Control Panel applets) under one
+trust-ordered pipeline - see "Windows execution ruleset" below - but the
+phrased response used to say "Opened C:\...\SystemSettings.exe ms-settings:display."
+either way. `ResolvedLaunchTarget::display_name` (set only for a
+`windows_known_location` match) now rides through `precheck_and_resolve_gated_call`'s
+rewritten arguments_json as `resolved_display_name`, and `try_template_reply`
+prefers it: "Opened Display Settings." - visibly different from an app
+launch, without changing resolution order or priority at all.
 
 If a retriable tool's execution genuinely fails (`ok:false` on one of
 `kRetriableTools` - `run_command`, `run_ffmpeg`, the filesystem tools,
@@ -972,14 +983,18 @@ under the new design.
 A narrow, high-confidence request shape is recognized by pure string
 scanning instead of trusting the local model's own tool-calling judgment.
 A false negative (falling through to a real classification call) is always
-safe, so recognition stays deliberately narrow. Both recognizers below are
-reached through one unified entry point now, `classify::try_deterministic_classify`
-(`classify/turn_decision.cpp`), rather than two separate call sites in
-`host.cpp` the way they used to be.
+safe, so recognition stays deliberately narrow. All four recognizers below
+are reached through one unified entry point, `classify::try_deterministic_classify`
+(`classify/turn_decision.cpp`). `to_lower_ascii`/`trim_ascii`/`is_word_char`/
+`strip_leading_courtesy`/`strip_trailing_filler`/`find_whole_word`/
+`truncate_before_save_clause` live in `intent/phrase_strip.{hpp,cpp}`,
+shared by all four rather than duplicated per recognizer.
 
 | Algorithm | Location | What it does |
 |---|---|---|
 | `parse_open_intent` | `open_intent.cpp` | "open/launch/start X" as the first word, after courtesy/filler stripping - narrow enough that "how do I open a file in Python" never matches. |
+| `parse_create_file_intent` | `create_file_intent.cpp` | "create/make a file called X" - requires the whole word "file" (so "create a folder called X" doesn't match) and an explicit naming keyword (never guesses a name). Maps to an empty-content `write_file` call. |
+| `parse_create_image_intent` | `create_image_intent.cpp` | "create/make a WxH `<color>` image [called X]" - requires the verb, the whole word "image", a `WxH` digit pattern, and a color from a fixed whitelist, all four independently. Maps to a fully code-constructed `run_ffmpeg` call (`-f lavfi -i color=<color>:s=WxH ...`) - the ffmpeg invocation is never model-authored text for this shape. |
 | `extract_proposed_command` | `pending_command.cpp` | Scans the assistant's previous message for a permission phrase plus a fenced/bare command, together - lets a bare "yes" execute it directly. |
 | `is_bare_affirmative` | `pending_command.cpp` | Whole-string match (not substring) against a fixed affirmative list - "yes but not that one" correctly doesn't trigger the bypass. |
 | `resolve_open_application_target` | `host.cpp` | The Windows execution ruleset's trust-ordered resolution - see that section above, not repeated here. |

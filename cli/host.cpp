@@ -2026,6 +2026,7 @@ DroidHost::ResolvedLaunchTarget DroidHost::resolve_open_application_target(const
 		result.resolved = true;
 		result.target = system_path;
 		result.source = "windows_known_location";
+		result.display_name = windows_target.display_name;
 		if (result.effective_args.empty())
 		{
 			result.effective_args = windows_target.args;
@@ -2153,11 +2154,20 @@ bool DroidHost::precheck_and_resolve_gated_call(ai::ToolCall& call, core::String
 
 	// Rewrite in place - what the human approves and what actually executes
 	// are now guaranteed to be the exact same, already-verified target.
+	// resolved_display_name (only set for a windows_known_location match)
+	// rides along in the rewritten arguments_json rather than being
+	// re-derived later - by the time open_application() executes, path_or_name
+	// is already a literal resolved path, so a second resolve_open_application_target
+	// call would hit the "given_path" tier instead and lose the friendly name.
 	call.arguments_json = "{"
 		+ net::json_string_field("path_or_name", resolved.target) + ","
 		+ net::json_string_field("args", resolved.effective_args) + ","
-		+ net::json_string_field("work_dir", work_dir)
-		+ "}";
+		+ net::json_string_field("work_dir", work_dir);
+	if (!resolved.display_name.empty())
+	{
+		call.arguments_json += "," + net::json_string_field("resolved_display_name", resolved.display_name);
+	}
+	call.arguments_json += "}";
 	return true;
 }
 
@@ -2166,6 +2176,11 @@ core::String DroidHost::open_application(const core::String& body)
 	const core::String path_or_name = net::extract_json_string_field(body, "path_or_name");
 	const core::String args = net::extract_json_string_field(body, "args");
 	const core::String work_dir = net::extract_json_string_field(body, "work_dir");
+	// Passed through verbatim from precheck_and_resolve_gated_call's own
+	// resolution, not re-derived here - see that function's comment for why
+	// a second resolve_open_application_target call at this point would lose
+	// it (path_or_name is already a literal resolved path by now).
+	const core::String passthrough_display_name = net::extract_json_string_field(body, "resolved_display_name");
 
 	if (path_or_name.empty())
 	{
@@ -2212,6 +2227,15 @@ core::String DroidHost::open_application(const core::String& body)
 	// ruleset" in ARCHITECTURE.md.
 	stream << net::json_string_field("resolution_source", resolution_source) << ',';
 	stream << net::json_string_field("error", result.error_message);
+	// The friendly Windows-location name ("Display Settings"), when this
+	// resolved through that tier - lets the phrased response say what was
+	// actually opened instead of a raw exe+args string. See the passthrough
+	// comment above for why this is read back from body, not re-derived.
+	const core::String display_name = !passthrough_display_name.empty() ? passthrough_display_name : resolved.display_name;
+	if (!display_name.empty())
+	{
+		stream << ',' << net::json_string_field("resolved_display_name", display_name);
+	}
 	stream << '}';
 	return stream.str();
 }

@@ -709,6 +709,12 @@ private:
 		core::String target;         // full path to hand to launch_application
 		core::String effective_args; // args, filled in from a matched well-known target if the caller gave none
 		core::String source;         // "given_path" | "app_paths_registry" | "installed_apps_index" | "windows_known_location" | "path_search"
+		// The friendly name from WellKnownWindowsTargetEntry (e.g. "Display
+		// Settings") - set only when source is "windows_known_location",
+		// empty otherwise. Lets the phrased response say "Opened Display
+		// Settings." instead of a raw exe+args string, so a Windows-location
+		// call reads visibly differently from an app launch.
+		core::String display_name;
 		core::String error_message;  // set only when resolved is false
 	};
 	ResolvedLaunchTarget resolve_open_application_target(const core::String& path_or_name, const core::String& args) const;

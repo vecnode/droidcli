@@ -27,6 +27,16 @@ int main()
 		assert(reply == "Couldn't open it: nothing resolved");
 	}
 
+	// open_application via the windows_known_location tier - prefers the
+	// friendly display name over the raw exe+args path.
+	{
+		const String reply = try_template_reply(
+			"open_application",
+			"{\"path_or_name\":\"display settings\"}",
+			"{\"ok\":true,\"launched\":true,\"pid\":456,\"resolved_path\":\"C:\\\\Windows\\\\System32\\\\SystemSettings.exe\",\"resolution_source\":\"windows_known_location\",\"error\":\"\",\"resolved_display_name\":\"Display Settings\"}");
+		assert(reply == "Opened Display Settings.");
+	}
+
 	// write_file success.
 	{
 		const String reply = try_template_reply(
