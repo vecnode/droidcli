@@ -7,15 +7,17 @@
 Core capabilities: 
 - Interactive terminal dashboard [FTXUI](https://github.com/ArthurSonzogni/FTXUI), default mode - chat panel plus live connector/task/log views
 - [Ollama](https://ollama.com/) tool-calling agent loop, self-contained (no MCP client): the model can act on this machine directly
-- Persistent, per-session agent memory (SQLite-backed) - conversations survive a restart and are queryable over the HTTP API
-- Pluggable LLM provider abstraction: [Ollama](https://ollama.com/)
+- Persistent, per-session agent memory (SQLite-backed): conversation history, a "lessons learned" store of past command fixes, and a name→path memory for known locations - survives restarts, queryable over the HTTP API
+- Pluggable LLM provider abstraction: [Ollama](https://ollama.com/) and [Anthropic](https://www.anthropic.com/) (Claude)
 - Filesystem tools (read/write/list/stat files, resolve executables on PATH)
 - Run shell commands, and open/launch GUI applications (detached, not blocked on)
 - Installed-application discovery, scanned at startup (Windows Add/Remove Programs registry, plus built-in Windows accessories)
-- Generic connectors (http_peer or launched_process, PID-tracked) and a persistent task queue
+- Generic connectors (http_peer or launched_process, PID-tracked) and a persistent task queue with one-shot and cron-style recurring scheduling
 - Structured JSONL application log, with session and background-thread attribution
 - Bearer-token authentication on the whole HTTP API by default
 - Media decode [FFmpeg](https://www.ffmpeg.org/)
+
+
 
 Full design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
  Working in the repo as an agent: [AGENTS.md](./AGENTS.md).
