@@ -83,14 +83,14 @@ MCP client. Extend it *with* these properties, not around them:
    `write_file` re-`stat_path()`s what it just wrote
    (`verified_exists`/`verified_size_bytes`); `remember_location` only
    persists a location a live `stat_path()` confirms is real right now.
-4. Every heuristic guard (`looks_like_*`, `substitute_bare_desktop_token`,
-   the `src/intent/` recognizers) is written so a false negative just falls
-   through to the normal path — a false positive (misfiring on something
-   unrelated) is the failure mode to avoid.
-5. Deterministic bypasses ("open X", a bare "yes" confirming a proposed
-   command) are reserved for narrow, high-confidence request shapes
-   recognized by pure string scanning — never a general substitute for the
-   model's own judgment.
+4. Every heuristic guard (`looks_like_*`, `substitute_bare_desktop_token`)
+   is written so a false negative just falls through to the normal path — a
+   false positive (misfiring on something unrelated) is the failure mode to
+   avoid.
+5. Every request, regardless of shape, is routed through one LLM
+   classification call (`classify_via_llm`) — droidcli does not maintain a
+   second, deterministic routing path around it (see `AGENTS.md` extension
+   point 7).
 6. `tool_call_requires_approval()` (`cli/host.cpp`) gates every
    side-effecting tool behind human approval; read-only tools are never
    gated.
@@ -104,9 +104,9 @@ MCP client. Extend it *with* these properties, not around them:
    not just whether a tool ran) is recorded as open rather than papered over
    with a narrow regex that wouldn't generalize.
 9. The model decides at most one action per turn, never both decides and
-   narrates the outcome: `classify_turn()` picks a deterministic match or
-   makes exactly one LLM classification call; execution is always
-   deterministic code, never the model's own say-so; the reply is either a
+   narrates the outcome: `classify_via_llm()` makes exactly one LLM
+   classification call; execution is always deterministic code, never the
+   model's own say-so; the reply is either a
    zero-LLM-call template or a second, narrowly-grounded phrasing call shown
    only the actual result. A failed, retriable action gets exactly one
    bounded auto-retry (`finish_turn_after_execution()`), never a nudge loop -
@@ -141,8 +141,7 @@ metaagent/                        (repository directory name unchanged)
 │   ├── session/                   RuntimeSession + status strings
 │   ├── app/                       tasks (persistent task queue)
 │   ├── ai/                        Ollama text-gen client (incl. tool-calling) + LanguageRuntime + ModelProvider interface
-│   ├── intent/                    Deterministic open/create-file/create-image/pending-command phrase recognizers + shared phrase_strip helpers (no LLM, no I/O)
-│   ├── classify/                  TurnDecision + try_deterministic_classify/try_template_reply (Classify -> Execute -> Phrase, no LLM, no I/O)
+│   ├── classify/                  TurnDecision + try_template_reply (Classify -> Execute -> Phrase, no LLM, no I/O)
 │   └── reliability/               Path/destructive-command guards used by cli/host.cpp (no LLM, no I/O)
 ├── cli/                            droidcli host: DroidHost, ProcessManager, command_runner, MemoryStore (SQLite), HTTP route mount, entrypoint
 ├── tools/                         mini_http_server + sync_http_client (raw-socket HTTP, WinHTTP for https://)
@@ -174,7 +173,7 @@ flowchart TB
     end
 
     subgraph L4["Agent"]
-        RUNTIME["droidcli-runtime\nagent_turn: classify_turn ·\nexecute_decision_or_pause · phrase_result ·\nConnectorRegistry · TaskQueue"]
+        RUNTIME["droidcli-runtime\nagent_turn: classify_via_llm ·\nexecute_decision_or_pause · phrase_result ·\nConnectorRegistry · TaskQueue"]
         MEMORY["droidcli-memory\nMemoryStore (SQLite)"]
         CONFIG["droidcli-config\nHostConfig · settings_store"]
         RUNTIME --> MEMORY
@@ -191,7 +190,7 @@ flowchart TB
     end
 
     subgraph L1["Foundations — the OS boundary"]
-        DCORE["droidcli-core\ncore/types+math · net/json ·\nreliability/* · intent/* ·\nsession/types+status · media/decode+probe\n(pure, no real I/O)"]
+        DCORE["droidcli-core\ncore/types+math · net/json ·\nreliability/* · classify/* ·\nsession/types+status · media/decode+probe\n(pure, no real I/O)"]
         INFRA["droidcli-infra\nprocess_manager · command_runner ·\nos_registry · app_index · window_list ·\nsystem_info · hardware_info · windows_service ·\ndb/*.json flat-file persistence\n(every direct OS-specific call, Windows today)"]
     end
 
@@ -263,8 +262,7 @@ rather than being conflated with process/state management.
 | `session/types` + `status` | `RuntimeSession`, `FeatureFlags` (ai/networking/recording/ui), status |
 | `media/decode` + `probe` | FFmpeg-backed decode + probe (host stages the DLLs) |
 | `reliability/*` | `path_guards`/`command_guards` - the placeholder-path/destructive-command heuristics that validate an already-decided action or path (see "Algorithms reference" below) |
-| `intent/*` | `open_intent`, `create_file_intent`, `create_image_intent` (deterministic "open X"/"create a file"/"create an image" recognizers), `pending_command` (deterministic "yes" confirms a just-proposed command), and `phrase_strip` (shared courtesy/filler-stripping helpers all four use) - pure string scanning, no LLM, no I/O |
-| `classify/*` | `turn_decision` (`TurnDecision`/`try_deterministic_classify`, composing the two `intent/*` recognizers) and `response_templates` (`try_template_reply`) - the portable half of Classify -> Execute -> Phrase, see "The agent turn" below |
+| `classify/*` | `turn_decision` (`TurnDecision`, the plain-data result of one LLM classification call) and `response_templates` (`try_template_reply`) - the portable half of Classify -> Execute -> Phrase, see "The agent turn" below |
 
 ### `droidcli-runtime` — agent loop, connectors, tasks, spawn attribution
 
@@ -273,8 +271,8 @@ rather than being conflated with process/state management.
 | `net/connector` | **Generic peer registry**: `Connector` (`http_peer` \| `launched_process`), `ConnectorRegistry` register/unregister/list/find, JSON build/parse |
 | `app/tasks` | **Persistent task queue**: `Task` (incl. `result_json`, one-shot delay, cron-style `recurrence_ms`), `TaskQueue` (enqueue/claim_next/complete/fail/find/list) |
 | `core/spawn` | **Spawn attribution**: `spawn(name, fn, sink)` - named `std::thread` construction reporting "spawned"/"joined"/"threw: ..." via an optional `ThreadEventSink`. `cli/tui.cpp`'s background threads wire the sink to `DroidHost::log_thread_event` |
-| `classify/turn_decision`, `classify/response_templates` | **Classify -> Execute -> Phrase**: `classify::TurnDecision`/`try_deterministic_classify` (wraps `intent::parse_open_intent`/`extract_proposed_command`, pure/portable) and `classify::try_template_reply` (zero-LLM-call phrasing for the common tool results) - see "The agent turn" below |
-| `DroidHost::classify_turn`/`classify_via_llm`/`execute_decision_or_pause`/`finish_turn_after_execution`/`phrase_result`/`phrase_via_llm` (`cli/host.cpp`) | The host-side driver: decide at most one action (a deterministic match, or one `ai::ModelProvider` classification call), run it through the unchanged gate/execution pipeline, one bounded auto-retry on a retriable failure, then phrase the result - never a multi-hop loop where the model both decides and narrates. Every step is logged (`append_app_log`, `"chat"` channel) and persisted (`record_agent_message`) to `droidcli-memory` |
+| `classify/turn_decision`, `classify/response_templates` | **Classify -> Execute -> Phrase**: `classify::TurnDecision` (the plain-data result of one LLM classification call, pure/portable) and `classify::try_template_reply` (zero-LLM-call phrasing for the common tool results) - see "The agent turn" below |
+| `DroidHost::classify_via_llm`/`execute_decision_or_pause`/`finish_turn_after_execution`/`phrase_result`/`phrase_via_llm` (`cli/host.cpp`) | The host-side driver: decide at most one action (one `ai::ModelProvider` classification call), run it through the unchanged gate/execution pipeline, one bounded auto-retry on a retriable failure, then phrase the result - never a multi-hop loop where the model both decides and narrates. Every step is logged (`append_app_log`, `"chat"` channel) and persisted (`record_agent_message`) to `droidcli-memory` |
 
 ### `droidcli-providers` — LLM backends
 
@@ -454,7 +452,6 @@ over HTTP, so it never needs the token.
 | `GET` | `/api/system` `[auth]` | The host machine droidcli is running on — `os_name`/`os_version`/`architecture`/`hostname`/`username`/`cwd`, queried once at startup |
 | `POST` | `/api/open` `[auth]` | Launch a GUI application, detached (no wait, no output capture) — body `{"path_or_name":"...","args":"...","work_dir":"..."}` |
 | `POST` | `/api/apps/find` `[auth]` | Search the installed-apps index (scanned at startup) — body `{"query":"..."}`, returns `{"matches":[{"name":...,"path":...}]}` |
-| `POST` | `/api/apps/quick_open` `[auth]` | Deterministic, LLM-free "open X" recognizer — body `{"message":"..."}`, returns `{"matched":bool,"app_name":"...","ambiguous":bool,"resolved_name":"...","resolved_path":"...","candidates":[...]}` (see "Quick-open" below) |
 | `GET` | `/api/apps/open` `[auth]` | Live snapshot of currently open windows — `{"windows":[{"title":...,"process_name":...,"pid":...}]}`, re-enumerated fresh on every call |
 | `POST` | `/api/fs/read` `[auth]` | Read a file — body `{"path":"...","max_bytes":65536}`, response reports `truncated` |
 | `POST` | `/api/fs/write` `[auth]` | Write/append a file — body `{"path":"...","content":"...","append":false}` |
@@ -501,29 +498,6 @@ on its `connector_id`; `command: "run"` runs `payload_json`'s `{"command":"...",
 as a one-shot shell command (no `connector_id` needed); any other command is
 treated as the HTTP path to call on an `http_peer` connector.
 
-### Quick-open (`POST /api/apps/quick_open`)
-
-`intent::parse_open_intent()` (`src/intent/open_intent.hpp`/`.cpp`, portable
-core, network-free, unit tested in `tests/intent_test.cpp`) recognizes
-"open/launch/start X" as the first word of a message (after stripping
-courtesy/filler phrasing) via pure string scanning - no LLM call. This
-exists because a small local model asked to "open Blender" sometimes claims
-it can't, even though the tool exists; recognizing the shape deterministically
-bypasses that failure mode entirely.
-
-`DroidHost::try_quick_open_json()` (`cli/host.cpp`) resolves a recognized
-`app_name` against the installed-apps index (`installed_apps_`, including a
-built-in-accessories table for apps that never register an Add/Remove
-Programs entry - Notepad, Calculator, Paint, Command Prompt, PowerShell,
-File Explorer, Task Manager, Control Panel, Snipping Tool, Magnifier,
-Registry Editor, Character Map, Remote Desktop Connection, Disk Cleanup) and
-reports an unambiguous match, an ambiguous candidate set, or nothing found.
-The TUI (`cli/tui.cpp`) calls this on every Enter press before the
-agent-turn worker; on a match it asks the user to confirm before calling
-`open_application` - the LLM is bypassed for recognition, a human still
-approves every launch. Name matching (`normalize_for_match()`) is case- and
-spacing/punctuation-insensitive.
-
 ### Persistent memory (SQLite) — `cli/memory_store.cpp`
 
 Every message `DroidHost::agent_turn` adds to a session's transcript -
@@ -562,27 +536,20 @@ three steps: **classify** one action (or none), **execute** it through the
 unchanged, fully deterministic gate/resolution pipeline, then **phrase** a
 reply from the actual result - never from the model's own unverified say-so.
 
-**Classify** (`DroidHost::classify_turn`, `cli/host.cpp`): tries
-`classify::try_deterministic_classify` first (`src/classify/turn_decision.cpp`,
-wraps `intent::parse_open_intent`/`extract_proposed_command`+
-`is_bare_affirmative` - pure string scanning, no LLM call at all). If neither
-recognizer matches, exactly **one** `ai::ModelProvider` call is made
-(`classify_via_llm`) with the full tool set - the model's response is
-reduced to a single decision no matter what it actually returns: the first
-`tool_calls` entry only (any extras are logged and discarded - a structural
-cap, not a request the model has to reliably follow), or a plain-text reply
-if it returned no tool call. The model's own `assistant_message` accompanying
-a tool call is never persisted or shown - there is nothing left for a
-fabricated "I did X" to attach to.
+**Classify** (`DroidHost::classify_via_llm`, `cli/host.cpp`): exactly **one**
+`ai::ModelProvider` call is made with the full tool set - the model's
+response is reduced to a single decision no matter what it actually returns:
+the first `tool_calls` entry only (any extras are logged and discarded - a
+structural cap, not a request the model has to reliably follow), or a
+plain-text reply if it returned no tool call. The model's own
+`assistant_message` accompanying a tool call is never persisted or shown -
+there is nothing left for a fabricated "I did X" to attach to.
 
 **Execute** (`DroidHost::execute_decision_or_pause`): the decided
 `{tool_name, arguments_json}` goes through the exact same pipeline every
 tool call always has - `tool_call_requires_approval()`'s gate,
 `precheck_and_resolve_gated_call()`/the Windows execution ruleset, then
-`execute_agent_tool()`. A `pending_command` bare-"yes" match skips the gate
-(the user's "yes" to the assistant's own just-proposed command already IS
-the approval); every other decision, deterministic or model-classified,
-pauses for human approval exactly like today if it names a gated tool.
+`execute_agent_tool()`.
 
 **A model-classified `work_dir` is never trusted as-is.** A real transcript
 showed the classifier invent a `run_ffmpeg` `work_dir` of `/path/to/Desktop`
@@ -610,11 +577,10 @@ If a retriable tool's execution genuinely fails (`ok:false` on one of
 `kRetriableTools` - `run_command`, `run_ffmpeg`, the filesystem tools,
 `open_application`), `DroidHost::finish_turn_after_execution` makes **one**
 bounded auto-retry: the real error is appended to the transcript and
-`classify_via_llm` is called again (never the deterministic recognizers -
-they'd just recognize the identical shape and fail identically), then
-whatever it decides executes once more, then phrasing happens regardless of
-outcome. A user's explicit *decline* of a gated call never triggers this -
-that's a veto, not a technical failure to correct.
+`classify_via_llm` is called again, then whatever it decides executes once
+more, then phrasing happens regardless of outcome. A user's explicit
+*decline* of a gated call never triggers this - that's a veto, not a
+technical failure to correct.
 
 **Phrase** (`DroidHost::phrase_result`): `classify::try_template_reply`
 (`src/classify/response_templates.cpp`) first - a fully deterministic,
@@ -631,16 +597,13 @@ transport/HTTP failure falls back to a hard-coded generic sentence
 flowchart TD
     Start(["POST /api/agent/turn\nnew user message"]) --> Pending{"Pending gated\ntool call for this\nsession?"}
     Pending -- yes --> Abandon["Abandon it - record a\nsystem note in the transcript"]
-    Abandon --> Classify
-    Pending -- no --> Classify{"classify::try_deterministic_classify\n(open_intent / pending_command)?"}
-
-    Classify -- matched --> Decision["TurnDecision"]
-    Classify -- "no match" --> LlmCall["One classify_via_llm call\n(full tool set)"]
+    Abandon --> LlmCall
+    Pending -- no --> LlmCall["One classify_via_llm call\n(full tool set)"]
     LlmCall --> LlmResult{"tool_calls\nnon-empty?"}
-    LlmResult -- "yes (take first,\ndiscard rest + prose)" --> Decision
+    LlmResult -- "yes (take first,\ndiscard rest + prose)" --> Decision["TurnDecision"]
     LlmResult -- no --> PlainReply["PlainReply -\nassistant_message shown as-is\n(no tool ran, nothing to phrase)"]
 
-    Decision --> Gate{"tool_call_requires_approval?\n(skipped if already_approved -\npending_command's bare 'yes')"}
+    Decision --> Gate{"tool_call_requires_approval?"}
     Gate -- yes --> Pause["Pause - return\npending_tool_call\n(POST /api/agent/tool_decision\nresolves it)"]
     Gate -- no --> Execute["execute_agent_tool()\nrecord result"]
 
@@ -722,7 +685,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 Tests: `media_decode_test`, `net_handler_test`, `ollama_client_test`,
-`language_runtime_test`, `connector_test`, `task_queue_test`, `intent_test`,
+`language_runtime_test`, `connector_test`, `task_queue_test`,
 `model_provider_test`, `spawn_test`.
 
 On Windows the whole tree builds with **one MSVC runtime**
@@ -922,25 +885,18 @@ reporting success.
    rejection, invented-Desktop-path rejection, ground-truth post-write
    verification - see the "Agent-turn reliability" table in "Algorithms
    reference" below).
-7. **Search before giving up, and never let deterministic recognition trap a
-   request it can't actually resolve.** `find_known_windows_target` has
-   a word-order-independent fallback tier - "partition disk" still finds
-   the "disk partition" alias even though neither phrase contains the
-   other. But no matcher covers every phrasing, so recognizing *that* a
-   message is an open-request (`parse_open_intent`'s verb-shape check) is
-   not the same thing as having found something real to open - the TUI's
-   deterministic quick-open path only commits to its yes/no confirmation
-   flow when a candidate or a resolved target actually exists; otherwise it
-   falls through to the normal agent loop instead of proposing a
-   guaranteed-to-fail "try it anyway". The agent loop has
-   `find_application`/`list_windows_locations` and can search further
-   before honestly reporting it couldn't find anything.
+7. **Search before giving up.** `find_known_windows_target` has a
+   word-order-independent fallback tier - "partition disk" still finds the
+   "disk partition" alias even though neither phrase contains the other -
+   but no matcher covers every phrasing. When a name doesn't resolve, the
+   model has `find_application`/`list_windows_locations` to search further
+   before honestly reporting it couldn't find anything, rather than
+   proposing a guaranteed-to-fail "try it anyway".
 
 ### Where this is enforced (defense in depth, not one checkpoint)
 
 | Layer | What it does | Where |
 |---|---|---|
-| Deterministic recognition | A high-confidence request shape ("open the memory panel") resolves to a real Windows target *before the model is ever asked to decide* - no LLM guess enters the picture at all for the shapes this covers. Word-order-independent, and never commits to a doomed confirmation when nothing actually resolves - falls through to the agent loop instead. | `src/intent/open_intent.cpp`, `find_known_windows_target` (`cli/host.cpp`), the quick-open handler (`cli/tui.cpp`) |
 | Pre-approval resolution | Runs the full trust-ordered resolution *before* a gated call is ever shown to a human as a yes/no - rewrites the proposal to the already-verified target on success, or fails immediately (no prompt at all) if nothing resolves. The human never approves a proposal that references something that doesn't exist. | `DroidHost::precheck_and_resolve_gated_call` (`cli/host.cpp`) |
 | Resolution (this ruleset) | Rules 1-3 above - trust-ordered, verified-or-refused, never a blind guess. Shared by the pre-approval precheck and execution itself, so they can't resolve the same input differently. | `DroidHost::resolve_open_application_target` (`cli/host.cpp`) |
 | Execution-layer enforcement | The last line of defense against a resolution bug: even if a caller somehow got this wrong, `launch_application` itself refuses to run an unresolved bare name rather than falling back to its own blind search. | `launch_application` (`cli/command_runner.cpp`) |
@@ -948,7 +904,7 @@ reporting success.
 | Human-facing transparency | The approval prompt shows a full, resolved path when one was given, not a bare guess a human can't verify at a glance. | `display_arguments_with_full_paths` (`cli/host.cpp`) |
 | Post-execution truth | `resolved_path`/`resolution_source` report what actually ran, independent of what was asked for - the last line of defense if every earlier layer still let something surprising through. | `LaunchAppResult` (`cli/command_runner.hpp`), `DroidHost::open_application` |
 | Self-correction on failure | An `open_application` failure (including a pre-approval resolution failure) is a retriable-tool failure - the model gets pushed to retry with a corrected, real name instead of stalling or asking the user again. | `kRetriableTools` (`cli/host.cpp`) |
-| Regression coverage | `tests/intent_test.cpp`/`tests/path_guards_test.cpp` lock in the pure-logic pieces (courtesy-phrase stripping, path-guard heuristics) - run `ctest` after any change touching this area. | `tests/` |
+| Regression coverage | `tests/path_guards_test.cpp` locks in the pure-logic path-guard heuristics - run `ctest` after any change touching this area. | `tests/` |
 
 None of these layers alone is sufficient on its own - a gap in one layer (a
 phrasing the deterministic recognizer misses, a tool description a smaller
@@ -996,7 +952,6 @@ under the new design.
 
 | Algorithm | Location | What it does |
 |---|---|---|
-| `try_deterministic_classify` | `classify/turn_decision.cpp` | Tries `open_intent`/`pending_command` and maps a match directly to a resolved `{tool_name, arguments_json}` - see "Deterministic bypasses" below. |
 | `classify_via_llm` | `host.cpp` | The one LLM call a turn (or its single retry) ever makes - takes the response's first `tool_calls` entry only, discards any extras and the accompanying `assistant_message` outright. |
 | `try_template_reply` | `classify/response_templates.cpp` | Zero-LLM-call phrasing for the common tool results, built only from the actual `result_json` fields - never invents anything beyond them. |
 | `phrase_via_llm` | `host.cpp` | The phrasing fallback when no template matches - no tools attached (so it can't decide a new action), given only the ground-truth result and told to state only what it says. |
@@ -1009,27 +964,6 @@ under the new design.
 | `looks_like_destructive_command` | `command_guards.cpp` | Flags an unambiguously destructive shell shape so the approval prompt can warn - a visibility aid, not a gate. |
 | Post-action ground-truth verification | every mutating tool (`host.cpp`) | An independent re-check via the same OS API confirms a claimed effect actually happened, before the result reaches the model. |
 | `remember_location_json` pre-store check | `host.cpp` | A name → path mapping is only persisted if a live `stat_path()` confirms it's real right now. |
-
-### Deterministic bypasses (`src/intent/`, `src/classify/`, portable core, no LLM call)
-
-A narrow, high-confidence request shape is recognized by pure string
-scanning instead of trusting the local model's own tool-calling judgment.
-A false negative (falling through to a real classification call) is always
-safe, so recognition stays deliberately narrow. All four recognizers below
-are reached through one unified entry point, `classify::try_deterministic_classify`
-(`classify/turn_decision.cpp`). `to_lower_ascii`/`trim_ascii`/`is_word_char`/
-`strip_leading_courtesy`/`strip_trailing_filler`/`find_whole_word`/
-`truncate_before_save_clause` live in `intent/phrase_strip.{hpp,cpp}`,
-shared by all four rather than duplicated per recognizer.
-
-| Algorithm | Location | What it does |
-|---|---|---|
-| `parse_open_intent` | `open_intent.cpp` | "open/launch/start X" as the first word, after courtesy/filler stripping - narrow enough that "how do I open a file in Python" never matches. |
-| `parse_create_file_intent` | `create_file_intent.cpp` | "create/make a file called X" - requires the whole word "file" (so "create a folder called X" doesn't match) and an explicit naming keyword (never guesses a name). Maps to an empty-content `write_file` call. |
-| `parse_create_image_intent` | `create_image_intent.cpp` | "create/make a WxH `<color>` image [called X]" - requires the verb, the whole word "image", a `WxH` digit pattern, and a color from a fixed whitelist, all four independently. Maps to a fully code-constructed `run_ffmpeg` call (`-f lavfi -i color=<color>:s=WxH ...`) - the ffmpeg invocation is never model-authored text for this shape. |
-| `extract_proposed_command` | `pending_command.cpp` | Scans the assistant's previous message for a permission phrase plus a fenced/bare command, together - lets a bare "yes" execute it directly. |
-| `is_bare_affirmative` | `pending_command.cpp` | Whole-string match (not substring) against a fixed affirmative list - "yes but not that one" correctly doesn't trigger the bypass. |
-| `resolve_open_application_target` | `host.cpp` | The Windows execution ruleset's trust-ordered resolution - see that section above, not repeated here. |
 
 ### Persistent memory (`cli/memory_store.cpp`) and host infrastructure
 
@@ -1069,7 +1003,7 @@ flowchart TB
         direction TB
         DUser["User (TUI or HTTP client)"]
         DHost["DroidHost::agent_turn"]
-        DLoop["classify_turn -> execute -> phrase\n(one decision per turn,\nplaceholder/desktop-path guards)"]
+        DLoop["classify_via_llm -> execute -> phrase\n(one decision per turn,\nplaceholder/desktop-path guards)"]
         DOllama["ai::OllamaProvider\n(chat + tool-calling)"]
         DTools["execute_agent_tool\n(native DroidHost methods -\nfiles, apps, clipboard, connectors)"]
         DVerify["Post-action ground-truth\nverification (stat_path/\nclipboard read-back)"]

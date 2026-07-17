@@ -283,8 +283,7 @@ std::vector<LogRow> parse_log_lines(const std::string& json)
 // launches their own unmistakable color in the log panel.
 bool is_process_launch_channel(const std::string& channel)
 {
-	return channel == "run" || channel == "ffmpeg" || channel == "open" || channel == "process"
-		|| channel == "quick_open";
+	return channel == "run" || channel == "ffmpeg" || channel == "open" || channel == "process";
 }
 
 // Boils DroidHost::connector_status_json()'s two response shapes (launched_process
@@ -475,117 +474,13 @@ std::vector<ChatEntry> parse_agent_turn_response(
 	return entries;
 }
 
-// One installed-app candidate from DroidHost::try_quick_open_json()'s
-// "candidates" array.
-struct AppOpenCandidate {
-	std::string name;
-	std::string path;
-};
-
-// Mirrors DroidHost::try_quick_open_json()'s response shape - the
-// deterministic, LLM-free "open X" recognizer (intent::parse_open_intent)
-// plus its resolution against the installed-apps index, and (Phase 21) a
-// fallback to droidcli's own built-in knowledge of Windows itself for things
-// that are not installed applications at all (Recycle Bin, Sound Settings,
-// Control Panel, ...) - only populated when candidates is empty.
-struct QuickOpenResult {
-	bool matched = false;
-	std::string app_name;
-	std::vector<AppOpenCandidate> candidates;
-	// Only for shaping the confirmation prompt text (below) - the actual
-	// launch just passes app_name through to DroidHost::open_application,
-	// which resolves it against this same built-in-Windows-knowledge table
-	// itself (cli/host.cpp, Phase 21), so the TUI never needs the resolved
-	// path_or_name/args to make the launch succeed.
-	bool resolved_windows_target = false;
-	std::string windows_target_display_name;
-};
-
-QuickOpenResult parse_quick_open_result(const std::string& json)
-{
-	QuickOpenResult result;
-	net::extract_json_bool_field(json, "matched", result.matched);
-	if (!result.matched)
-	{
-		return result;
-	}
-	result.app_name = net::extract_json_string_field(json, "app_name");
-	for (const std::string& object : extract_json_object_array(json, "candidates"))
-	{
-		AppOpenCandidate candidate;
-		candidate.name = net::extract_json_string_field(object, "name");
-		candidate.path = net::extract_json_string_field(object, "path");
-		if (!candidate.name.empty())
-		{
-			result.candidates.push_back(candidate);
-		}
-	}
-	net::extract_json_bool_field(json, "resolved_windows_target", result.resolved_windows_target);
-	if (result.resolved_windows_target)
-	{
-		result.windows_target_display_name = net::extract_json_string_field(json, "windows_target_display_name");
-	}
-	return result;
-}
-
-// UI-thread-owned state for the quick-open confirmation flow: set once a
-// message parses as an "open X" request, cleared once the user answers
-// (yes/no, a candidate number, or "cancel"). While active, the next Enter
-// press is consumed by this flow instead of being sent to Ollama.
-struct PendingOpen {
-	bool active = false;
-	std::string app_name;
-	// Empty: not found in the installed-apps index, confirm opening
-	// app_name directly. One entry: an unambiguous index match, confirm
-	// yes/no. More than one: ambiguous, ask the user to pick a number.
-	std::vector<AppOpenCandidate> candidates;
-	// Set instead of falling through to the generic "not in the index"
-	// prompt when candidates is empty and try_quick_open_json resolved a
-	// built-in Windows location/Settings page (Phase 21) - display-only, see
-	// QuickOpenResult's comment above for why the launch itself doesn't need
-	// these.
-	bool resolved_windows_target = false;
-	std::string windows_target_display_name;
-};
-
-std::string describe_pending_open_prompt(const PendingOpen& pending)
-{
-	if (pending.candidates.size() > 1)
-	{
-		std::ostringstream stream;
-		stream << "Multiple installed apps match '" << pending.app_name << "': ";
-		for (size_t index = 0; index < pending.candidates.size(); ++index)
-		{
-			if (index > 0)
-			{
-				stream << "  ";
-			}
-			stream << (index + 1) << ") " << pending.candidates[index].name;
-		}
-		stream << ". Type a number to open one, or 'cancel'.";
-		return stream.str();
-	}
-	if (pending.candidates.size() == 1)
-	{
-		return "Open " + pending.candidates[0].name + " (" + pending.candidates[0].path + ")? (yes/no)";
-	}
-	if (pending.resolved_windows_target)
-	{
-		return "Open " + pending.windows_target_display_name + " (a built-in Windows location, not an "
-			"installed app)? (yes/no)";
-	}
-	return "'" + pending.app_name + "' isn't in the installed-apps index, but I can still try to open it "
-		"directly by that name. Open it? (yes/no)";
-}
-
 // Mirrors DroidHost::agent_turn()/agent_tool_decision()'s "pending_tool_call"
 // field - set whenever the agent's tool-calling loop pauses on a
 // side-effecting tool (run_command, run_ffmpeg, write_file,
 // open_application, launch/stop_connector, enqueue_task; see
 // tool_call_requires_approval in cli/host.cpp) instead of running it. The
-// TUI holds this the same way it holds PendingOpen: the next Enter is
-// treated as the yes/no (or free-text decline reason) that resolves it,
-// not as a new chat message.
+// next Enter is treated as the yes/no (or free-text decline reason) that
+// resolves it, not as a new chat message.
 struct PendingToolApproval {
 	bool active = false;
 	std::string session_id;
@@ -956,8 +851,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// wherever it happened to be - see the InputOption passed to Input().
 	int chat_input_cursor = 0;
 	// Shell-style message history: every message actually sent to the agent
-	// (not pending_open/pending_tool_approval yes/no replies - those aren't
-	// "prompts" worth recalling), oldest first. ArrowUp/ArrowDown below walk
+	// (not pending_tool_approval yes/no replies - those aren't "prompts"
+	// worth recalling), oldest first. ArrowUp/ArrowDown below walk
 	// it; chat_history_cursor is -1 while editing live text, otherwise an
 	// index into chat_history. chat_history_draft holds whatever was being
 	// typed before the first ArrowUp, restored once ArrowDown walks back
@@ -966,7 +861,6 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	int chat_history_cursor = -1;
 	std::string chat_history_draft;
 	bool agent_turn_in_flight = false;
-	PendingOpen pending_open;
 	// Set whenever an agent_turn()/agent_tool_decision() response pauses on
 	// a side-effecting tool call - see PendingToolApproval above.
 	PendingToolApproval pending_tool_approval;
@@ -1015,35 +909,6 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		chat_entries.push_back(ChatEntry{role, text});
 	};
 
-	// Fires the actual launch for a confirmed quick-open request and reports
-	// the result - reuses DroidHost::open_application (the same path
-	// find_application/open_application tool calls go through), so a quick
-	// open gets identical PID reporting, App Paths/PATH/index resolution,
-	// and app_log auditing as an LLM-driven open would.
-	auto perform_quick_open = [&](const std::string& path_or_name, const std::string& display_name)
-	{
-		const std::string body = "{" + net::json_string_field("path_or_name", path_or_name) + "}";
-		const std::string result_json = host.open_application(body);
-		bool launched = false;
-		net::extract_json_bool_field(result_json, "launched", launched);
-		// log_quick_open_event puts this decision in logs/log.jsonl and the
-		// App Log panel under its own "quick_open" channel - before this, a
-		// quick-open launch left no trace besides open_application()'s own
-		// "open"-channel line, with nothing explaining what was recognized or
-		// that the human confirmed it (see "Phase 9 follow-up" in
-		// ARCHITECTURE.md for the real incident this closes).
-		host.log_quick_open_event("confirmed - launching " + display_name, launched);
-		if (launched)
-		{
-			chat_entries.push_back(ChatEntry{"info", "Opened " + display_name + "."});
-		}
-		else
-		{
-			const std::string error = net::extract_json_string_field(result_json, "error");
-			chat_entries.push_back(ChatEntry{"error",
-				"Could not open " + display_name + (error.empty() ? "." : (": " + error))});
-		}
-	};
 	const std::string status_line =
 		"droidcli TUI  -  HTTP API on http://127.0.0.1:" + std::to_string(http_port);
 
@@ -1175,9 +1040,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// Same "live terminal from the log" approach as tools_view above, for
 	// apps droidcli has launched or otherwise controls: open_application
 	// calls ("open" channel), launched_process connector launch/stop
-	// ("process" channel), and a confirmed quick-open launch ("quick_open"
-	// channel, only the "launching" entries - not the recognition/decline
-	// ones, which aren't a launch).
+	// ("process" channel).
 	Component apps_view = Renderer([&]() -> Element
 	{
 		Elements rows;
@@ -1187,15 +1050,6 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			if (row.channel == "open" || row.channel == "process")
 			{
 				label = row.summary;
-			}
-			else if (row.channel == "quick_open")
-			{
-				const size_t pos = row.summary.find("launching ");
-				if (pos == std::string::npos)
-				{
-					continue;
-				}
-				label = row.summary.substr(pos + 10);
 			}
 			else
 			{
@@ -1792,139 +1646,6 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				return true;
 			}
 
-			// Deterministic, LLM-free "open X" handling takes priority over
-			// both the pending-confirmation reply and the normal Ollama/
-			// agent-turn path: opening an app is common enough, and
-			// consequential enough, that it shouldn't wait on (or depend on
-			// the reliability of) a local model deciding to call a tool -
-			// see intent::parse_open_intent (src/intent/open_intent.cpp) and
-			// DroidHost::try_quick_open_json (cli/host.cpp). Every launch
-			// still requires an explicit yes/no (or a number, if ambiguous)
-			// from the user - this shortcuts recognition, not confirmation.
-			if (pending_open.active)
-			{
-				const std::string reply = trim(chat_input_text);
-				chat_input_text.clear();
-				if (!reply.empty())
-				{
-					push_chat_entry("user", reply);
-				}
-				const std::string lower_reply = to_lower(reply);
-
-				if (pending_open.candidates.size() > 1)
-				{
-					bool is_number = !reply.empty();
-					for (const char character : reply)
-					{
-						if (std::isdigit(static_cast<unsigned char>(character)) == 0)
-						{
-							is_number = false;
-							break;
-						}
-					}
-					if (lower_reply == "cancel" || lower_reply == "no")
-					{
-						host.log_quick_open_event("declined - user did not confirm opening " + pending_open.app_name, false);
-						push_chat_entry("info", "Cancelled.");
-						pending_open = PendingOpen{};
-					}
-					else if (is_number)
-					{
-						const int index = std::atoi(reply.c_str());
-						if (index >= 1 && static_cast<size_t>(index) <= pending_open.candidates.size())
-						{
-							const AppOpenCandidate& chosen = pending_open.candidates[static_cast<size_t>(index) - 1];
-							perform_quick_open(chosen.path, chosen.name);
-							pending_open = PendingOpen{};
-						}
-						else
-						{
-							push_chat_entry("info", describe_pending_open_prompt(pending_open));
-						}
-					}
-					else
-					{
-						push_chat_entry("info", describe_pending_open_prompt(pending_open));
-					}
-				}
-				else if (lower_reply == "yes" || lower_reply == "y")
-				{
-					if (pending_open.candidates.size() == 1)
-					{
-						perform_quick_open(pending_open.candidates[0].path, pending_open.candidates[0].name);
-					}
-					else if (pending_open.resolved_windows_target)
-					{
-						// Launch still just passes the literal name through -
-						// DroidHost::open_application resolves it against the
-						// same built-in-Windows table itself (Phase 21) - only
-						// the display name shown to the user changes here.
-						perform_quick_open(pending_open.app_name, pending_open.windows_target_display_name);
-					}
-					else
-					{
-						perform_quick_open(pending_open.app_name, pending_open.app_name);
-					}
-					pending_open = PendingOpen{};
-				}
-				else if (lower_reply == "no" || lower_reply == "n" || lower_reply == "cancel")
-				{
-					host.log_quick_open_event("declined - user did not confirm opening " + pending_open.app_name, false);
-					push_chat_entry("info", "Cancelled.");
-					pending_open = PendingOpen{};
-				}
-				else
-				{
-					push_chat_entry("info", describe_pending_open_prompt(pending_open));
-				}
-				return true;
-			}
-
-			if (!chat_input_text.empty())
-			{
-				const QuickOpenResult quick_open = parse_quick_open_result(host.try_quick_open_json(
-					"{" + net::json_string_field("message", chat_input_text) + "}"));
-				// quick_open.matched only means "this looked like an open
-				// request" (parse_open_intent recognized the verb shape) -
-				// it says nothing about whether anything was actually found
-				// to open. Only commit to the deterministic confirm-and-open
-				// flow when something real was found (an installed-app
-				// candidate or a resolved Windows-locations target); a real
-				// transcript showed "open the partition disk" match neither,
-				// then get proposed for a "try it anyway" yes/no that was
-				// certain to fail, with nowhere to go afterward. Falling
-				// through here (not consuming chat_input_text) sends the
-				// message to the normal agent_turn/LLM path instead, which
-				// has find_application/list_windows_locations and can
-				// actually search for something related rather than
-				// guessing the user's literal phrase as an exe name - see
-				// "Search before giving up" in ARCHITECTURE.md.
-				const bool found_something = !quick_open.candidates.empty() || quick_open.resolved_windows_target;
-				if (quick_open.matched && found_something)
-				{
-					const std::string message = chat_input_text;
-					chat_input_text.clear();
-					push_chat_entry("user", message);
-					record_chat_history(message);
-
-					pending_open.active = true;
-					pending_open.app_name = quick_open.app_name;
-					pending_open.candidates = quick_open.candidates;
-					pending_open.resolved_windows_target = quick_open.resolved_windows_target;
-					pending_open.windows_target_display_name = quick_open.windows_target_display_name;
-					host.log_quick_open_event("recognized \"" + quick_open.app_name + "\" from \"" + message + "\" - awaiting confirmation");
-					push_chat_entry("info", describe_pending_open_prompt(pending_open));
-					return true;
-				}
-				if (quick_open.matched)
-				{
-					host.log_quick_open_event(
-						"recognized \"" + quick_open.app_name + "\" from \"" + chat_input_text
-							+ "\" but found nothing to open - handing off to the agent instead of proposing a doomed guess",
-						false);
-				}
-			}
-
 			if (chat_input_text.empty())
 			{
 				// Blank Enter is only meaningful (picks the default model)
@@ -2062,7 +1783,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			// Not push_chat_entry: pending_entries are parsed straight out of
 			// an agent_turn()/agent_tool_decision() response body, and that
 			// call already logged itself server-side (DroidHost's own
-			// append_app_log calls in classify_turn/execute_decision_or_pause/
+			// append_app_log calls in classify_via_llm/execute_decision_or_pause/
 			// finish_turn_after_execution) - logging here too would duplicate
 			// each assistant/tool line under a second timestamp.
 			std::lock_guard<std::mutex> chat_lock(chat_work.mutex);

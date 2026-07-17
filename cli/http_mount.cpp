@@ -164,11 +164,6 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.find_applications_json(request.body));
 			return true;
 		}
-		if (is_post && path == "/api/apps/quick_open")
-		{
-			set_json(response, host.try_quick_open_json(request.body));
-			return true;
-		}
 		if (is_get && path == "/api/apps/open")
 		{
 			set_json(response, host.list_open_windows_json());

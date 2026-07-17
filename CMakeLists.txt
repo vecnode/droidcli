@@ -86,29 +86,9 @@ add_executable(droidcli_task_queue_test tests/task_queue_test.cpp)
 target_link_libraries(droidcli_task_queue_test PRIVATE droidcli_core)
 add_test(NAME task_queue_test COMMAND droidcli_task_queue_test)
 
-add_executable(droidcli_intent_test tests/intent_test.cpp)
-target_link_libraries(droidcli_intent_test PRIVATE droidcli_core)
-add_test(NAME intent_test COMMAND droidcli_intent_test)
-
-add_executable(droidcli_pending_command_test tests/pending_command_test.cpp)
-target_link_libraries(droidcli_pending_command_test PRIVATE droidcli_core)
-add_test(NAME pending_command_test COMMAND droidcli_pending_command_test)
-
-add_executable(droidcli_turn_decision_test tests/turn_decision_test.cpp)
-target_link_libraries(droidcli_turn_decision_test PRIVATE droidcli_core)
-add_test(NAME turn_decision_test COMMAND droidcli_turn_decision_test)
-
 add_executable(droidcli_response_templates_test tests/response_templates_test.cpp)
 target_link_libraries(droidcli_response_templates_test PRIVATE droidcli_core)
 add_test(NAME response_templates_test COMMAND droidcli_response_templates_test)
-
-add_executable(droidcli_create_file_intent_test tests/create_file_intent_test.cpp)
-target_link_libraries(droidcli_create_file_intent_test PRIVATE droidcli_core)
-add_test(NAME create_file_intent_test COMMAND droidcli_create_file_intent_test)
-
-add_executable(droidcli_create_image_intent_test tests/create_image_intent_test.cpp)
-target_link_libraries(droidcli_create_image_intent_test PRIVATE droidcli_core)
-add_test(NAME create_image_intent_test COMMAND droidcli_create_image_intent_test)
 
 add_executable(droidcli_path_guards_test tests/path_guards_test.cpp)
 target_link_libraries(droidcli_path_guards_test PRIVATE droidcli_core)
