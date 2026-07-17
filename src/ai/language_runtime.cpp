@@ -127,7 +127,7 @@ bool LanguageRuntime::apply_chat_response(const OllamaChatResponse& response)
 	return true;
 }
 
-bool LanguageRuntime::complete_turn(const LanguageAiTransportCallbacks& transport)
+bool LanguageRuntime::complete_turn(const LanguageTransportCallbacks& transport)
 {
 	const OllamaOutboundRequest request = build_pending_chat_request();
 	if (!request.valid)
@@ -182,9 +182,9 @@ core::String LanguageRuntime::format_transcript() const
 	return formatted;
 }
 
-LanguageAiSnapshot LanguageRuntime::snapshot() const
+LanguageSnapshot LanguageRuntime::snapshot() const
 {
-	LanguageAiSnapshot snapshot;
+	LanguageSnapshot snapshot;
 	snapshot.runtime_enabled = runtime_enabled_;
 	snapshot.connected = ollama_config_.enabled && !ollama_config_.base_url.empty();
 	snapshot.awaiting_response = awaiting_response_;
@@ -197,9 +197,9 @@ LanguageAiSnapshot LanguageRuntime::snapshot() const
 	return snapshot;
 }
 
-LanguageAiSnapshot default_language_ai_snapshot()
+LanguageSnapshot default_language_ai_snapshot()
 {
-	LanguageAiSnapshot snapshot;
+	LanguageSnapshot snapshot;
 	snapshot.status_text = "Language AI runtime not initialized.";
 	return snapshot;
 }

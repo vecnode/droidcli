@@ -17,7 +17,7 @@ struct ProviderRequest {
 	// Raw "Name: value" header lines the transport should send in addition
 	// to Content-Type/Content-Length - empty for OllamaProvider (no auth
 	// header needed for a local peer), populated by AnthropicProvider with
-	// "x-api-key"/"anthropic-version". See LanguageAiTransportCallbacks.
+	// "x-api-key"/"anthropic-version". See LanguageTransportCallbacks.
 	core::Array<core::String> headers;
 };
 
@@ -51,7 +51,7 @@ struct ProviderResponse {
 // request from a transcript + tool set, and parse a provider-specific HTTP
 // response back into ProviderResponse. A ModelProvider never performs the
 // actual network call itself - the host still owns that (via
-// LanguageAiTransportCallbacks) - it only knows how to shape and interpret
+// LanguageTransportCallbacks) - it only knows how to shape and interpret
 // its own wire format.
 //
 // This is droidcli's Core-tier "providers" role (see ARCHITECTURE.md's

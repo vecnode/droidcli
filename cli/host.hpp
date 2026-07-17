@@ -673,7 +673,7 @@ private:
 	HostConfig config_;
 	session::RuntimeSession session_;
 	ai::LanguageRuntime language_ai_;
-	ai::LanguageAiTransportCallbacks language_ai_transport_;
+	ai::LanguageTransportCallbacks language_ai_transport_;
 	net::RouteTable routes_;
 
 	core::Array<core::String> notify_log_;

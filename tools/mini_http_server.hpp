@@ -53,7 +53,7 @@ private:
 	MiniHttpServerOptions options_;
 	droidcli::net::RouteTable routes_;
 	droidcli::ai::LanguageRuntime language_ai_;
-	droidcli::ai::LanguageAiTransportCallbacks language_ai_transport_;
+	droidcli::ai::LanguageTransportCallbacks language_ai_transport_;
 };
 
 } // namespace droidcli::tools

@@ -7,7 +7,7 @@
 
 namespace droidcli::ai {
 
-struct LanguageAiTransportCallbacks {
+struct LanguageTransportCallbacks {
 	// headers is a list of raw "Name: value" lines (see
 	// tools::sync_http_post_json's extra_headers) - every existing caller
 	// (Ollama) passes an empty array; a second ModelProvider whose wire
@@ -32,12 +32,12 @@ public:
 
 	OllamaOutboundRequest build_pending_chat_request() const;
 	bool apply_chat_response(const OllamaChatResponse& response);
-	bool complete_turn(const LanguageAiTransportCallbacks& transport);
+	bool complete_turn(const LanguageTransportCallbacks& transport);
 
 	const core::Array<ChatMessage>& transcript() const { return transcript_; }
 	core::String representation_text() const;
 	core::String format_transcript() const;
-	LanguageAiSnapshot snapshot() const;
+	LanguageSnapshot snapshot() const;
 
 private:
 	OllamaConfig ollama_config_;
@@ -49,6 +49,6 @@ private:
 	bool awaiting_response_ = false;
 };
 
-DROIDCLI_API LanguageAiSnapshot default_language_ai_snapshot();
+DROIDCLI_API LanguageSnapshot default_language_ai_snapshot();
 
 } // namespace droidcli::ai

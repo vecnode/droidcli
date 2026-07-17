@@ -1884,7 +1884,23 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			{
 				const QuickOpenResult quick_open = parse_quick_open_result(host.try_quick_open_json(
 					"{" + net::json_string_field("message", chat_input_text) + "}"));
-				if (quick_open.matched)
+				// quick_open.matched only means "this looked like an open
+				// request" (parse_open_intent recognized the verb shape) -
+				// it says nothing about whether anything was actually found
+				// to open. Only commit to the deterministic confirm-and-open
+				// flow when something real was found (an installed-app
+				// candidate or a resolved Windows-locations target); a real
+				// transcript showed "open the partition disk" match neither,
+				// then get proposed for a "try it anyway" yes/no that was
+				// certain to fail, with nowhere to go afterward. Falling
+				// through here (not consuming chat_input_text) sends the
+				// message to the normal agent_turn/LLM path instead, which
+				// has find_application/list_windows_locations and can
+				// actually search for something related rather than
+				// guessing the user's literal phrase as an exe name - see
+				// "Search before giving up" in ARCHITECTURE.md.
+				const bool found_something = !quick_open.candidates.empty() || quick_open.resolved_windows_target;
+				if (quick_open.matched && found_something)
 				{
 					const std::string message = chat_input_text;
 					chat_input_text.clear();
@@ -1899,6 +1915,13 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					host.log_quick_open_event("recognized \"" + quick_open.app_name + "\" from \"" + message + "\" - awaiting confirmation");
 					push_chat_entry("info", describe_pending_open_prompt(pending_open));
 					return true;
+				}
+				if (quick_open.matched)
+				{
+					host.log_quick_open_event(
+						"recognized \"" + quick_open.app_name + "\" from \"" + chat_input_text
+							+ "\" but found nothing to open - handing off to the agent instead of proposing a doomed guess",
+						false);
 				}
 			}
 

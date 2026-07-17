@@ -224,6 +224,64 @@ static const WellKnownWindowsTargetEntry kWellKnownWindowsTargets[] = {
 	{"downloads folder", "Downloads", "explorer.exe", "shell:Downloads"},
 };
 
+// Splits `value` into lowercase, alnum-only words (any run of non-alnum
+// characters is a separator) - unlike normalize_for_match, which collapses
+// everything into one run-together token, this preserves word boundaries so
+// two phrasings using the same words in a different order ("partition
+// disk" vs. an alias written "disk partition") can still be recognized as
+// equivalent. See find_well_known_windows_target's fallback tier below.
+core::Array<core::String> split_words_for_match(const core::String& value)
+{
+	core::Array<core::String> words;
+	core::String current;
+	for (const unsigned char c : value)
+	{
+		if (std::isalnum(c))
+		{
+			current += static_cast<char>(std::tolower(c));
+		}
+		else if (!current.empty())
+		{
+			words.push_back(current);
+			current.clear();
+		}
+	}
+	if (!current.empty())
+	{
+		words.push_back(current);
+	}
+	return words;
+}
+
+// True if every word in `query_words` appears somewhere in `alias_words` -
+// order-independent. Requires at least two words in the query (not one) so
+// a single common word ("disk", "settings") can't coincidentally match an
+// unrelated alias on its own - every word has to line up, not just one.
+bool words_all_present(const core::Array<core::String>& query_words, const core::Array<core::String>& alias_words)
+{
+	if (query_words.size() < 2)
+	{
+		return false;
+	}
+	for (const core::String& query_word : query_words)
+	{
+		bool found = false;
+		for (const core::String& alias_word : alias_words)
+		{
+			if (query_word == alias_word)
+			{
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool find_well_known_windows_target(const core::String& query, WellKnownWindowsTarget& out)
 {
 	const core::String normalized_query = normalize_for_match(query);
@@ -245,6 +303,25 @@ bool find_well_known_windows_target(const core::String& query, WellKnownWindowsT
 			return true;
 		}
 	}
+
+	// Fallback: word-order-independent match. A real transcript showed
+	// "open the partition disk" fail outright - the curated alias is
+	// "disk partition", and neither phrase is a substring of the other, so
+	// the exact/substring check above (correctly) never matches reversed
+	// word order. See "Search before giving up" in ARCHITECTURE.md.
+	const core::Array<core::String> query_words = split_words_for_match(query);
+	for (const WellKnownWindowsTargetEntry& target : kWellKnownWindowsTargets)
+	{
+		const core::Array<core::String> alias_words = split_words_for_match(target.alias);
+		if (words_all_present(query_words, alias_words))
+		{
+			out.display_name = target.display_name;
+			out.path_or_name = target.path_or_name;
+			out.args = target.args;
+			return true;
+		}
+	}
+
 	return false;
 }
 
@@ -1839,12 +1916,23 @@ DroidHost::ResolvedLaunchTarget DroidHost::resolve_open_application_target(const
 
 	if (looks_like_path(path_or_name))
 	{
-		// The caller already gave a path (relative or absolute) - honored
-		// exactly as given, same "the caller already specified where"
-		// discipline as the filesystem tools (Phase 20/40). Not re-resolved
-		// against any of the tiers below - those are only for bare names.
-		result.resolved = true;
-		result.source = "given_path";
+		// The caller already gave a path (relative or absolute) - not
+		// re-resolved against any of the tiers below (those are only for
+		// bare names), but still verified to actually exist before being
+		// called "resolved" - an approved call must be guaranteed to
+		// succeed (Phase 42), and a path-shaped guess is exactly as capable
+		// of being fabricated as a bare-name one.
+		std::error_code error;
+		const std::filesystem::path candidate(path_or_name);
+		if (std::filesystem::exists(candidate, error) && std::filesystem::is_regular_file(candidate, error))
+		{
+			result.resolved = true;
+			result.target = std::filesystem::absolute(candidate, error).string();
+			result.source = "given_path";
+			return result;
+		}
+		result.error_message = "'" + path_or_name + "' does not exist. Ask the user for the exact "
+			"executable name or full path rather than guessing.";
 		return result;
 	}
 
@@ -1873,14 +1961,29 @@ DroidHost::ResolvedLaunchTarget DroidHost::resolve_open_application_target(const
 	WellKnownWindowsTarget windows_target;
 	if (find_well_known_windows_target(path_or_name, windows_target))
 	{
-		// Resolved further to a full absolute path (rather than left as
-		// e.g. "taskmgr.exe") so every successful resolution tier ends in a
-		// real, verified full path, not just the curated ones - "always
-		// launch with a full path", not merely "always launch something
-		// real".
-		const WhichResult which_result = which_executable(windows_target.path_or_name);
+		// Resolved deterministically against the real Windows System/Windows
+		// root directories (resolve_system_executable, cli/command_runner.cpp)
+		// - NOT a which_executable() PATH search. Every curated target in
+		// this table is a real Windows system tool that always lives in one
+		// of those two locations regardless of how PATH happens to be
+		// configured; depending on a PATH search here meant a misconfigured
+		// or unusual PATH could silently fall through to launch_application's
+		// own unverified bare-name CreateProcess search for a *curated*
+		// name - reintroducing, for this one tier, exactly the blind-search
+		// risk the rest of this ruleset exists to eliminate.
+		const core::String system_path = resolve_system_executable(windows_target.path_or_name);
+		if (system_path.empty())
+		{
+			// A curated target isn't where every real Windows install keeps
+			// it - fail cleanly (a damaged/unusual install is the likely
+			// cause) rather than falling through to an unverified guess.
+			result.error_message = "'" + windows_target.display_name + "' (matched from '" + path_or_name
+				+ "') could not be found in the Windows system directory - this may indicate a damaged "
+				"Windows installation. Ask the user for the exact executable name or full path instead.";
+			return result;
+		}
 		result.resolved = true;
-		result.target = which_result.ok ? which_result.resolved_path : windows_target.path_or_name;
+		result.target = system_path;
 		result.source = "windows_known_location";
 		if (result.effective_args.empty())
 		{
