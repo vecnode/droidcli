@@ -330,7 +330,7 @@ struct PolledState {
 // the conformance gap entirely while keeping every existing two-arg call site
 // unchanged.
 struct ChatEntry {
-	std::string role; // "user" | "assistant" | "tool" | "error" | "info"
+	std::string role; // "user" | "assistant" | "thinking" | "tool" | "error" | "info"
 	std::string text;
 	std::string timestamp;
 
@@ -356,6 +356,10 @@ std::string format_chat_transcript(const std::vector<ChatEntry>& entries)
 		else if (entry.role == "assistant")
 		{
 			stream << ts_prefix << "[AGENT] " << entry.text << "\n";
+		}
+		else if (entry.role == "thinking")
+		{
+			stream << ts_prefix << "[AGENT] [THINKING] " << entry.text << "\n";
 		}
 		else if (entry.role == "tool")
 		{
@@ -435,6 +439,16 @@ std::vector<ChatEntry> parse_agent_turn_response(
 		const std::string error = net::extract_json_string_field(json, "error");
 		entries.push_back(ChatEntry{"error", error.empty() ? "agent turn failed" : error});
 		return entries;
+	}
+
+	// DroidHost::classify_via_llm's own chain-of-thought (see "The LLM
+	// provider" in ARCHITECTURE.md) - shown first, since it's what actually
+	// drove whichever tool call/reply follows. Never the assistant's real
+	// reply - a distinct role/line so it can never be mistaken for one.
+	const std::string thinking = net::extract_json_string_field(json, "thinking");
+	if (!thinking.empty())
+	{
+		entries.push_back(ChatEntry{"thinking", thinking});
 	}
 
 	for (const std::string& action : extract_json_object_array(json, "actions"))
@@ -1209,6 +1223,13 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			else if (entry.role == "assistant")
 			{
 				lines.push_back(paragraph(ts_prefix + "[AGENT] " + entry.text) | color(Color::Green));
+			}
+			else if (entry.role == "thinking")
+			{
+				// Same green as a real assistant reply (it's the same agent,
+				// same turn) but dimmed - visibly distinct from the actual
+				// reply immediately below it, never mistaken for one.
+				lines.push_back(paragraph(ts_prefix + "[AGENT] [THINKING] " + entry.text) | dim | color(Color::Green));
 			}
 			else if (entry.role == "tool")
 			{

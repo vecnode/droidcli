@@ -581,14 +581,18 @@ private:
 	// returns false and sets out_pending_response if it paused for human
 	// approval instead (pending_tool_call_ already set) - the caller must
 	// return out_pending_response immediately without touching `actions`
-	// further.
+	// further. thinking_text (the classification call that produced this
+	// decision, if any - see classify::TurnDecision::thinking_text) is only
+	// ever used if this pauses, folded into out_pending_response so the
+	// approval prompt itself carries the reasoning that led to it.
 	bool execute_decision_or_pause(
 		const core::String& session_id,
 		const core::String& tool_name,
 		const core::String& arguments_json,
 		core::Array<PendingToolActionRecord>& actions,
 		core::String& out_tool_result,
-		core::String& out_pending_response);
+		core::String& out_pending_response,
+		const core::String& thinking_text = {});
 
 	// Shared tail of agent_turn() and agent_tool_decision() once a decision
 	// has executed: one bounded auto-retry on a retriable tool's failure,
@@ -606,7 +610,8 @@ private:
 		core::Array<PendingToolActionRecord> actions,
 		const core::Array<ai::ToolDefinition>& tools,
 		const ai::ModelProvider& provider,
-		bool allow_retry = true);
+		bool allow_retry = true,
+		const core::String& thinking_text = {});
 
 	// The "Phrase" step: classify::try_template_reply first (zero LLM calls,
 	// zero fabrication risk for the common cases), else phrase_via_llm.
@@ -635,21 +640,29 @@ private:
 	// "actions":[...]} shape agent_turn()/agent_tool_decision() have always
 	// returned on a completed (non-paused) turn - no "budget_exhausted"
 	// field anymore, since there's no hop budget left to exhaust.
+	// thinking_text, when non-empty, rides along as a "thinking" field -
+	// the classification call's own chain-of-thought (see
+	// classify::TurnDecision::thinking_text), never folded into
+	// assistant_text itself. The TUI renders it as its own chat line.
 	core::String build_final_agent_response(
 		const core::String& session_id,
 		const core::String& assistant_text,
-		const core::Array<PendingToolActionRecord>& actions) const;
+		const core::Array<PendingToolActionRecord>& actions,
+		const core::String& thinking_text = {}) const;
 
 	// Builds the same-shaped response agent_turn()/agent_tool_decision()
 	// return once they hit a gated call: "ok":true (nothing has failed - the
 	// turn is just paused) plus "pending_tool_call" naming the call awaiting
 	// a decision, and any "actions" already executed earlier in this turn.
 	// Not static (unlike before) - now calls display_arguments_with_full_paths,
-	// which needs system_info_.
+	// which needs system_info_. thinking_text mirrors
+	// build_final_agent_response's own parameter - the reasoning that led to
+	// this proposed call, shown alongside the approval prompt.
 	core::String build_pending_tool_call_response(
 		const core::String& session_id,
 		const ai::ToolCall& call,
-		const core::Array<PendingToolActionRecord>& actions_so_far) const;
+		const core::Array<PendingToolActionRecord>& actions_so_far,
+		const core::String& thinking_text = {}) const;
 
 	// The result of running the Windows execution ruleset's trust-ordered
 	// resolution (see "Windows execution ruleset" in ARCHITECTURE.md)
