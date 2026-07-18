@@ -455,7 +455,16 @@ std::vector<ChatEntry> parse_agent_turn_response(
 	{
 		const std::string tool = net::extract_json_string_field(action, "tool");
 		const std::string args = net::extract_json_string_field(action, "arguments_json");
-		entries.push_back(ChatEntry{"tool", "called " + tool + "(" + args + ")"});
+		const std::string result = net::extract_json_string_field(action, "result_json");
+		// The raw tool result (list_windows_locations' full candidate list,
+		// find_application's matches, etc.) used to only reach the App Log
+		// panel via DroidHost::append_app_log's own "chat" channel line -
+		// Agent Chat showed just the call, never what it actually returned,
+		// so a request answered from a long candidate list looked like it
+		// vanished into a vague "returned a comprehensive list" summary with
+		// no way to see the list itself without switching panels.
+		entries.push_back(ChatEntry{"tool",
+			"called " + tool + "(" + args + ")" + (result.empty() ? "" : " -> " + result)});
 	}
 
 	// build_pending_tool_call_response() (cli/host.cpp) always writes
