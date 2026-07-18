@@ -317,6 +317,12 @@ struct PolledState {
 	std::vector<TaskRow> tasks;
 	std::vector<LogRow> log_lines;
 	LocationsSnapshot locations;
+	// Pulled models available on the active Ollama daemon (DroidHost::
+	// build_ollama_status_json's "models" field) - drives the model
+	// dropdown in the top status line. A cheap HTTP GET to /api/tags, not
+	// the heavier ollama_setup_status_json() (which shells out to `where
+	// ollama`) - safe to poll on the same cadence as everything else here.
+	std::vector<std::string> ollama_models;
 };
 
 // One line of the chat panel: who said it (drives color/weight) and the text.
@@ -852,6 +858,21 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	std::vector<TaskRow> tasks;
 	std::vector<LogRow> log_lines;
 	LocationsSnapshot locations;
+	// Backs the model dropdown in the top status line. model_menu_selected is
+	// written directly by FTXUI's Dropdown component on click/keyboard
+	// selection - there is no on-change callback, so
+	// apply_model_menu_selection() below detects a change by comparing
+	// against model_menu_known_model every render frame instead.
+	std::vector<std::string> model_menu_entries;
+	int model_menu_selected = 0;
+	// The model name the dropdown's current selection was last confirmed to
+	// correspond to - either synced from the host's real active model
+	// (sync_model_menu_from_host, on each poller tick) or just applied by
+	// the user (apply_model_menu_selection, every frame). Keeping both in
+	// step is what stops a poller tick from clobbering a click the user
+	// just made, and what stops the same click from being re-applied on
+	// every subsequent frame.
+	std::string model_menu_known_model;
 	std::vector<ChatEntry> chat_entries;
 	// Resizable-split pane widths (columns) - mutated directly by
 	// ResizableSplitLeft/Right on mouse drag, see the split construction
@@ -969,6 +990,60 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		}
 		return false;
 	});
+
+	// Model picker (top status line) - replaces the old chat-based "type 1,
+	// 2, 3... or a name" flow (still there for first-run onboarding before
+	// any model is configured at all, see NeedsModel below) with a real
+	// dropdown once a model is already active. Click to open, click an
+	// entry (or arrow keys + Enter) to pick it.
+	Component model_dropdown = Dropdown(&model_menu_entries, &model_menu_selected);
+
+	// Pulls the dropdown's selection to match the host's real active model -
+	// called on each poller tick (model_menu_entries was just refreshed from
+	// polled.ollama_models). A no-op once model_menu_known_model already
+	// matches, so this can never stomp a selection the user just made and
+	// apply_model_menu_selection() below hasn't caught up to yet.
+	auto sync_model_menu_from_host = [&]()
+	{
+		const std::string active = host.active_model_name();
+		if (model_menu_known_model == active)
+		{
+			return;
+		}
+		for (size_t index = 0; index < model_menu_entries.size(); ++index)
+		{
+			if (model_menu_entries[index] == active)
+			{
+				model_menu_selected = static_cast<int>(index);
+				break;
+			}
+		}
+		model_menu_known_model = active;
+	};
+
+	// Detects a user-driven dropdown pick and applies it - called on every
+	// render frame (Dropdown(entries, selected) has no on-change callback,
+	// so this is the only way to notice FTXUI wrote a new index into
+	// model_menu_selected). Comparing against model_menu_known_model rather
+	// than host.active_model_name() directly avoids a redundant
+	// update_ollama_config() call on every single frame once applied.
+	auto apply_model_menu_selection = [&]()
+	{
+		if (model_menu_selected < 0 || model_menu_selected >= static_cast<int>(model_menu_entries.size()))
+		{
+			return;
+		}
+		const std::string picked = model_menu_entries[static_cast<size_t>(model_menu_selected)];
+		if (picked == model_menu_known_model)
+		{
+			return;
+		}
+		std::ostringstream config_body;
+		config_body << '{' << net::json_string_field("model", picked) << '}';
+		host.update_ollama_config(config_body.str());
+		model_menu_known_model = picked;
+		push_chat_entry("info", "Switched to model '" + picked + "'.");
+	};
 
 	Component tasks_view = Renderer([&]() -> Element
 	{
@@ -1725,14 +1800,18 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return false;
 	});
 
-	// Only connector_menu and chat_input are focusable (Menu/Input); Tab
-	// cycles between them. Renderer-only panels (tasks/tools/log/chat_log)
-	// never take focus. Each focusable component is wrapped in its own
-	// single-child Renderer(component, fn) below so it stays the sole
-	// focusable descendant of its pane - FTXUI's default ActiveChild()/
-	// Focusable() walk just passes through a single-child wrapper, so
-	// TakeFocus()/Focused() work the same as before despite the extra
-	// nesting the resizable-split layout introduces.
+	// Only connector_menu and chat_input take keyboard focus (Menu/Input);
+	// the hand-rolled Tab handler below only ever toggles between the two,
+	// so Tab never lands on model_dropdown - it's mouse-only (click to
+	// open, click an entry), the same way the resizable split dividers are
+	// mouse-only without needing Tab focus either. Renderer-only panels
+	// (tasks/tools/log/chat_log) never take focus at all. Each focusable
+	// component is wrapped in its own single-child Renderer(component, fn)
+	// below so it stays the sole focusable descendant of its pane -
+	// FTXUI's default ActiveChild()/Focusable() walk just passes through a
+	// single-child wrapper, so TakeFocus()/Focused() work the same as
+	// before despite the extra nesting the resizable-split layout
+	// introduces.
 	Component left_column = Renderer(connector_menu, [&]() -> Element
 	{
 		// All five panels share equal flex weight, so "Agent Tools" is
@@ -1773,16 +1852,30 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	middle = ResizableSplitRight(right_column, middle, &right_pane_width);
 	Component split = ResizableSplitLeft(left_column, middle, &left_pane_width);
 
-	Component full_ui = Renderer(split, [&]() -> Element
+	// model_dropdown joins split as a sibling event-dispatch root (not just a
+	// Render() call inside full_ui's fn below) so mouse clicks/keyboard
+	// actually reach it - Renderer(component, fn) only forwards events to
+	// the one Component passed in, and fn's manual Element composition
+	// doesn't change that. Tab now cycles connector_menu -> chat_input ->
+	// model_dropdown -> back to connector_menu; mouse clicks reach the
+	// dropdown regardless of Tab focus, same as the resizable split
+	// dividers already do.
+	Component top_ui = Container::Vertical({model_dropdown, split});
+
+	Component full_ui = Renderer(top_ui, [&]() -> Element
 	{
+		// Every render frame, not just poller ticks (Dropdown has no
+		// on-change callback - see apply_model_menu_selection's own
+		// comment) - a click needs to be caught on the very next frame,
+		// which happens well before the next 500ms poller tick.
+		apply_model_menu_selection();
+
 		const std::string focus_hint = chat_input->Focused()
 			? "chat focused - Tab/Esc: to connectors   Enter: send   Ctrl+C: quit anytime"
 			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   j/k/arrows: move   y: copy chat   drag borders to resize";
-		const std::string active_model = host.active_model_name();
-		const std::string session_line = (current_session_id.empty()
+		const std::string session_prefix = current_session_id.empty()
 			? "session: (none yet - starts on your first message)"
-			: "session: " + current_session_id)
-			+ " | model: " + (active_model.empty() ? "none" : active_model);
+			: "session: " + current_session_id;
 		// Light-blue background/dark text on the top status line and bottom
 		// focus-hint line, matching panel_title() above - xflex (X-axis only)
 		// stretches the colored box across the full terminal width without
@@ -1791,7 +1884,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// blew up these two lines to fill the whole screen instead.
 		return vbox({
 			text(status_line) | bold | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
-			text(session_line) | dim,
+			hbox({ text(session_prefix + " | model: "), model_menu_entries.empty()
+				? text("none") : model_dropdown->Render() }) | dim,
 			split->Render() | flex,
 			text(focus_hint) | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
 		});
@@ -1807,8 +1901,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				tasks = polled.tasks;
 				log_lines = polled.log_lines;
 				locations = polled.locations;
+				model_menu_entries = polled.ollama_models;
 			}
 			rebuild_connector_entries();
+			sync_model_menu_from_host();
 
 			// Not push_chat_entry: pending_entries are parsed straight out of
 			// an agent_turn()/agent_tool_decision() response body, and that
@@ -2036,6 +2132,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				std::vector<TaskRow> next_tasks = parse_tasks(host.list_tasks_json());
 				std::vector<LogRow> next_log = parse_log_lines(host.build_app_log_json());
 				LocationsSnapshot next_locations = parse_locations(host.list_known_locations_json());
+				std::vector<std::string> next_ollama_models = parse_json_string_array(host.build_ollama_status_json(), "models");
 
 				{
 					std::lock_guard<std::mutex> lock(polled.mutex);
@@ -2043,6 +2140,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					polled.tasks = std::move(next_tasks);
 					polled.log_lines = std::move(next_log);
 					polled.locations = std::move(next_locations);
+					polled.ollama_models = std::move(next_ollama_models);
 				}
 
 				// FTXUI's documented pattern for live-updating dashboards: nudge the
