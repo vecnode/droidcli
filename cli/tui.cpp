@@ -323,6 +323,11 @@ struct PolledState {
 	// the heavier ollama_setup_status_json() (which shells out to `where
 	// ollama`) - safe to poll on the same cadence as everything else here.
 	std::vector<std::string> ollama_models;
+	// Every session id with at least one persisted message, most recently
+	// active first (DroidHost::build_agent_sessions_json - a local SQLite
+	// read via MemoryStore, no network call) - drives the session dropdown
+	// in the top status line.
+	std::vector<std::string> agent_session_ids;
 };
 
 // One line of the chat panel: who said it (drives color/weight) and the text.
@@ -873,6 +878,17 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// just made, and what stops the same click from being re-applied on
 	// every subsequent frame.
 	std::string model_menu_known_model;
+	// Backs the session dropdown next to "session: " in the top status
+	// line - lets the user resume a previous session without typing
+	// anything. Unlike the model dropdown, this compares directly against
+	// current_session_id (below) rather than a separate known-value
+	// tracker: current_session_id is itself already the single source of
+	// truth updated by every other way a session can change (a fresh
+	// message starting a brand-new session, 'n', or startup resume), so
+	// there is no separate "did something else change this" case to guard
+	// against the way there is for the model.
+	std::vector<std::string> session_menu_entries;
+	int session_menu_selected = 0;
 	std::vector<ChatEntry> chat_entries;
 	// Resizable-split pane widths (columns) - mutated directly by
 	// ResizableSplitLeft/Right on mouse drag, see the split construction
@@ -1043,6 +1059,65 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		host.update_ollama_config(config_body.str());
 		model_menu_known_model = picked;
 		push_chat_entry("info", "Switched to model '" + picked + "'.");
+	};
+
+	// Session picker (top status line) - lets the user resume a previous
+	// session by clicking it instead of remembering/typing its id. Click to
+	// open, click an entry (or arrow keys + Enter) to switch.
+	Component session_dropdown = Dropdown(&session_menu_entries, &session_menu_selected);
+
+	// Pulls the dropdown's selection to match current_session_id - called on
+	// each poller tick (session_menu_entries was just refreshed from
+	// polled.agent_session_ids). Unlike sync_model_menu_from_host, no extra
+	// "did we already apply this" guard is needed: current_session_id only
+	// ever changes through code that sets it directly (this lambda's own
+	// resume below, a fresh message starting a new session, 'n', or startup
+	// resume), so re-deriving the index from it on every tick is always
+	// correct, never a stale value to protect against.
+	auto sync_session_menu_from_host = [&]()
+	{
+		for (size_t index = 0; index < session_menu_entries.size(); ++index)
+		{
+			if (session_menu_entries[index] == current_session_id)
+			{
+				session_menu_selected = static_cast<int>(index);
+				return;
+			}
+		}
+	};
+
+	// Detects a user-driven session pick and resumes it - called on every
+	// render frame, same reasoning as apply_model_menu_selection (Dropdown
+	// has no on-change callback). Replaces the chat panel's contents with
+	// the picked session's history, same as the startup-resume path
+	// (parse_agent_history_for_resume) - the user is switching which
+	// conversation they're looking at, not appending one to the other.
+	auto apply_session_menu_selection = [&]()
+	{
+		if (session_menu_selected < 0 || session_menu_selected >= static_cast<int>(session_menu_entries.size()))
+		{
+			return;
+		}
+		const std::string picked = session_menu_entries[static_cast<size_t>(session_menu_selected)];
+		if (picked == current_session_id)
+		{
+			return;
+		}
+		const std::vector<ChatEntry> resumed = parse_agent_history_for_resume(host.build_agent_history_json(picked));
+		chat_entries.clear();
+		// Not push_chat_entry for the resumed entries themselves: this
+		// content is already in MemoryStore/logs/log.jsonl from when it was
+		// first said - matches the startup-resume path's own reasoning.
+		for (const ChatEntry& entry : resumed)
+		{
+			chat_entries.push_back(entry);
+		}
+		if (resumed.empty())
+		{
+			push_chat_entry("info", "Session '" + picked + "' has no messages yet.");
+		}
+		current_session_id = picked;
+		write_last_session_id(picked);
 	};
 
 	Component tasks_view = Renderer([&]() -> Element
@@ -1852,15 +1927,15 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	middle = ResizableSplitRight(right_column, middle, &right_pane_width);
 	Component split = ResizableSplitLeft(left_column, middle, &left_pane_width);
 
-	// model_dropdown joins split as a sibling event-dispatch root (not just a
-	// Render() call inside full_ui's fn below) so mouse clicks/keyboard
-	// actually reach it - Renderer(component, fn) only forwards events to
-	// the one Component passed in, and fn's manual Element composition
-	// doesn't change that. Tab now cycles connector_menu -> chat_input ->
-	// model_dropdown -> back to connector_menu; mouse clicks reach the
-	// dropdown regardless of Tab focus, same as the resizable split
-	// dividers already do.
-	Component top_ui = Container::Vertical({model_dropdown, split});
+	// model_dropdown/session_dropdown join split as sibling event-dispatch
+	// roots (not just a Render() call inside full_ui's fn below) so mouse
+	// clicks/keyboard actually reach them - Renderer(component, fn) only
+	// forwards events to the one Component passed in, and fn's manual
+	// Element composition doesn't change that. Tab still only cycles
+	// connector_menu <-> chat_input (see the hand-rolled Tab handler
+	// below); both dropdowns are mouse-only, same as the resizable split
+	// dividers already are.
+	Component top_ui = Container::Vertical({model_dropdown, session_dropdown, split});
 
 	Component full_ui = Renderer(top_ui, [&]() -> Element
 	{
@@ -1869,13 +1944,19 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// comment) - a click needs to be caught on the very next frame,
 		// which happens well before the next 500ms poller tick.
 		apply_model_menu_selection();
+		apply_session_menu_selection();
 
 		const std::string focus_hint = chat_input->Focused()
 			? "chat focused - Tab/Esc: to connectors   Enter: send   Ctrl+C: quit anytime"
 			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   j/k/arrows: move   y: copy chat   drag borders to resize";
-		const std::string session_prefix = current_session_id.empty()
-			? "session: (none yet - starts on your first message)"
-			: "session: " + current_session_id;
+		// One evenly-spaced row - "session: "/" | model: " as plain labels
+		// either side of a dropdown (or a plain-text fallback before either
+		// list has anything to show yet), so the whole line reads as one
+		// baseline instead of a label buried inside a longer sentence.
+		Element session_element = session_menu_entries.empty()
+			? text(current_session_id.empty() ? "(none yet - starts on your first message)" : current_session_id)
+			: session_dropdown->Render();
+		Element model_element = model_menu_entries.empty() ? text("none") : model_dropdown->Render();
 		// Light-blue background/dark text on the top status line and bottom
 		// focus-hint line, matching panel_title() above - xflex (X-axis only)
 		// stretches the colored box across the full terminal width without
@@ -1884,8 +1965,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// blew up these two lines to fill the whole screen instead.
 		return vbox({
 			text(status_line) | bold | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
-			hbox({ text(session_prefix + " | model: "), model_menu_entries.empty()
-				? text("none") : model_dropdown->Render() }) | dim,
+			hbox({ text("session: "), session_element, text(" | model: "), model_element }) | dim,
 			split->Render() | flex,
 			text(focus_hint) | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
 		});
@@ -1902,9 +1982,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				log_lines = polled.log_lines;
 				locations = polled.locations;
 				model_menu_entries = polled.ollama_models;
+				session_menu_entries = polled.agent_session_ids;
 			}
 			rebuild_connector_entries();
 			sync_model_menu_from_host();
+			sync_session_menu_from_host();
 
 			// Not push_chat_entry: pending_entries are parsed straight out of
 			// an agent_turn()/agent_tool_decision() response body, and that
@@ -2133,6 +2215,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				std::vector<LogRow> next_log = parse_log_lines(host.build_app_log_json());
 				LocationsSnapshot next_locations = parse_locations(host.list_known_locations_json());
 				std::vector<std::string> next_ollama_models = parse_json_string_array(host.build_ollama_status_json(), "models");
+				std::vector<std::string> next_agent_sessions = parse_json_string_array(host.build_agent_sessions_json(), "session_ids");
 
 				{
 					std::lock_guard<std::mutex> lock(polled.mutex);
@@ -2141,6 +2224,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					polled.log_lines = std::move(next_log);
 					polled.locations = std::move(next_locations);
 					polled.ollama_models = std::move(next_ollama_models);
+					polled.agent_session_ids = std::move(next_agent_sessions);
 				}
 
 				// FTXUI's documented pattern for live-updating dashboards: nudge the
