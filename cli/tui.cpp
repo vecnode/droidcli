@@ -22,6 +22,7 @@
 #include <functional>
 #include <iostream>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -859,6 +860,33 @@ ftxui::Element panel_title(const std::string& label)
 	return ftxui::text(label) | ftxui::bgcolor(ftxui::Color::LightSkyBlue1) | ftxui::color(ftxui::Color::Black);
 }
 
+// True (not palette-remappable) colors: named ANSI colors are palette
+// indices that some terminal profiles override with their own shade
+// (Windows Terminal's "Command Prompt"/admin-elevated profiles in
+// particular often default to a different background than a plain user
+// shell) - RGB(...) forces the actual color regardless of the profile the
+// TUI happens to be launched under, same fix already applied to the
+// erase-session popup (see build_confirm_popup's kBlack/kWhite). Light grey,
+// almost white, not pure white - kAppForeground is the deliberate dark
+// counterpart: any text that doesn't set its own explicit color (several
+// table headers/placeholder lines don't) would otherwise fall back to
+// whatever the terminal's own default foreground is, which on plenty of
+// terminals is a light color meant to read against a *dark* background and
+// would be nearly invisible against this light one.
+const ftxui::Color kAppBackground = ftxui::Color::RGB(235, 235, 235);
+const ftxui::Color kAppForeground = ftxui::Color::RGB(20, 20, 20);
+
+// window(panel_title(...), content), plus explicit bgcolor/color so every
+// individual panel (Connectors, Tasks, Agent Tools, Apps, Locations, Agent
+// Chat, App Log, Session/Provider/Model) paints its own background and
+// default text color - see kAppBackground's own comment for why this can't
+// just be left to whatever the terminal profile happens to default to.
+ftxui::Element panel(const std::string& title, ftxui::Element content)
+{
+	return ftxui::window(panel_title(title), std::move(content))
+		| ftxui::bgcolor(kAppBackground) | ftxui::color(kAppForeground);
+}
+
 // A reusable yes/no confirm popup for ftxui::Modal - a bordered, centered
 // box (Modal's own composition: `document, modal | clear_under | center` -
 // see ftxui/src/ftxui/component/modal.cpp) asking a yes/no question before
@@ -1188,10 +1216,33 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		push_chat_entry("info", "Switched to model '" + picked + "'.");
 	};
 
+	// Set only by session_dropdown's own on_change below (a genuine click or
+	// keyboard-select on the dropdown) - apply_session_menu_selection()
+	// below gates its resume-from-history logic entirely on this flag now,
+	// specifically because a *value comparison* (session_menu_selected's
+	// entry vs. current_session_id) turned out not to be a trustworthy proxy
+	// for "the user just picked something": ftxui::Dropdown's own OnRender()
+	// unconditionally clamps its bound selected index into
+	// [0, entries.size()) on every single render (see
+	// build/_deps/ftxui-src/src/ftxui/component/dropdown.cpp), silently
+	// overwriting any sentinel value (a -1 this code used to set on 'n' to
+	// suppress a resume) back to a real, in-range index within one frame -
+	// which made the old value-mismatch check fire and resume an old
+	// session's history right back into a chat panel 'n' had just cleared.
+	// RadioboxOption::on_change, by contrast, only fires from a real mouse
+	// click/keyboard select (see radiobox.cpp) - never from that clamp -
+	// so gating on it is immune to the same failure mode regardless of
+	// however state elsewhere in the TUI happens to shuffle session_menu_selected.
+	bool session_dropdown_user_picked = false;
+
 	// Session picker (top status line) - lets the user resume a previous
 	// session by clicking it instead of remembering/typing its id. Click to
 	// open, click an entry (or arrow keys + Enter) to switch.
-	Component session_dropdown = Dropdown(&session_menu_entries, &session_menu_selected);
+	DropdownOption session_dropdown_option;
+	session_dropdown_option.radiobox.entries = &session_menu_entries;
+	session_dropdown_option.radiobox.selected = &session_menu_selected;
+	session_dropdown_option.radiobox.on_change = [&]() { session_dropdown_user_picked = true; };
+	Component session_dropdown = Dropdown(session_dropdown_option);
 
 	// Pulls the dropdown's selection to match current_session_id - called on
 	// each poller tick (session_menu_entries was just refreshed from
@@ -1213,14 +1264,35 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		}
 	};
 
-	// Detects a user-driven session pick and resumes it - called on every
-	// render frame, same reasoning as apply_model_menu_selection (Dropdown
-	// has no on-change callback). Replaces the chat panel's contents with
-	// the picked session's history, same as the startup-resume path
-	// (parse_agent_history_for_resume) - the user is switching which
-	// conversation they're looking at, not appending one to the other.
+	// Re-queries the session list immediately (a direct host.* call, not
+	// waiting for the next ~500ms poller tick) - called right after this TUI
+	// itself creates or erases a session (a first message after 'n', or a
+	// confirmed 'e'), so the dropdown reflects that change deterministically
+	// instead of however long is left until the next ambient poll happens to
+	// land. Safe to call directly here since both call sites run on the UI
+	// thread, same thread session_menu_entries is otherwise only ever
+	// written from.
+	auto refresh_session_menu_now = [&]()
+	{
+		session_menu_entries = parse_json_string_array(host.build_agent_sessions_json(), "session_ids");
+		sync_session_menu_from_host();
+	};
+
+	// Resumes whatever session the user just clicked/keyboard-selected in
+	// the dropdown - called every render frame, but a no-op almost always
+	// since session_dropdown_user_picked only turns true for the one frame
+	// right after a genuine on_change (see its own comment above).
+	// Replaces the chat panel's contents with the picked session's history,
+	// same as the startup-resume path (parse_agent_history_for_resume) - the
+	// user is switching which conversation they're looking at, not
+	// appending one to the other.
 	auto apply_session_menu_selection = [&]()
 	{
+		if (!session_dropdown_user_picked)
+		{
+			return;
+		}
+		session_dropdown_user_picked = false;
 		if (session_menu_selected < 0 || session_menu_selected >= static_cast<int>(session_menu_entries.size()))
 		{
 			return;
@@ -1383,25 +1455,49 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// poller thread below), not derived from log_lines like tools_view/
 	// apps_view/log_view - this reflects current stored state, not a stream
 	// of past events.
+	// Keyed by a group-prefixed name (e.g. "sys:Desktop", "mem:my-project"),
+	// not by list index - locations/location entries are entirely re-parsed
+	// from JSON on every ~500ms poller tick (see the poller loop below),
+	// which would replace any bool-on-the-struct expanded flag with a fresh
+	// default every tick if it lived there instead. Names are stable across
+	// polls (known_locations is upserted by name, system_locations reflects
+	// fixed real-world spots like "Desktop"), so keying off the name here is
+	// what survives a poll refresh instead of collapsing every ~500ms.
+	std::set<std::string> expanded_locations;
+	std::vector<std::string> location_toggle_keys;
+	std::vector<Box> location_toggle_boxes;
+
 	Component locations_view = Renderer([&]() -> Element
 	{
 		Elements rows;
-		// One bullet per location: a short "* Name" line (bold, so it reads
-		// at a glance), then the real path indented on the line(s) below it -
-		// paragraph() (not text()) wraps a long path within the panel's width
-		// instead of overflowing off the right edge, matching every other
-		// panel in this file. Name first/small, path below/potentially much
-		// longer, rather than one "Name: path" line that gets unreadable the
-		// moment the path is long.
-		auto add_location_bullet = [&](const std::string& name, const std::string& path, Color name_color)
+		location_toggle_keys.clear();
+		const size_t total_locations = locations.system_locations.size() + locations.remembered.size();
+		location_toggle_boxes.assign(total_locations, Box());
+
+		// Collapsed by default (▶ Name), click to expand and reveal the real
+		// path below it (▼ Name) - same affordance as the Agent Chat panel's
+		// [THINKING]/[EXECUTION] entries, one line per location instead of
+		// every path always taking its own line whether you asked to see it
+		// or not.
+		auto add_location_row = [&](const std::string& key, const std::string& name, const std::string& path, Color name_color)
 		{
-			rows.push_back(text("* " + name) | bold | color(name_color));
-			rows.push_back(paragraph("  " + path) | dim);
+			const size_t index = location_toggle_keys.size();
+			location_toggle_keys.push_back(key);
+			const bool expanded = expanded_locations.count(key) != 0;
+			const std::string arrow = expanded ? "▼ " : "▶ ";
+			rows.push_back(text(arrow + name) | bold | color(name_color) | reflect(location_toggle_boxes[index]));
+			if (expanded)
+			{
+				// paragraph() (not text()) wraps a long path within the
+				// panel's width instead of overflowing off the right edge,
+				// matching every other panel in this file.
+				rows.push_back(paragraph("  " + path) | dim);
+			}
 		};
 
 		for (const LocationEntry& entry : locations.system_locations)
 		{
-			add_location_bullet(entry.name, entry.path, Color::White);
+			add_location_row("sys:" + entry.name, entry.name, entry.path, Color::White);
 		}
 		if (!locations.system_locations.empty())
 		{
@@ -1415,10 +1511,36 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		{
 			for (const LocationRow& location : locations.remembered)
 			{
-				add_location_bullet(location.name, location.resolved_path, Color::Cyan);
+				add_location_row("mem:" + location.name, location.name, location.resolved_path, Color::Cyan);
 			}
 		}
 		return vbox(rows) | yframe | flex;
+	});
+
+	// Mouse click on a location header toggles that entry's collapsed state -
+	// locations_view is a display-only Renderer with no children of its own
+	// to dispatch to, so it needs this CatchEvent to receive mouse events at
+	// all (see left_column below, which wires locations_view into the actual
+	// event-dispatch tree alongside connector_menu).
+	locations_view = CatchEvent(locations_view, [&](Event event) -> bool
+	{
+		if (!event.is_mouse() || event.mouse().button != Mouse::Left || event.mouse().motion != Mouse::Pressed)
+		{
+			return false;
+		}
+		for (size_t i = 0; i < location_toggle_boxes.size() && i < location_toggle_keys.size(); ++i)
+		{
+			if (!location_toggle_boxes[i].IsEmpty() && location_toggle_boxes[i].Contain(event.mouse().x, event.mouse().y))
+			{
+				const std::string& key = location_toggle_keys[i];
+				if (!expanded_locations.insert(key).second)
+				{
+					expanded_locations.erase(key);
+				}
+				return true;
+			}
+		}
+		return false;
 	});
 
 	// Mounted into right_column below (see "Phase 9" in ARCHITECTURE.md).
@@ -2247,16 +2369,23 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// single-child wrapper, so TakeFocus()/Focused() work the same as
 	// before despite the extra nesting the resizable-split layout
 	// introduces.
-	Component left_column = Renderer(connector_menu, [&]() -> Element
+	// locations_view added as a sibling (not just ->Render() below) so its
+	// click-to-expand CatchEvent actually receives mouse events; it's a
+	// zero-child Renderer+CatchEvent (see its own comment above) so it's
+	// never Focusable(), meaning connector_menu stays the sole focusable
+	// descendant of this pane despite the extra sibling - same reasoning as
+	// chat_log_view/log_view's own wiring above.
+	Component left_column_events = Container::Vertical({connector_menu, locations_view});
+	Component left_column = Renderer(left_column_events, [&]() -> Element
 	{
 		// All five panels share equal flex weight, so "Agent Tools" is
 		// exactly as tall as "Tasks" (and Connectors/Apps/Locations) rather
 		// than whatever FTXUI's default content-driven sizing would give it.
-		Element connectors_panel = window(panel_title(" Connectors  (l=launch, s=stop) "), connector_menu->Render()) | flex;
-		Element tasks_panel = window(panel_title(" Tasks "), tasks_view->Render()) | flex;
-		Element tools_panel = window(panel_title(" Agent Tools "), tools_view->Render()) | flex;
-		Element apps_panel = window(panel_title(" Apps "), apps_view->Render()) | flex;
-		Element locations_panel = window(panel_title(" Locations "), locations_view->Render()) | flex;
+		Element connectors_panel = panel(" Connectors  (l=launch, s=stop) ", connector_menu->Render()) | flex;
+		Element tasks_panel = panel(" Tasks ", tasks_view->Render()) | flex;
+		Element tools_panel = panel(" Agent Tools ", tools_view->Render()) | flex;
+		Element apps_panel = panel(" Apps ", apps_view->Render()) | flex;
+		Element locations_panel = panel(" Locations ", locations_view->Render()) | flex;
 		return vbox({ connectors_panel, tasks_panel, tools_panel, apps_panel, locations_panel });
 	});
 
@@ -2269,7 +2398,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	Component chat_column_events = Container::Vertical({chat_log_view, chat_input});
 	Component chat_column = Renderer(chat_column_events, [&]() -> Element
 	{
-		return window(panel_title(" Agent Chat  (Tab/Esc to leave, Enter to send) "),
+		return panel(" Agent Chat  (Tab/Esc to leave, Enter to send) ",
 			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() }));
 	});
 
@@ -2283,7 +2412,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// reasoning as chat_column wiring in chat_log_view above.
 	Component right_column = Renderer(log_view, [&]() -> Element
 	{
-		return window(panel_title(" App Log "), log_view->Render());
+		return panel(" App Log ", log_view->Render());
 	});
 
 	// Mouse-draggable panes: left column | chat (middle) | right column (App
@@ -2336,12 +2465,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// blew up these two lines to fill the whole screen instead.
 		return vbox({
 			text(status_line) | bold | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
-			window(panel_title(" Session / Provider / Model "),
+			panel(" Session / Provider / Model ",
 				hbox({ text("session: "), session_element, text(" | provider: "), provider_dropdown->Render(),
 					text(" | model: "), model_element })),
 			split->Render() | flex,
 			text(focus_hint) | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
-		});
+		}) | bgcolor(kAppBackground) | color(kAppForeground);
 	});
 
 	full_ui = CatchEvent(full_ui, [&](Event event) -> bool
@@ -2378,6 +2507,11 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				current_session_id = chat_work.session_id;
 				write_last_session_id(current_session_id);
 				chat_work.session_id.clear();
+				// A brand new session (e.g. the first message after 'n') now
+				// has at least one persisted message, so it belongs in the
+				// dropdown immediately - not up to ~500ms later, whenever the
+				// next ambient poller tick happens to land.
+				refresh_session_menu_now();
 			}
 			if (chat_work.has_pending_tool_call)
 			{
@@ -2496,17 +2630,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			pending_new_session = true;
 			current_session_id.clear();
 			chat_entries.clear();
-			// Without this, apply_session_menu_selection() (called every
-			// render frame, see its own comment above) sees the dropdown's
-			// still-stale session_menu_selected index - left over from
-			// whatever session was active before 'n' - pointing at a real
-			// entry that no longer matches the now-empty current_session_id,
-			// reads that mismatch as "the user picked a different session",
-			// and immediately resumes its full history back into the chat
-			// panel this call just cleared. -1 fails that guard's bounds
-			// check (session_menu_selected < 0), so nothing gets resumed
-			// until the user actually clicks an entry or a real new session
-			// id arrives and sync_session_menu_from_host re-derives it.
+			// Purely cosmetic now (apply_session_menu_selection() no longer
+			// resumes from an index-vs-current_session_id mismatch - see its
+			// own comment above): just clears the dropdown's displayed
+			// selection so it doesn't keep showing the old session's name
+			// while nothing is actually active. sync_session_menu_from_host
+			// re-derives the real index once a new session id exists.
 			session_menu_selected = -1;
 			push_chat_entry("info", "Starting a new session on your next message.");
 			return true;
@@ -2561,6 +2690,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 					current_session_id = net::extract_json_string_field(result, "new_session_id");
 					chat_entries.clear();
 				}
+				// Drops the erased session from the dropdown immediately -
+				// not up to ~500ms later, whenever the next ambient poller
+				// tick happens to land.
+				refresh_session_menu_now();
 				push_chat_entry("info", "Erased session '" + erased_session + "'.");
 			}
 			else
