@@ -11,6 +11,7 @@
 #include <ftxui/screen/terminal.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -31,6 +32,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+// wingdi.h's RGB(r,g,b) macro clobbers ftxui::Color::RGB(...) call sites
+// textually - ftxui/screen/color.hpp already #undefs it for its own header,
+// but that doesn't protect a later windows.h include re-defining it, so undo
+// it again here for the rest of this file.
+#undef RGB
 #endif
 
 namespace droidcli::cli {
@@ -345,6 +351,13 @@ struct ChatEntry {
 	std::string role; // "user" | "assistant" | "thinking" | "tool" | "error" | "info"
 	std::string text;
 	std::string timestamp;
+	// Collapsed by default (see chat_log_view's Collapsible-style rendering
+	// below) - only meaningful for "thinking"/"tool" roles, but every entry
+	// carries it rather than a role-keyed lookup, since it's one bool and
+	// this way it survives exactly as long as the entry itself does with no
+	// separate structure to keep in sync across chat_entries' several
+	// push_back/clear call sites.
+	bool expanded = false;
 
 	ChatEntry(std::string role_, std::string text_)
 		: role(std::move(role_)), text(std::move(text_)), timestamp(current_time_hms()) {}
@@ -869,14 +882,46 @@ ftxui::Component build_confirm_popup(
 	bool* show_flag)
 {
 	using namespace ftxui;
-	Component dialog = Renderer([title, message_fn]() -> Element
+
+	// True (not palette-remappable) white-on-black: named ANSI colors like
+	// Color::White are index 15, which plenty of terminal color schemes
+	// (Solarized, etc.) remap to a muted off-white - RGB(255,255,255) forces
+	// the actual color regardless of the user's terminal theme.
+	const Color kWhite = Color::RGB(255, 255, 255);
+	const Color kBlack = Color::RGB(0, 0, 0);
+
+	// A single-line label, not the library's default bordered/boxed look
+	// (ButtonOption::Animated() pads with an empty border, which reads as an
+	// oversized button) - just the text itself, colored via animated_colors
+	// so focus/hover still shows a red fill against the dialog's black
+	// background.
+	ButtonOption button_style;
+	button_style.transform = [](const EntryState& s) -> Element
+	{
+		Element label = text(s.label);
+		return s.focused ? label | bold : label;
+	};
+	button_style.animated_colors.background.Set(kBlack, Color::Red);
+	button_style.animated_colors.foreground.Set(kWhite, kWhite);
+	Component yes_button = Button("  Yes  ", [on_confirm, show_flag]
+	{
+		on_confirm();
+		*show_flag = false;
+	}, button_style);
+	Component no_button = Button("  No  ", [show_flag]
+	{
+		*show_flag = false;
+	}, button_style);
+	Component buttons = Container::Horizontal({yes_button, no_button});
+
+	Component dialog = Renderer(buttons, [title, message_fn, buttons, kWhite, kBlack]() -> Element
 	{
 		return window(text(" " + title + " ") | bold | color(Color::Red),
 			vbox({
-				paragraph(message_fn()) | color(Color::White),
+				paragraph(message_fn()) | color(kWhite),
 				text(""),
-				text("Y: confirm    N / Esc: cancel") | color(Color::White),
-			}) | size(WIDTH, GREATER_THAN, 44)) | bgcolor(Color::Black);
+				hbox({filler(), buttons->Render(), filler()}),
+			}) | size(WIDTH, GREATER_THAN, 44)) | bgcolor(kBlack);
 	});
 	return CatchEvent(dialog, [on_confirm, show_flag](Event event) -> bool
 	{
@@ -891,10 +936,12 @@ ftxui::Component build_confirm_popup(
 			*show_flag = false;
 			return true;
 		}
-		// Swallow everything else while the popup is open - a stray
-		// keypress must never fall through to whatever's underneath a
-		// confirm popup for a destructive action.
-		return true;
+		// Anything else (a mouse click on Yes/No, Tab between them, ...)
+		// falls through to the buttons container below rather than being
+		// swallowed - Modal() already routes every event exclusively to
+		// this popup while it's shown, so there is nothing else in the
+		// tree for an unhandled event to leak into.
+		return false;
 	});
 }
 
@@ -973,7 +1020,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	std::vector<std::string> chat_history;
 	int chat_history_cursor = -1;
 	std::string chat_history_draft;
-	bool agent_turn_in_flight = false;
+	// std::atomic, not a plain bool: read by the spinner-ticker thread below
+	// (see its own comment near the poller thread) in addition to the UI
+	// thread that's always the one setting it.
+	std::atomic<bool> agent_turn_in_flight{false};
 	// Set whenever an agent_turn()/agent_tool_decision() response pauses on
 	// a side-effecting tool call - see PendingToolApproval above.
 	PendingToolApproval pending_tool_approval;
@@ -1443,11 +1493,26 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return vbox(lines) | yframe | flex;
 	});
 
+	// One Box per chat entry, capturing the screen coordinates of a
+	// "[AGENT] [THINKING]"/"[AGENT] [EXECUTION]" header line so a later mouse
+	// click can be hit-tested against it (see chat_log_view's CatchEvent
+	// below) - the same box-capture-then-hit-test pattern FTXUI's own
+	// Collapsible uses internally via its Checkbox child. chat_log_view
+	// itself stays a plain rebuild-every-frame Renderer over chat_entries
+	// rather than a persistent Collapsible-per-entry component tree, since
+	// chat_entries is pushed to and cleared from several call sites across
+	// this function - keeping a second, parallel component list in sync at
+	// every one of them would be its own source of bugs. Resized fresh each
+	// render, piggybacking on the same index instead.
+	std::vector<Box> chat_toggle_boxes;
+
 	Component chat_log_view = Renderer([&]() -> Element
 	{
 		Elements lines;
-		for (const ChatEntry& entry : chat_entries)
+		chat_toggle_boxes.assign(chat_entries.size(), Box());
+		for (size_t i = 0; i < chat_entries.size(); ++i)
 		{
+			const ChatEntry& entry = chat_entries[i];
 			// paragraph() (not text()) wraps within the panel's width instead
 			// of overflowing off the right edge. Timestamp prefix matches the
 			// "[HH:MM:SS] " style already used by log_view/tools_view/apps_view.
@@ -1462,14 +1527,28 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			}
 			else if (entry.role == "thinking")
 			{
-				// Same green as a real assistant reply (it's the same agent,
-				// same turn) but dimmed - visibly distinct from the actual
-				// reply immediately below it, never mistaken for one.
-				lines.push_back(paragraph(ts_prefix + "[AGENT] [THINKING] " + entry.text) | dim | color(Color::Green));
+				// Collapsed by default (ChatEntry::expanded starts false),
+				// click the header to expand/collapse - same ▶/▼ affordance
+				// as FTXUI's own Collapsible component. Same green as a real
+				// assistant reply (it's the same agent, same turn) but
+				// dimmed - visibly distinct from the actual reply.
+				const std::string arrow = entry.expanded ? "▼ " : "▶ ";
+				lines.push_back(text(arrow + ts_prefix + "[AGENT] [THINKING]")
+					| dim | color(Color::Green) | reflect(chat_toggle_boxes[i]));
+				if (entry.expanded)
+				{
+					lines.push_back(paragraph(entry.text) | dim | color(Color::Green));
+				}
 			}
 			else if (entry.role == "tool")
 			{
-				lines.push_back(paragraph(ts_prefix + "[AGENT] [EXECUTION] " + entry.text) | dim | color(Color::Yellow));
+				const std::string arrow = entry.expanded ? "▼ " : "▶ ";
+				lines.push_back(text(arrow + ts_prefix + "[AGENT] [EXECUTION]")
+					| dim | color(Color::Yellow) | reflect(chat_toggle_boxes[i]));
+				if (entry.expanded)
+				{
+					lines.push_back(paragraph(entry.text) | dim | color(Color::Yellow));
+				}
 			}
 			else if (entry.role == "error")
 			{
@@ -1485,7 +1564,16 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		}
 		if (agent_turn_in_flight)
 		{
-			lines.push_back(paragraph("[AGENT] (thinking...)"));
+			// Spinner charset 2 - the classic rotating |/-\ - advances a frame
+			// off wall-clock time rather than a counter variable. The
+			// dedicated spinner_ticker thread below (not the main poller,
+			// which only redraws every ~500ms after a real host round trip)
+			// is what actually keeps this re-rendering smoothly every 80ms
+			// while a turn is in flight.
+			const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count();
+			const size_t spinner_frame = static_cast<size_t>((now_ms / 150) % 4);
+			lines.push_back(hbox({ text("[AGENT] "), spinner(2, spinner_frame) }));
 		}
 		if (lines.empty())
 		{
@@ -1499,6 +1587,28 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// still has everything.
 		lines.back() |= focus;
 		return vbox(lines) | yframe | flex;
+	});
+
+	// Mouse click on a [THINKING]/[EXECUTION] header toggles that entry's
+	// collapsed state - chat_log_view is a display-only Renderer with no
+	// children of its own to dispatch to, so it needs this CatchEvent to
+	// receive mouse events at all (see chat_column below, which wires
+	// chat_log_view into the actual event-dispatch tree alongside chat_input).
+	chat_log_view = CatchEvent(chat_log_view, [&](Event event) -> bool
+	{
+		if (!event.is_mouse() || event.mouse().button != Mouse::Left || event.mouse().motion != Mouse::Pressed)
+		{
+			return false;
+		}
+		for (size_t i = 0; i < chat_toggle_boxes.size() && i < chat_entries.size(); ++i)
+		{
+			if (!chat_toggle_boxes[i].IsEmpty() && chat_toggle_boxes[i].Contain(event.mouse().x, event.mouse().y))
+			{
+				chat_entries[i].expanded = !chat_entries[i].expanded;
+				return true;
+			}
+		}
+		return false;
 	});
 
 	ChatWork chat_work;
@@ -1977,7 +2087,14 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return vbox({ connectors_panel, tasks_panel, tools_panel, apps_panel, locations_panel });
 	});
 
-	Component chat_column = Renderer(chat_input, [&]() -> Element
+	// Both chat_log_view (mouse-only, for the collapse/expand toggle above)
+	// and chat_input need to be real event-dispatch children here, not just
+	// ->Render() calls inside the Renderer below - Renderer(component, fn)
+	// only forwards events to the one component passed to it, same reason
+	// the three top-line dropdowns are added as siblings of `split` further
+	// down instead of only appearing inside full_ui's own render function.
+	Component chat_column_events = Container::Vertical({chat_log_view, chat_input});
+	Component chat_column = Renderer(chat_column_events, [&]() -> Element
 	{
 		return window(panel_title(" Agent Chat  (Tab/Esc to leave, Enter to send) "),
 			vbox({ chat_log_view->Render() | flex, separator(), chat_input->Render() }));
@@ -2043,8 +2160,9 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// blew up these two lines to fill the whole screen instead.
 		return vbox({
 			text(status_line) | bold | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
-			hbox({ text("session: "), session_element, text(" | provider: "), provider_dropdown->Render(),
-				text(" | model: "), model_element }) | dim,
+			window(panel_title(" Session / Provider / Model "),
+				hbox({ text("session: "), session_element, text(" | provider: "), provider_dropdown->Render(),
+					text(" | model: "), model_element })),
 			split->Render() | flex,
 			text(focus_hint) | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
 		});
@@ -2202,6 +2320,18 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			pending_new_session = true;
 			current_session_id.clear();
 			chat_entries.clear();
+			// Without this, apply_session_menu_selection() (called every
+			// render frame, see its own comment above) sees the dropdown's
+			// still-stale session_menu_selected index - left over from
+			// whatever session was active before 'n' - pointing at a real
+			// entry that no longer matches the now-empty current_session_id,
+			// reads that mismatch as "the user picked a different session",
+			// and immediately resumes its full history back into the chat
+			// panel this call just cleared. -1 fails that guard's bounds
+			// check (session_menu_selected < 0), so nothing gets resumed
+			// until the user actually clicks an entry or a real new session
+			// id arrives and sync_session_menu_from_host re-derives it.
+			session_menu_selected = -1;
 			push_chat_entry("info", "Starting a new session on your next message.");
 			return true;
 		}
@@ -2345,6 +2475,26 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// below, so a try/catch around screen.Loop() would not protect this
 	// thread. Defense in depth: catch here too, log to stderr, and keep
 	// polling rather than letting one bad iteration kill the process.
+	// Dedicated fast redraw nudge for the "thinking" spinner - the poller
+	// below also posts Event::Custom, but only after a real round trip of
+	// host calls (connectors/tasks/log/ollama status/sessions) every 500ms,
+	// so the spinner rode along on that jittery, slow cadence and looked
+	// like it was stalling. This thread does no host I/O at all - it just
+	// posts a redraw every 80ms while agent_turn_in_flight is set, giving
+	// the spinner its own smooth, independent tick rate; while no turn is in
+	// flight it does nothing but sleep, so it costs nothing at idle.
+	std::thread spinner_ticker = droidcli::core::spawn("tui.spinner_ticker", [&]()
+	{
+		while (running_flag)
+		{
+			if (agent_turn_in_flight)
+			{
+				screen.PostEvent(Event::Custom);
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(80));
+		}
+	}, thread_event_sink);
+
 	std::thread poller = droidcli::core::spawn("tui.poller", [&]()
 	{
 		while (running_flag)
@@ -2414,6 +2564,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	if (poller.joinable())
 	{
 		poller.join();
+	}
+	if (spinner_ticker.joinable())
+	{
+		spinner_ticker.join();
 	}
 	// Must join before `screen` goes out of scope below - a still-running
 	// chat_worker calls screen.PostEvent() when it finishes, which would be

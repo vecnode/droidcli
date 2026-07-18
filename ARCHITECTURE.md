@@ -46,26 +46,6 @@ flowchart LR
 
 ---
 
-## Design goals
-
-- **Portability** — C++17, `droidcli::core::` value types only, no
-  engine/framework types leaking into public headers or core logic.
-- **Ground-Truth** — a claimed success is independently re-verified against
-  real, observable state (a re-read after write, a live process/registry
-  check) rather than trusted on a tool's own say-so.
-- **Testability** — CMake + unit tests run with no network, GPU, or GUI
-  required; command validation, JSON shapes, and connector/task state all
-  live in `src/` specifically so they can be exercised this way.
-- **Host Bridge** — hosts inject real transport/process/filesystem I/O into
-  core via `std::function` callbacks; core itself never touches a socket,
-  process, or window directly.
-
-**Rule of thumb:** if it touches a real socket, process, window, or the
-filesystem at runtime, it stays in the host. If it is pure state + parsing +
-validation + JSON, it belongs in core.
-
----
-
 ## Agent properties
 
 droidcli is a personal desktop assistant, not a dev/build tool, and not an
@@ -361,6 +341,7 @@ note below).
 | --- | --- |
 | `filesystem_tools` | `read_file`/`write_file`/`list_dir`/`stat_path`/`get_current_working_directory`/`which_executable`, `std::filesystem`-backed, no external dependency |
 | `ffmpeg_tool` | Resolves the ffmpeg binary and builds its argument list for transcode/convert/clip/extract/thumbnail work - delegates the actual process execution to `droidcli-infra`'s `command_runner` (`via_shell=false`, see "Windows execution ruleset") rather than calling `CreateProcess` itself |
+| `clipboard` | `read_clipboard`/`write_clipboard` agent tools, Win32 clipboard API-backed - a write is immediately read back (`verified_matches`) as the same ground-truth-verification pattern `write_file` applies |
 
 ### `droidcli-gateway`
 
@@ -738,8 +719,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Tests: `media_decode_test`, `net_handler_test`, `ollama_client_test`,
+Tests: `media_decode_test`, `net_handler_test`, `openai_compat_client_test`,
 `language_runtime_test`, `connector_test`, `task_queue_test`,
+`response_templates_test`, `path_guards_test`, `command_guards_test`,
 `model_provider_test`, `spawn_test`.
 
 On Windows the whole tree builds with **one MSVC runtime**
@@ -1031,80 +1013,3 @@ under the new design.
 | `ProcessManager` job/group tracking | `process_manager.cpp` | A Windows Job Object / POSIX process group per launch, so `stop()` kills the whole spawned tree, not just the top PID. |
 
 Product usage, HTTP tables, and env vars: repository root `[README.md](./README.md)`.
-
----
-
-## OpenClaude — a comparable open-source agent, for alignment purposes
-
-[OpenClaude](https://github.com/Gitlawb/openclaude) is a comparable
-open-source agent CLI (TypeScript/Bun+Node, `ink` terminal UI). The sketch
-below maps its query/tool loop against droidcli's own agent-turn loop,
-scoped to the Ollama path only, as a starting point for judging future
-design decisions - not a final design.
-
-The two sharpest divergences worth keeping in mind when this comparison
-comes up: droidcli is self-contained (new capabilities are native
-`DroidHost` methods, never an MCP client - see `AGENTS.md`) where OpenClaude
-consumes MCP servers directly; and droidcli's host **is** an always-on HTTP
-daemon with an in-process `TaskQueue`, where OpenClaude's `--bg` sessions
-are detached child processes with no persistent service underneath them.
-Both trace back to droidcli's own identity as a personal desktop assistant
-with direct machine control, not a coding agent working against
-MCP-extended tooling.
-
-```mermaid
-flowchart TB
-    subgraph droidcli["droidcli (this repo) - Ollama path"]
-        direction TB
-        DUser["User (TUI or HTTP client)"]
-        DHost["DroidHost::agent_turn"]
-        DLoop["classify_via_llm -> execute -> phrase\n(one decision per turn,\nplaceholder/desktop-path guards)"]
-        DOllama["ai::OpenAICompatProvider\n(chat + tool-calling, local Ollama)"]
-        DTools["execute_agent_tool\n(native DroidHost methods -\nfiles, apps, clipboard, connectors)"]
-        DVerify["Post-action ground-truth\nverification (stat_path/\nclipboard read-back)"]
-        DMem["MemoryStore (SQLite):\nsessions, command lessons,\nknown_locations"]
-
-        DUser --> DHost --> DLoop
-        DLoop --> DOllama
-        DOllama --> DLoop
-        DLoop --> DTools --> DVerify --> DLoop
-        DLoop --> DMem
-        DLoop --> DUser
-    end
-
-    subgraph openclaude["OpenClaude - Ollama path (for comparison only)"]
-        direction TB
-        OUser["User (ink TUI or --print/--bg)"]
-        OQuery["QueryEngine / Task / Tool"]
-        ORoute["integrations: routeMetadata +\nruntimeMetadata (Ollama descriptor,\nnative chat API, num_ctx=32768)"]
-        OOllama["Ollama (:11434, native chat API)"]
-        OTools["Tools: bash, file read/write/edit,\ngrep, glob, MCP servers"]
-        OSession["Session store:\nresume / continue / fork-session\n(~/.openclaude)"]
-
-        OUser --> OQuery
-        OQuery --> ORoute --> OOllama --> ORoute --> OQuery
-        OQuery --> OTools --> OQuery
-        OQuery --> OSession
-        OQuery --> OUser
-    end
-
-    OllamaShared[("Ollama\n(same local :11434 server,\nnative chat API in both)")]
-    DOllama -.shares runtime, not code.-> OllamaShared
-    OOllama -.shares runtime, not code.-> OllamaShared
-
-    style droidcli fill:#1e293b,color:#e2e8f0,stroke:#334155
-    style openclaude fill:#1e293b,color:#e2e8f0,stroke:#334155
-    style OllamaShared fill:#0f766e,color:#f0fdfa,stroke:#134e4a
-```
-
-Candidates worth a deliberate yes/no decision as this diagram keeps
-developing:
-
-1. ~~Make `kMaxHops` a configurable value~~ - moot: Classify -> Execute ->
-   Phrase replaced the hop budget entirely with one classification, one
-   execution, and at most one bounded auto-retry per turn - there's no
-   longer a multi-hop budget to make configurable.
-2. A conversation-branch operation on top of the existing `MemoryStore`
-   session model (mirroring `--fork-session`'s conversation-only branching,
-   not filesystem isolation) - low-risk, additive, no schema change beyond a
-   new "forked from" pointer. Not decided yet.
