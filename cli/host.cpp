@@ -3453,7 +3453,7 @@ core::String DroidHost::agent_turn(const core::String& body)
 	{
 		record_agent_message(session_id, ai::ChatRole::Assistant, decision.plain_reply_text);
 		append_app_log("chat", "out", "assistant: " + decision.plain_reply_text, true, session_id);
-		return build_final_agent_response(session_id, decision.plain_reply_text, {});
+		return build_final_agent_response(session_id, decision.plain_reply_text, {}, decision.thinking_text);
 	}
 
 	// LlmTool from here - run it through the exact same gate any decision
@@ -3462,13 +3462,15 @@ core::String DroidHost::agent_turn(const core::String& body)
 	core::String tool_result;
 	core::String pending_response;
 	if (!execute_decision_or_pause(
-		session_id, decision.tool_name, decision.arguments_json, actions, tool_result, pending_response))
+		session_id, decision.tool_name, decision.arguments_json, actions, tool_result, pending_response,
+		decision.thinking_text))
 	{
 		return pending_response;
 	}
 
 	return finish_turn_after_execution(
-		session_id, decision.tool_name, decision.arguments_json, tool_result, actions, tools, provider);
+		session_id, decision.tool_name, decision.arguments_json, tool_result, actions, tools, provider,
+		/*allow_retry=*/true, decision.thinking_text);
 }
 
 core::String DroidHost::agent_tool_decision(const core::String& body)
@@ -3616,6 +3618,12 @@ classify::TurnDecision DroidHost::classify_via_llm(
 	}
 
 	classify::TurnDecision decision;
+	// Carried through regardless of which kind this turns out to be (LlmTool
+	// or PlainReply) - the caller surfaces it in the turn's JSON response
+	// and the TUI renders it as its own chat line. Empty on TransportFailed,
+	// same as response.thinking_text itself (a response.parse_response call
+	// that never reached a successful body has nothing to extract).
+	decision.thinking_text = response.thinking_text;
 	if (!response.transport_ok || !response.http_success)
 	{
 		decision.kind = classify::TurnDecisionKind::TransportFailed;
@@ -3658,7 +3666,8 @@ bool DroidHost::execute_decision_or_pause(
 	const core::String& arguments_json,
 	core::Array<PendingToolActionRecord>& actions,
 	core::String& out_tool_result,
-	core::String& out_pending_response)
+	core::String& out_pending_response,
+	const core::String& thinking_text)
 {
 	ai::ToolCall call;
 	call.id = "classified-0";
@@ -3684,7 +3693,7 @@ bool DroidHost::execute_decision_or_pause(
 
 		std::lock_guard<std::mutex> lock(mutex_);
 		pending_tool_call_ = PendingAgentToolCall{true, session_id, call, actions};
-		out_pending_response = build_pending_tool_call_response(session_id, call, actions);
+		out_pending_response = build_pending_tool_call_response(session_id, call, actions, thinking_text);
 		return false;
 	}
 
@@ -3705,7 +3714,8 @@ core::String DroidHost::finish_turn_after_execution(
 	core::Array<PendingToolActionRecord> actions,
 	const core::Array<ai::ToolDefinition>& tools,
 	const ai::ModelProvider& provider,
-	const bool allow_retry)
+	const bool allow_retry,
+	const core::String& thinking_text)
 {
 	bool result_ok = false;
 	net::extract_json_bool_field(executed_result_json, "ok", result_ok);
@@ -3731,7 +3741,7 @@ core::String DroidHost::finish_turn_after_execution(
 			core::String retry_tool_result;
 			core::String retry_pending_response;
 			if (!execute_decision_or_pause(session_id, retry_decision.tool_name, retry_decision.arguments_json,
-				actions, retry_tool_result, retry_pending_response))
+				actions, retry_tool_result, retry_pending_response, retry_decision.thinking_text))
 			{
 				return retry_pending_response;
 			}
@@ -3755,7 +3765,7 @@ core::String DroidHost::finish_turn_after_execution(
 	const core::String assistant_text = phrase_result(final_tool_name, final_arguments_json, final_result_json, provider);
 	record_agent_message(session_id, ai::ChatRole::Assistant, assistant_text);
 	append_app_log("chat", "out", "assistant: " + assistant_text, true, session_id);
-	return build_final_agent_response(session_id, assistant_text, actions);
+	return build_final_agent_response(session_id, assistant_text, actions, thinking_text);
 }
 
 core::String DroidHost::phrase_result(
@@ -3827,11 +3837,16 @@ core::String DroidHost::generic_result_sentence(const core::String& result_json)
 core::String DroidHost::build_final_agent_response(
 	const core::String& session_id,
 	const core::String& assistant_text,
-	const core::Array<PendingToolActionRecord>& actions) const
+	const core::Array<PendingToolActionRecord>& actions,
+	const core::String& thinking_text) const
 {
 	std::ostringstream stream;
 	stream << '{';
 	stream << net::json_bool_field("ok", true) << ',';
+	if (!thinking_text.empty())
+	{
+		stream << net::json_string_field("thinking", thinking_text) << ',';
+	}
 	stream << net::json_string_field("assistant", assistant_text) << ',';
 	stream << net::json_string_field("session_id", session_id) << ',';
 	stream << "\"actions\":[";
@@ -3916,7 +3931,8 @@ core::String DroidHost::display_arguments_with_full_paths(const core::String& to
 core::String DroidHost::build_pending_tool_call_response(
 	const core::String& session_id,
 	const ai::ToolCall& call,
-	const core::Array<PendingToolActionRecord>& actions_so_far) const
+	const core::Array<PendingToolActionRecord>& actions_so_far,
+	const core::String& thinking_text) const
 {
 	// Visibility aid, not a gate (tool_call_requires_approval is still the
 	// only real one): run_command/run_ffmpeg is the single largest blast-
@@ -3938,6 +3954,10 @@ core::String DroidHost::build_pending_tool_call_response(
 	std::ostringstream stream;
 	stream << '{';
 	stream << net::json_bool_field("ok", true) << ',';
+	if (!thinking_text.empty())
+	{
+		stream << net::json_string_field("thinking", thinking_text) << ',';
+	}
 	stream << net::json_string_field("session_id", session_id) << ',';
 	stream << "\"pending_tool_call\":{";
 	stream << net::json_string_field("tool", call.name) << ',';

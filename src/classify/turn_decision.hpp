@@ -35,6 +35,14 @@ struct TurnDecision {
 	core::String plain_reply_text;
 	// Set iff kind is TransportFailed.
 	core::String error_message;
+	// The classification call's own chain-of-thought, when the provider
+	// returned one (see ProviderResponse::thinking_text) - set for LlmTool
+	// and PlainReply alike, whichever the classification call actually
+	// produced. Carried through to the turn's JSON response as a "thinking"
+	// field, shown by the TUI as its own chat line - never folded into
+	// plain_reply_text and never persisted into agent_transcript_. See "The
+	// LLM provider" in ARCHITECTURE.md.
+	core::String thinking_text;
 };
 
 } // namespace droidcli::classify
