@@ -1084,7 +1084,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	};
 
 	const std::string status_line =
-		"droidcli TUI  -  HTTP API on http://127.0.0.1:" + std::to_string(http_port);
+		"droidcli TUI";
 
 	auto rebuild_connector_entries = [&]()
 	{
@@ -1438,8 +1438,27 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	//    process launch/command execution is unmistakable even scrolling fast.
 	//  - watchdog/task/thread channels each get their own distinct color so
 	//    the high-volume chat channel doesn't drown them out visually.
+	// Same manual scroll + sticky-bottom scheme as chat_log_view above (see
+	// its own comment) - mouse wheel is the only thing that changes
+	// log_scroll_y, and it only re-pins to the bottom on new log lines if
+	// the user hadn't already scrolled away from it.
+	float log_scroll_y = 1.0f;
+	size_t log_last_seen_count = 0;
+	// Same reflect()-a-box-then-hit-test/drag scheme as chat_view_box above.
+	Box log_view_box;
+	CapturedMouse log_scrollbar_capture;
+
 	Component log_view = Renderer([&]() -> Element
 	{
+		if (log_lines.size() != log_last_seen_count)
+		{
+			if (log_scroll_y >= 0.999f)
+			{
+				log_scroll_y = 1.0f;
+			}
+			log_last_seen_count = log_lines.size();
+		}
+
 		// paragraph() (not text()) so a long log line wraps within the panel's
 		// width instead of overflowing off the right edge, matching chat_log_view.
 		Elements lines;
@@ -1486,11 +1505,71 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		{
 			lines.push_back(text("(no log entries yet)") | dim);
 		}
-		// Keep the view pinned to the newest entry, same rationale as
-		// chat_log_view below - new log lines otherwise append below the
-		// visible scroll area and the panel looks stalled.
-		lines.back() |= focus;
-		return vbox(lines) | yframe | flex;
+		// yframe (vertical-only), not frame - frame's x-axis freedom (needed
+		// for horizontal scrolling, which this panel doesn't use) lets a
+		// child's box grow to its own preferred width instead of staying
+		// clamped to the panel's actual width, which is exactly what was
+		// letting paragraph() lines overflow off the right edge instead of
+		// wrapping.
+		return vbox(lines) | vscroll_indicator | focusPositionRelative(0.f, log_scroll_y) | yframe | reflect(log_view_box) | flex;
+	});
+
+	// Mouse wheel scrolls log_scroll_y up/down; grabbing and dragging the
+	// vscroll_indicator bar scrolls directly to wherever it's dragged to -
+	// same logic as chat_log_view's CatchEvent above. log_view is otherwise
+	// a display-only Renderer with no children of its own to dispatch to,
+	// so it needs this CatchEvent to receive mouse events at all (see
+	// right_column below, which wires log_view into the actual
+	// event-dispatch tree).
+	log_view = CatchEvent(log_view, [&](Event event) -> bool
+	{
+		if (!event.is_mouse())
+		{
+			return false;
+		}
+		if (event.mouse().button == Mouse::WheelUp)
+		{
+			log_scroll_y = std::max(0.f, log_scroll_y - 0.05f);
+			return true;
+		}
+		if (event.mouse().button == Mouse::WheelDown)
+		{
+			log_scroll_y = std::min(1.f, log_scroll_y + 0.05f);
+			return true;
+		}
+
+		if (log_scrollbar_capture)
+		{
+			if (event.mouse().motion == Mouse::Released)
+			{
+				log_scrollbar_capture = nullptr;
+				return true;
+			}
+			const int height = log_view_box.y_max - log_view_box.y_min;
+			if (height > 0)
+			{
+				log_scroll_y = std::clamp(
+					static_cast<float>(event.mouse().y - log_view_box.y_min) / static_cast<float>(height), 0.f, 1.f);
+			}
+			return true;
+		}
+
+		if (event.mouse().button == Mouse::Left && event.mouse().motion == Mouse::Pressed
+			&& event.mouse().x == log_view_box.x_max && log_view_box.Contain(event.mouse().x, event.mouse().y))
+		{
+			log_scrollbar_capture = event.screen_->CaptureMouse();
+			if (log_scrollbar_capture)
+			{
+				const int height = log_view_box.y_max - log_view_box.y_min;
+				if (height > 0)
+				{
+					log_scroll_y = std::clamp(
+						static_cast<float>(event.mouse().y - log_view_box.y_min) / static_cast<float>(height), 0.f, 1.f);
+				}
+				return true;
+			}
+		}
+		return false;
 	});
 
 	// One Box per chat entry, capturing the screen coordinates of a
@@ -1506,8 +1585,39 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// render, piggybacking on the same index instead.
 	std::vector<Box> chat_toggle_boxes;
 
+	// Manual vertical scroll position (0 = top, 1 = bottom) driving
+	// focusPositionRelative below, same technique as FTXUI's own scrollbar
+	// example - not yframe's "auto-scroll to whichever line is marked
+	// focus", which had no way for the user to scroll up at all (mouse
+	// wheel below is the only thing that ever changes this). Starts at the
+	// bottom so the panel opens showing the latest messages, same as
+	// before. chat_last_seen_count is how "sticky bottom" is implemented:
+	// only re-pin to 1.0 when new entries arrive *and* the user was already
+	// at the bottom - if they've scrolled up to reread something, a new
+	// message streaming in shouldn't yank the view back down under them.
+	float chat_scroll_y = 1.0f;
+	size_t chat_last_seen_count = 0;
+	// The panel's own on-screen rectangle, captured via reflect() below -
+	// needed to turn a click/drag's absolute (x, y) into a relative
+	// position for grabbing the vscroll_indicator bar (see chat_log_view's
+	// CatchEvent). CapturedMouse keeps mouse events routed here exclusively
+	// for the rest of the drag, same pattern ftxui::Slider's own
+	// OnCapturedMouseEvent uses - without it, a fast drag whose pointer
+	// briefly leaves the scrollbar's one-column hit box would drop the drag.
+	Box chat_view_box;
+	CapturedMouse chat_scrollbar_capture;
+
 	Component chat_log_view = Renderer([&]() -> Element
 	{
+		if (chat_entries.size() != chat_last_seen_count)
+		{
+			if (chat_scroll_y >= 0.999f)
+			{
+				chat_scroll_y = 1.0f;
+			}
+			chat_last_seen_count = chat_entries.size();
+		}
+
 		Elements lines;
 		chat_toggle_boxes.assign(chat_entries.size(), Box());
 		for (size_t i = 0; i < chat_entries.size(); ++i)
@@ -1579,27 +1689,90 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		{
 			lines.push_back(paragraph("(no messages yet - type below and press Enter)"));
 		}
-		// Marking the last line as the frame's focused element makes yframe
-		// auto-scroll to keep it in view on every render - without this the
-		// scroll position stays wherever it last was (usually the top), so
-		// new messages append below the visible area and the panel looks
-		// stuck/empty even though chat_entries (never truncated, unbounded)
-		// still has everything.
-		lines.back() |= focus;
-		return vbox(lines) | yframe | flex;
+		// vscroll_indicator draws the actual scrollbar glyph down the right
+		// edge; focusPositionRelative(0, chat_scroll_y) | frame is what
+		// turns chat_scroll_y into an actual scrolled viewport over
+		// content that's taller than the panel - see the mouse-wheel
+		// CatchEvent below for the only thing that changes chat_scroll_y.
+		// yframe (vertical-only), not frame - see log_view's identical
+		// comment above for why frame's x-axis freedom was letting every
+		// paragraph()-wrapped line here (including the [THINKING]/
+		// [EXECUTION] entries' own expanded body text) overflow off the
+		// right edge instead of wrapping. The collapsed header line itself
+		// (arrow + "[AGENT] [THINKING]"/"[EXECUTION]") stays text(), not
+		// paragraph() - it's always one short, fixed-shape line that was
+		// never the source of the overflow, and text() keeps the
+		// click-to-toggle hit box a single exact line instead of however
+		// many a wrap happened to produce.
+		return vbox(lines) | vscroll_indicator | focusPositionRelative(0.f, chat_scroll_y) | yframe | reflect(chat_view_box) | flex;
 	});
 
 	// Mouse click on a [THINKING]/[EXECUTION] header toggles that entry's
-	// collapsed state - chat_log_view is a display-only Renderer with no
-	// children of its own to dispatch to, so it needs this CatchEvent to
-	// receive mouse events at all (see chat_column below, which wires
-	// chat_log_view into the actual event-dispatch tree alongside chat_input).
+	// collapsed state; mouse wheel scrolls chat_scroll_y up/down; grabbing
+	// and dragging the vscroll_indicator bar (the panel's rightmost column)
+	// scrolls directly to wherever it's dragged to. chat_log_view is a
+	// display-only Renderer with no children of its own to dispatch to, so
+	// it needs this CatchEvent to receive mouse events at all (see
+	// chat_column below, which wires chat_log_view into the actual
+	// event-dispatch tree alongside chat_input).
 	chat_log_view = CatchEvent(chat_log_view, [&](Event event) -> bool
 	{
-		if (!event.is_mouse() || event.mouse().button != Mouse::Left || event.mouse().motion != Mouse::Pressed)
+		if (!event.is_mouse())
 		{
 			return false;
 		}
+		if (event.mouse().button == Mouse::WheelUp)
+		{
+			chat_scroll_y = std::max(0.f, chat_scroll_y - 0.05f);
+			return true;
+		}
+		if (event.mouse().button == Mouse::WheelDown)
+		{
+			chat_scroll_y = std::min(1.f, chat_scroll_y + 0.05f);
+			return true;
+		}
+
+		// Once captured, every event reaching this handler belongs to the
+		// drag (regardless of which button/motion it reports) until
+		// Released - same as ftxui::Slider::OnCapturedMouseEvent.
+		if (chat_scrollbar_capture)
+		{
+			if (event.mouse().motion == Mouse::Released)
+			{
+				chat_scrollbar_capture = nullptr;
+				return true;
+			}
+			const int height = chat_view_box.y_max - chat_view_box.y_min;
+			if (height > 0)
+			{
+				chat_scroll_y = std::clamp(
+					static_cast<float>(event.mouse().y - chat_view_box.y_min) / static_cast<float>(height), 0.f, 1.f);
+			}
+			return true;
+		}
+
+		if (event.mouse().button != Mouse::Left || event.mouse().motion != Mouse::Pressed)
+		{
+			return false;
+		}
+
+		// Grabbing the scrollbar itself - vscroll_indicator always draws in
+		// the panel's rightmost column.
+		if (event.mouse().x == chat_view_box.x_max && chat_view_box.Contain(event.mouse().x, event.mouse().y))
+		{
+			chat_scrollbar_capture = event.screen_->CaptureMouse();
+			if (chat_scrollbar_capture)
+			{
+				const int height = chat_view_box.y_max - chat_view_box.y_min;
+				if (height > 0)
+				{
+					chat_scroll_y = std::clamp(
+						static_cast<float>(event.mouse().y - chat_view_box.y_min) / static_cast<float>(height), 0.f, 1.f);
+				}
+				return true;
+			}
+		}
+
 		for (size_t i = 0; i < chat_toggle_boxes.size() && i < chat_entries.size(); ++i)
 		{
 			if (!chat_toggle_boxes[i].IsEmpty() && chat_toggle_boxes[i].Contain(event.mouse().x, event.mouse().y))
@@ -2105,7 +2278,10 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// built but unmounted before the self-health/scheduler work (see "Phase
 	// 9" in ARCHITECTURE.md), which needed somewhere for that activity to
 	// actually be visible without a curl.
-	Component right_column = Renderer([&]() -> Element
+	// log_view passed in as the event-dispatch child (not just ->Render()
+	// below) so its mouse-wheel CatchEvent actually receives events - same
+	// reasoning as chat_column wiring in chat_log_view above.
+	Component right_column = Renderer(log_view, [&]() -> Element
 	{
 		return window(panel_title(" App Log "), log_view->Render());
 	});
