@@ -4047,6 +4047,46 @@ core::String DroidHost::build_agent_sessions_json() const
 	return stream.str();
 }
 
+core::String DroidHost::delete_agent_session_json(const core::String& body)
+{
+	const core::String requested_session_id = net::extract_json_string_field(body, "session_id");
+
+	core::String target_session_id;
+	core::String new_session_id;
+	bool ok = false;
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		target_session_id = requested_session_id.empty() ? current_session_id_ : requested_session_id;
+		ok = memory_store_.delete_session(target_session_id);
+		if (target_session_id == current_session_id_)
+		{
+			// Don't leave current_session_id_/agent_transcript_ pointing at
+			// history that no longer exists on disk - same reset agent_turn()'s
+			// "clear" field already does, just triggered here instead of
+			// waiting for the next message.
+			agent_transcript_.clear();
+			current_session_id_ = generate_session_id();
+			new_session_id = current_session_id_;
+		}
+	}
+
+	// Outside the lock above - append_app_log takes mutex_ itself
+	// (std::mutex isn't recursive), same discipline record_agent_message()
+	// already follows.
+	append_app_log("chat", "out", "deleted session " + target_session_id, ok);
+
+	std::ostringstream stream;
+	stream << '{';
+	stream << net::json_bool_field("ok", ok) << ',';
+	stream << net::json_string_field("session_id", target_session_id);
+	if (!new_session_id.empty())
+	{
+		stream << ',' << net::json_string_field("new_session_id", new_session_id);
+	}
+	stream << '}';
+	return stream.str();
+}
+
 void DroidHost::log_thread_event(const core::String& thread_name, const core::String& event)
 {
 	// A "threw: ..." event is the one case worth flagging as a failure in

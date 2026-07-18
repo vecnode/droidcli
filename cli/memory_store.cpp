@@ -178,6 +178,31 @@ core::Array<MemoryRecord> MemoryStore::load_session(const core::String& session_
 	return records;
 }
 
+bool MemoryStore::delete_session(const core::String& session_id)
+{
+	if (db_ == nullptr)
+	{
+		return false;
+	}
+
+	static const char* kDelete = "DELETE FROM memory_entries WHERE session_id = ?;";
+
+	sqlite3_stmt* statement = nullptr;
+	if (sqlite3_prepare_v2(db_, kDelete, -1, &statement, nullptr) != SQLITE_OK)
+	{
+		return false;
+	}
+
+	bool ok = bind_text(statement, 1, session_id);
+	if (ok)
+	{
+		ok = sqlite3_step(statement) == SQLITE_DONE;
+	}
+
+	sqlite3_finalize(statement);
+	return ok;
+}
+
 core::Array<core::String> MemoryStore::list_session_ids() const
 {
 	core::Array<core::String> session_ids;

@@ -519,6 +519,7 @@ over HTTP, so it never needs the token.
 | `GET` | `/api/agent/tools` `[auth]` | The agent's fixed tool set — `{"tools":[{"name":...,"description":...,"parameters":{...}}]}` |
 | `GET` | `/api/agent/history` `[auth]` | One session's persisted message history — `?session_id=...` (defaults to the current session), returns `{"session_id":"...","messages":[{"hop_index":N,"role":"...","content":"...","created_at":"..."}]}` |
 | `GET` | `/api/agent/sessions` `[auth]` | Every session id with persisted history, most recently active first — `{"current_session_id":"...","session_ids":[...]}` |
+| `POST` | `/api/agent/sessions/delete` `[auth]` | Permanently deletes one session's persisted history — body `{"session_id":"..."}` (empty/omitted deletes the current session). If the deleted session was active, immediately starts a fresh one (same reset `"clear":true` triggers) — returns `{"ok":bool,"session_id":"...","new_session_id":"..."}`, the last field only set when that happened |
 | `GET` | `/api/ollama/status` `[auth]` | Ollama text-gen endpoint status + model list |
 | `POST` | `/api/ollama/config` `[auth]` | Update Ollama model at runtime |
 | `GET` | `/api/ollama/setup-status` `[auth]` | Whether Ollama is installed/online, pulled models, configured-model status (drives the TUI's in-chat setup flow) |

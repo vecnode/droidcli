@@ -935,6 +935,17 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// session (old history stays in MemoryStore, just no longer active -
 	// same semantics as agent_turn()'s "clear" field).
 	bool pending_new_session = false;
+	// Drives the "erase session?" confirm popup (ftxui::Modal, see its
+	// construction below) - 'e' sets this true, the popup's own y/n/Escape
+	// handling sets it back false. delete_confirm_session_id is snapshotted
+	// at the moment 'e' is pressed, not re-read from current_session_id at
+	// confirm time, so the prompt and the actual deletion always agree on
+	// which session even if something else changed current_session_id while
+	// the popup was open (it can't be, today - the main handler stops
+	// receiving events while the modal is shown - but this keeps the two
+	// from being able to drift apart if that ever changes).
+	bool show_delete_confirm = false;
+	std::string delete_confirm_session_id;
 
 	// core::spawn (droidcli's zeroclaw-spawn analog - see ARCHITECTURE.md's
 	// "Spawn attribution") names each background thread and reports its
@@ -1006,6 +1017,19 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		}
 		return false;
 	});
+
+	// Provider picker (top status line) - "ollama" is the only entry.
+	// droidcli has exactly one ai::ModelProvider implementation
+	// (OpenAICompatProvider - see "The LLM provider" in ARCHITECTURE.md),
+	// speaking the OpenAI Chat Completions wire format against a local
+	// Ollama daemon by default; there is nothing else to switch to yet.
+	// Kept as a real Dropdown (not plain text) for visual/interaction
+	// consistency with the session/model pickers either side of it, and so
+	// a future second provider only needs provider_menu_entries to grow,
+	// not a new widget.
+	std::vector<std::string> provider_menu_entries = {"ollama"};
+	int provider_menu_selected = 0;
+	Component provider_dropdown = Dropdown(&provider_menu_entries, &provider_menu_selected);
 
 	// Model picker (top status line) - replaces the old chat-based "type 1,
 	// 2, 3... or a name" flow (still there for first-run onboarding before
@@ -1927,15 +1951,15 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	middle = ResizableSplitRight(right_column, middle, &right_pane_width);
 	Component split = ResizableSplitLeft(left_column, middle, &left_pane_width);
 
-	// model_dropdown/session_dropdown join split as sibling event-dispatch
-	// roots (not just a Render() call inside full_ui's fn below) so mouse
-	// clicks/keyboard actually reach them - Renderer(component, fn) only
-	// forwards events to the one Component passed in, and fn's manual
-	// Element composition doesn't change that. Tab still only cycles
-	// connector_menu <-> chat_input (see the hand-rolled Tab handler
-	// below); both dropdowns are mouse-only, same as the resizable split
+	// model_dropdown/session_dropdown/provider_dropdown join split as sibling
+	// event-dispatch roots (not just a Render() call inside full_ui's fn
+	// below) so mouse clicks/keyboard actually reach them - Renderer(component,
+	// fn) only forwards events to the one Component passed in, and fn's
+	// manual Element composition doesn't change that. Tab still only cycles
+	// connector_menu <-> chat_input (see the hand-rolled Tab handler below);
+	// all three dropdowns are mouse-only, same as the resizable split
 	// dividers already are.
-	Component top_ui = Container::Vertical({model_dropdown, session_dropdown, split});
+	Component top_ui = Container::Vertical({model_dropdown, session_dropdown, provider_dropdown, split});
 
 	Component full_ui = Renderer(top_ui, [&]() -> Element
 	{
@@ -1948,11 +1972,12 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 
 		const std::string focus_hint = chat_input->Focused()
 			? "chat focused - Tab/Esc: to connectors   Enter: send   Ctrl+C: quit anytime"
-			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   j/k/arrows: move   y: copy chat   drag borders to resize";
-		// One evenly-spaced row - "session: "/" | model: " as plain labels
-		// either side of a dropdown (or a plain-text fallback before either
-		// list has anything to show yet), so the whole line reads as one
-		// baseline instead of a label buried inside a longer sentence.
+			: "connectors focused - Tab: to chat   q: quit   l: launch   s: stop   n: new session   e: erase session   j/k/arrows: move   y: copy chat   drag borders to resize";
+		// One evenly-spaced row - "session: "/" | provider: "/" | model: "
+		// as plain labels either side of a dropdown (or a plain-text
+		// fallback before either list has anything to show yet), so the
+		// whole line reads as one baseline instead of a label buried inside
+		// a longer sentence.
 		Element session_element = session_menu_entries.empty()
 			? text(current_session_id.empty() ? "(none yet - starts on your first message)" : current_session_id)
 			: session_dropdown->Render();
@@ -1965,7 +1990,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		// blew up these two lines to fill the whole screen instead.
 		return vbox({
 			text(status_line) | bold | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
-			hbox({ text("session: "), session_element, text(" | model: "), model_element }) | dim,
+			hbox({ text("session: "), session_element, text(" | provider: "), provider_dropdown->Render(),
+				text(" | model: "), model_element }) | dim,
 			split->Render() | flex,
 			text(focus_hint) | bgcolor(Color::LightSkyBlue1) | color(Color::Black) | xflex,
 		});
@@ -2127,7 +2153,79 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			return true;
 		}
 
+		if (event == Event::e)
+		{
+			if (current_session_id.empty())
+			{
+				push_chat_entry("info", "No active session to erase yet.");
+				return true;
+			}
+			delete_confirm_session_id = current_session_id;
+			show_delete_confirm = true;
+			return true;
+		}
+
 		return false;
+	});
+
+	// "Erase session?" confirm popup (ftxui::Modal below) - a real
+	// centered, bordered box (Modal's own composition: `document, modal |
+	// clear_under | center` - see ftxui/src/ftxui/component/modal.cpp),
+	// not another line of chat text, since a destructive action deserves
+	// something the user can't miss or mistake for routine chat scrollback.
+	// Deliberately no mouse/button targets - y/n/Escape only, so there is
+	// no way to fat-finger a click-through confirm on a delete prompt.
+	Component delete_confirm_dialog = Renderer([&]() -> Element
+	{
+		return window(text(" Erase session? ") | bold | color(Color::Red),
+			vbox({
+				paragraph("Permanently delete all history for session '" + delete_confirm_session_id + "'?"),
+				text(""),
+				text("This cannot be undone.") | color(Color::Red),
+				text(""),
+				text("Y: erase    N / Esc: cancel") | dim,
+			}) | size(WIDTH, GREATER_THAN, 44)) | bgcolor(Color::Black);
+	});
+	delete_confirm_dialog = CatchEvent(delete_confirm_dialog, [&](Event event) -> bool
+	{
+		if (event == Event::y)
+		{
+			const std::string erased_session = delete_confirm_session_id;
+			std::ostringstream body;
+			body << '{' << net::json_string_field("session_id", erased_session) << '}';
+			const std::string result = host.delete_agent_session_json(body.str());
+			bool ok = false;
+			net::extract_json_bool_field(result, "ok", ok);
+			if (ok)
+			{
+				// erased_session should always equal current_session_id here
+				// (Modal stops the main handler from receiving events while
+				// this popup is shown, so nothing else could have changed it
+				// in between) - checked anyway rather than assumed, per this
+				// state's own declaration comment above.
+				if (erased_session == current_session_id)
+				{
+					current_session_id = net::extract_json_string_field(result, "new_session_id");
+					chat_entries.clear();
+				}
+				push_chat_entry("info", "Erased session '" + erased_session + "'.");
+			}
+			else
+			{
+				push_chat_entry("error", "Could not erase session '" + erased_session + "'.");
+			}
+			show_delete_confirm = false;
+			return true;
+		}
+		if (event == Event::n || event == Event::Escape)
+		{
+			show_delete_confirm = false;
+			return true;
+		}
+		// Swallow everything else while the popup is open - a stray
+		// keypress must never fall through to chat/connector shortcuts
+		// underneath a destructive-action confirm.
+		return true;
 	});
 
 	// Greet the user unconditionally the moment the TUI opens, then - if
@@ -2195,6 +2293,17 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		push_chat_entry("error", "internal error: unknown exception");
 	}
 
+	// ftxui::Modal(main, modal, show_modal) overlays delete_confirm_dialog
+	// centered on top of full_ui (dbox + clear_under + center - see
+	// ftxui/src/ftxui/component/modal.cpp) whenever show_delete_confirm is
+	// true, and routes every event exclusively to whichever of the two is
+	// currently showing - the main handler above genuinely cannot see a
+	// keypress while the popup is up, which is what makes swallowing
+	// everything else in delete_confirm_dialog's own CatchEvent redundant
+	// defense rather than the only thing stopping a stray key from leaking
+	// through.
+	Component app_root = Modal(full_ui, delete_confirm_dialog, &show_delete_confirm);
+
 	// An exception escaping a std::thread's entry function calls
 	// std::terminate() immediately - it does NOT propagate to poller.join()
 	// below, so a try/catch around screen.Loop() would not protect this
@@ -2254,7 +2363,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 	// screen. Catch, log, and fall through to the normal shutdown path.
 	try
 	{
-		screen.Loop(full_ui);
+		screen.Loop(app_root);
 	}
 	catch (const std::exception& e)
 	{
