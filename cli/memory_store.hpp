@@ -94,6 +94,14 @@ public:
 	// recently active first.
 	core::Array<core::String> list_session_ids() const;
 
+	// Permanently deletes every record for session_id (all of it - no
+	// "recently deleted" undo, matching this file's no-eviction-policy-but-
+	// no-soft-delete-either minimalism). No-op (returns false) if the store
+	// isn't open. Returns true even if session_id had no rows to begin
+	// with - "this session no longer has any history" is achieved either
+	// way, which is what a caller actually cares about.
+	bool delete_session(const core::String& session_id);
+
 	// Persists one CommandLesson (see its declaration above). No-op (returns
 	// false) if the store isn't open.
 	bool record_lesson(

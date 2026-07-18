@@ -429,6 +429,16 @@ public:
 	// {"session_ids":[...],"current_session_id":"..."}.
 	core::String build_agent_sessions_json() const;
 
+	// Permanently deletes one session's persisted history (POST
+	// /api/agent/sessions/delete) - body {"session_id":"..."}, empty/omitted
+	// deletes the current in-process session. If the deleted session was the
+	// active one, immediately starts a fresh session (generate_session_id(),
+	// same as agent_turn()'s "clear" field) rather than leaving
+	// current_session_id_ pointing at history that no longer exists.
+	// Returns {"ok":bool,"session_id":"...","new_session_id":"..."} -
+	// new_session_id is only set when this triggered that reset.
+	core::String delete_agent_session_json(const core::String& body);
+
 	// Public logging hook for TUI-local chat-pane entries that never round-trip
 	// through agent_turn()/agent_tool_decision() - approval-prompt replies,
 	// "Approved."/"Declined."/"Cancelled." banners, clipboard-copy feedback,

@@ -293,6 +293,11 @@ tools::CustomRouteFn make_droidcli_route_dispatch(DroidHost& host)
 			set_json(response, host.build_agent_sessions_json());
 			return true;
 		}
+		if (is_post && path == "/api/agent/sessions/delete")
+		{
+			set_json(response, host.delete_agent_session_json(request.body));
+			return true;
+		}
 
 		// Connectors.
 		if (is_get && path == "/api/connectors")
