@@ -45,7 +45,15 @@ int main()
 	droidcli::ai::LanguageTransportCallbacks transport;
 	transport.post_json = [](const std::string&, const std::string&, const droidcli::core::Array<std::string>&, int32_t& status_code_out, std::string& response_body_out) {
 		status_code_out = 200;
-		response_body_out = R"({"message":{"role":"assistant","content":"Hi from Ollama."},"done":true})";
+		// OpenAI Chat Completions shape - choices[0].message.content - not
+		// Ollama's native /api/chat shape ({"message":{...},"done":true}).
+		// LanguageRuntime::complete_turn parses every backend through
+		// ai::parse_openai_chat_response now (see AGENTS.md's "The LLM
+		// provider" section), matching openai_compat_client_test.cpp's own
+		// mocked responses.
+		response_body_out =
+			R"({"id":"chatcmpl-1","model":"llama3.2","choices":[{"index":0,)"
+			R"("message":{"role":"assistant","content":"Hi from Ollama."},"finish_reason":"stop"}]})";
 		return true;
 	};
 
