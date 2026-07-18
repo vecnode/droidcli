@@ -18,6 +18,7 @@
 #include <ctime>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <mutex>
 #include <sstream>
@@ -843,6 +844,58 @@ std::vector<ChatEntry> parse_agent_history_for_resume(const std::string& json)
 ftxui::Element panel_title(const std::string& label)
 {
 	return ftxui::text(label) | ftxui::bgcolor(ftxui::Color::LightSkyBlue1) | ftxui::color(ftxui::Color::Black);
+}
+
+// A reusable yes/no confirm popup for ftxui::Modal - a bordered, centered
+// box (Modal's own composition: `document, modal | clear_under | center` -
+// see ftxui/src/ftxui/component/modal.cpp) asking a yes/no question before
+// a destructive action, instead of hand-rolling a new bordered
+// Renderer+CatchEvent pair for each one that needs one.
+//
+// message_fn is called on every render (not captured once at construction
+// time), so the same popup instance can be reused across many invocations
+// of the same action - e.g. one popup built once for "erase session", shown
+// for session X, closed, then shown again for session Y - as long as the
+// caller updates whatever state message_fn reads before setting
+// *show_flag = true. on_confirm runs once if the user presses Y; N/Escape
+// just closes it, no callback needed since cancelling has never needed to
+// do anything beyond that. The popup only ever writes *show_flag = false
+// itself - opening it (show_flag = true, plus whatever state message_fn/
+// on_confirm read) is entirely the caller's job.
+ftxui::Component build_confirm_popup(
+	std::string title,
+	std::function<std::string()> message_fn,
+	std::function<void()> on_confirm,
+	bool* show_flag)
+{
+	using namespace ftxui;
+	Component dialog = Renderer([title, message_fn]() -> Element
+	{
+		return window(text(" " + title + " ") | bold | color(Color::Red),
+			vbox({
+				paragraph(message_fn()) | color(Color::White),
+				text(""),
+				text("Y: confirm    N / Esc: cancel") | color(Color::White),
+			}) | size(WIDTH, GREATER_THAN, 44)) | bgcolor(Color::Black);
+	});
+	return CatchEvent(dialog, [on_confirm, show_flag](Event event) -> bool
+	{
+		if (event == Event::y)
+		{
+			on_confirm();
+			*show_flag = false;
+			return true;
+		}
+		if (event == Event::n || event == Event::Escape)
+		{
+			*show_flag = false;
+			return true;
+		}
+		// Swallow everything else while the popup is open - a stray
+		// keypress must never fall through to whatever's underneath a
+		// confirm popup for a destructive action.
+		return true;
+	});
 }
 
 } // namespace
@@ -2168,27 +2221,21 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 		return false;
 	});
 
-	// "Erase session?" confirm popup (ftxui::Modal below) - a real
-	// centered, bordered box (Modal's own composition: `document, modal |
-	// clear_under | center` - see ftxui/src/ftxui/component/modal.cpp),
-	// not another line of chat text, since a destructive action deserves
-	// something the user can't miss or mistake for routine chat scrollback.
-	// Deliberately no mouse/button targets - y/n/Escape only, so there is
-	// no way to fat-finger a click-through confirm on a delete prompt.
-	Component delete_confirm_dialog = Renderer([&]() -> Element
-	{
-		return window(text(" Erase session? ") | bold | color(Color::Red),
-			vbox({
-				paragraph("Permanently delete all history for session '" + delete_confirm_session_id + "'?"),
-				text(""),
-				text("This cannot be undone.") | color(Color::Red),
-				text(""),
-				text("Y: erase    N / Esc: cancel") | dim,
-			}) | size(WIDTH, GREATER_THAN, 44)) | bgcolor(Color::Black);
-	});
-	delete_confirm_dialog = CatchEvent(delete_confirm_dialog, [&](Event event) -> bool
-	{
-		if (event == Event::y)
+	// "Erase session?" confirm popup - not another line of chat text, since
+	// a destructive action deserves something the user can't miss or
+	// mistake for routine chat scrollback. Built via the reusable
+	// build_confirm_popup() helper above (see its own comment) rather than
+	// a one-off Renderer+CatchEvent pair, so a future second confirmation
+	// (e.g. deleting a connector) is one more build_confirm_popup() call,
+	// not a second hand-rolled dialog.
+	Component delete_confirm_dialog = build_confirm_popup(
+		"Erase session?",
+		[&]() -> std::string
+		{
+			return "Permanently delete all history for session '" + delete_confirm_session_id
+				+ "'? This cannot be undone.";
+		},
+		[&]()
 		{
 			const std::string erased_session = delete_confirm_session_id;
 			std::ostringstream body;
@@ -2201,8 +2248,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 				// erased_session should always equal current_session_id here
 				// (Modal stops the main handler from receiving events while
 				// this popup is shown, so nothing else could have changed it
-				// in between) - checked anyway rather than assumed, per this
-				// state's own declaration comment above.
+				// in between) - checked anyway rather than assumed, per
+				// show_delete_confirm's own declaration comment above.
 				if (erased_session == current_session_id)
 				{
 					current_session_id = net::extract_json_string_field(result, "new_session_id");
@@ -2214,19 +2261,8 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			{
 				push_chat_entry("error", "Could not erase session '" + erased_session + "'.");
 			}
-			show_delete_confirm = false;
-			return true;
-		}
-		if (event == Event::n || event == Event::Escape)
-		{
-			show_delete_confirm = false;
-			return true;
-		}
-		// Swallow everything else while the popup is open - a stray
-		// keypress must never fall through to chat/connector shortcuts
-		// underneath a destructive-action confirm.
-		return true;
-	});
+		},
+		&show_delete_confirm);
 
 	// Greet the user unconditionally the moment the TUI opens, then - if
 	// Ollama isn't ready yet - follow up with the same prompt
