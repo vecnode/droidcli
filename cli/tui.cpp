@@ -363,7 +363,7 @@ std::string format_chat_transcript(const std::vector<ChatEntry>& entries)
 		}
 		else if (entry.role == "tool")
 		{
-			stream << ts_prefix << "  " << entry.text << "\n";
+			stream << ts_prefix << "[AGENT] [EXECUTION] " << entry.text << "\n";
 		}
 		else if (entry.role == "error")
 		{
@@ -1242,7 +1242,7 @@ int run_tui(DroidHost& host, int http_port, volatile bool& running_flag)
 			}
 			else if (entry.role == "tool")
 			{
-				lines.push_back(paragraph(ts_prefix + "  " + entry.text) | dim | color(Color::Yellow));
+				lines.push_back(paragraph(ts_prefix + "[AGENT] [EXECUTION] " + entry.text) | dim | color(Color::Yellow));
 			}
 			else if (entry.role == "error")
 			{
